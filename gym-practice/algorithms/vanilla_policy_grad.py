@@ -5,9 +5,8 @@ from mlx.core import linalg as la
 from rich.pretty import pprint
 
 # Create our training environment - a cart with a pole that needs balancing
-env = gym.make("CartPole-v1",
-                # render_mode="human",
-                max_episode_steps=5)
+env = gym.make("CartPole-v1", max_episode_steps=100)
+eval_env = gym.make("CartPole-v1", render_mode="human")
 
 # Reset environment to start a new episode
 observation, info = env.reset()
@@ -20,7 +19,6 @@ pprint(env.observation_space)
 
 # Example output: [ 0.01234567 -0.00987654  0.02345678  0.01456789]
 # [cart_position, cart_velocity, pole_angle, pole_angular_velocity]
-
 
 # Tiny linear net: 4 inputs -> hidden (16) -> 2 action logits
 # Weights initialized with simple random values
@@ -54,91 +52,151 @@ class CategoricalDistribution:
         log_prob = logits - mx.logsumexp(logits)
         # probs = mx.exp(log_softmax)
         return log_prob[action]
+    
+    def sample(self, logits):
+        probs = mx.exp(logits - mx.logsumexp(logits))
+        cdf = mx.zeros_like(probs)
+        cumsum = 0
+        for i in range(len(probs)):
+            cumsum += probs[i]
+            cdf[i] = cumsum
+        random_val = mx.random.uniform(0, 1)
 
-    def get_action(self, observation):
-        """Get argmax action from observation (array or mx.array)"""
+        # Binary search the index (or just linear for small logits)
+        i = 0
+        while random_val > cdf[i]:
+            i+=1
+
+        return i
+
+    def get_action(self, observation, sample=True):
+        """Sample action for training, argmax action for evaluation."""
         obs = mx.asarray(observation, dtype=mx.float32)
         logits = self.net.forward(obs)
-        return int(mx.argmax(logits))
+        if sample:
+            # int(mx.random.categorical(logits).item())
+            return self.sample(logits)
+        return int(mx.argmax(logits).item())
 
 # Initialize the network and start an episode
 net = TinyLinearNet()
+mx.eval(net.params)
 print("================")
 print("Using LinearNet:")
 print(net)
 print("================")
 
 lr = 0.01
-episode_over = False
-total_reward = 0
-trajectory = []
+num_epochs = 10
+num_trajectories = 10
 policy = CategoricalDistribution(net)
-
-discount_factor = 0.99
+discount_factor = 0.9
 gamma = lambda t: discount_factor ** t
 
-while not episode_over:
-    # save current state
-    state = observation
-
-    # Choose an action using the tiny net (simulates a deterministic policy)
-    action = policy.get_action(observation)
-    # log_prob_action = policy.log_prob_action(action, observation)
-
-    # Take the action and see what happens
-    observation, reward, terminated, truncated, info = env.step(action)
-
-    # reward: +1 for each step the pole stays upright
-    # terminated: True if pole falls too far (agent failed)
-    # truncated: True if we hit the time limit (500 steps)
-    
-    # given state, policy produced action with probability that received reward
-    trajectory.append([state, action, reward])
-
-    total_reward += reward
-    episode_over = terminated or truncated
-
-# Compute loss = \grad_theta log_prob(a | s) * return
-# Sum weighted reward within trajectory
-# Sum batch of trajectories
-
-# Accumulate rewards into return for the trajectory
-discounted_return = sum(gamma(i) * t[-1] for i, t in enumerate(trajectory))
-print(f"Discounted Return: {discounted_return}")
-
+# Setting the params in net allows the gradients
+# to be recorded by autograd
 def loss_fn(params, action, state):
     policy.net.update(params)
     return policy.log_prob_action(action, state)
 
 policy_grad_fn = mx.value_and_grad(loss_fn)
 
-# policy_grad accumulates internally
-policy_grad = [0.0] * len(net.params)
-for state, action, reward in trajectory:
-    # gradient wrt theta computed
-    action = mx.array(action)
-    state = mx.array(state)
-    log_prob, policy_grad_t = policy_grad_fn(policy.net.params, action=action, state=state)
+
+# First evaluation pass
+observation, info = eval_env.reset()
+episode_over = False
+initial_reward = 0
+while not episode_over:
+    action = policy.get_action(observation, sample=False)
+    observation, reward, terminated, truncated, info = eval_env.step(action)
+    initial_reward += reward
+    episode_over = terminated or truncated
+print(f"Initial reward: {initial_reward}")
+
+for epoch in range(num_epochs):
     
-    # grad * return
-    policy_grad = [(p + pt) * discounted_return for p,pt in zip(policy_grad, policy_grad_t)]
+    batch_trajectories = []
     
-    # Logging only
-    grad_norms = mx.array([la.norm(p) for p in policy_grad])
-    print(f"Log Prob: {log_prob:.4f} - Policy Grad Norm: {mx.mean(grad_norms):.3f}")
+    for i in range(num_trajectories):
+        observation, info = env.reset()
+        total_reward = 0
+        trajectory = []
+        episode_over = False
 
-policy_grad = [p * discounted_return for p in policy_grad]
+        while not episode_over:
+            # save current state
+            state = observation
 
-# One gradient ascent step on the parameters
-param_norms = [f"{la.norm(p).item():2f}" for p in policy.net.params]
-print(f"Before Param Norms: {param_norms}")
+            # Choose an action using the tiny net (simulates a deterministic policy)
+            action = policy.get_action(observation)
+            # log_prob_action = policy.log_prob_action(action, observation)
 
-for p, grad in zip(policy.net.params, policy_grad):
-    p += lr * grad
+            # Take the action and see what happens
+            observation, reward, terminated, truncated, info = env.step(action)
 
+            # reward: +1 for each step the pole stays upright
+            # terminated: True if pole falls too far (agent failed)
+            # truncated: True if we hit the time limit (500 steps)
+            
+            # given state, policy produced action with probability that received reward
+            trajectory.append([state, action, reward])
 
-param_norms = [f"{la.norm(p).item():2f}" for p in policy.net.params]
-print(f"After Param Norms: {param_norms}")
+            total_reward += reward
+            episode_over = terminated or truncated
 
-print(f"Episode finished! Total reward: {total_reward}")
+        # print(f"Episode finished! Total reward: {total_reward}")
+        batch_trajectories.append(trajectory)
+        
+    # Aggregate batch of trajectories
+    policy_grad = [mx.zeros_like(p) for p in net.params]
+    batch_steps = 0
+
+    for trajectory in batch_trajectories:
+        discounted_return = sum(gamma(i) * t[-1] for i, t in enumerate(trajectory))
+        avg_log_prob = 0.0
+
+        for (state, action, reward) in trajectory:
+            action = mx.array(action)
+            state = mx.asarray(state, dtype=mx.float32)
+
+            log_prob_t, policy_grad_t = policy_grad_fn(policy.net.params, action=action, state=state)
+            avg_log_prob += float(log_prob_t.item())
+
+            # Correct accumulation: add grad_t weighted by return.
+            policy_grad = [p + (pt * discounted_return) for p, pt in zip(policy_grad, policy_grad_t)]
+            batch_steps += 1
+
+        grad_norms = mx.array([la.norm(p) for p in policy_grad])
+        print(
+            f"Discounted Return: {discounted_return:2f} - Log Prob: {avg_log_prob / len(trajectory):.4f} - Policy Grad Norm: {mx.mean(grad_norms):.3f}"
+        )
+
+    # Approximate expectation via sample mean over sampled timesteps.
+    n = max(batch_steps, 1) # num_trajectories
+    policy_grad = [p / n for p in policy_grad]
+
+    # One gradient ascent step on the parameters
+    param_norms = [f"{la.norm(p).item():2f}" for p in policy.net.params]
+    print(f"Before Param Norms: {param_norms}")
+
+    for p, grad in zip(policy.net.params, policy_grad):
+        p += lr * grad
+    param_norms = [f"{la.norm(p).item():2f}" for p in policy.net.params]
+    print(f"After Param Norms: {param_norms}")
+    print(f"Epoch {epoch + 1} complete...")
+
 env.close()
+
+# Final evaluation pass
+observation, info = eval_env.reset()
+episode_over = False
+total_reward = 0
+while not episode_over:
+    action = policy.get_action(observation, sample=False)
+    observation, reward, terminated, truncated, info = eval_env.step(action)
+    total_reward += reward
+    episode_over = terminated or truncated
+
+print(terminated, truncated, info)
+print(f"Episode finished! Total reward: {total_reward} - Initial reward was {initial_reward}")
+eval_env.close()
