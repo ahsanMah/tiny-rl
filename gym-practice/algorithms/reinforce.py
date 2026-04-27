@@ -24,7 +24,7 @@ pprint(env.observation_space)
 # Tiny linear net: 4 inputs -> hidden (16) -> 2 action logits
 # Weights initialized with simple random values
 class TinyLinearNet:
-    def __init__(self, input_dim=4, hidden_dim=16, output_dim=2):
+    def __init__(self, input_dim=4, hidden_dim=32, output_dim=2):
         self.W1 = mx.random.normal((input_dim, hidden_dim)) * 0.1
         self.b1 = mx.zeros(hidden_dim)
         self.W2 = mx.random.normal((hidden_dim, output_dim)) * 0.1
@@ -85,11 +85,11 @@ print("Using LinearNet:")
 print(net)
 print("================")
 
-lr = 0.005
-num_epochs = 10
+lr = 0.01
+num_epochs = 20
 num_trajectories = 50
 policy = CategoricalDistribution(net)
-discount_factor = 0.99
+discount_factor = 0.9
 gamma = lambda t: discount_factor ** t
 
 # Setting the params in net allows the gradients
@@ -106,10 +106,10 @@ def value_loss_fn(params, state, reward):
 
 def train_value_fn(batch_trajectories):
 
-    grad_theta = [mx.zeros_like(p) for p in value_fn.params]
     step = 0
     for trajectory, rewards in batch_trajectories:
         avg_loss = 0.0
+        grad_theta = [mx.zeros_like(p) for p in value_fn.params]
         # we update value_fn for each (state, reward) pair
         for t, r in zip(trajectory, rewards):
             state = t[0]
@@ -123,7 +123,7 @@ def train_value_fn(batch_trajectories):
             p -= lr * grad
     
         avg_loss /= len(trajectory)
-        if step % 5 == 0:
+        if step % 10 == 0:
             print(f"Value Function - Step: {step} - Loss: {avg_loss:.4f}")
         step += 1
 
@@ -145,6 +145,7 @@ print(f"Initial reward: {initial_reward}")
 for epoch in range(num_epochs):
     
     batch_trajectories = []
+    episode_returns = []
     
     for i in range(num_trajectories):
         observation, info = env.reset()
@@ -172,14 +173,31 @@ for epoch in range(num_epochs):
 
             total_reward += reward
             episode_over = terminated or truncated
+        
+        discounted_rewards = [gamma(i) * traj[-1] for i, traj in enumerate(trajectory)]
+        episode_returns.append(sum(discounted_rewards))
 
-        discounted_rewards = [gamma(i) * t[-1] for i, t in enumerate(trajectory)]
-        reward_to_go = mx.array(discounted_rewards)
-
+        # this produces gamma^(\tau - t)
+        # so each action's reward is its discounted future from 0 to end
+        rewards = [t[-1] for t in trajectory]
+        unbiased_reward_to_go = mx.asarray(rewards)
+        
         # each time point is accumulation of *future* rewards only
-        # thus accum in reverse
         for i in range(len(trajectory)-2, -1, -1):
-            reward_to_go[i] += reward_to_go[i+1]
+            # r[0] = r[0] + gamma(r[1] + gamma(r[2] + gamma r[3]))
+            # r[0] = gamma(0)r[0] + gamma(1)r[1] + gamma(2)r[2] + gamma(3)r[3]
+            unbiased_reward_to_go[i] += gamma(1) * unbiased_reward_to_go[i+1]
+        reward_to_go = mx.array(unbiased_reward_to_go)
+
+        # Above should be equivalent to for loop below
+        # reward_to_go = []
+        # for i in range(len(trajectory)):
+        #     reward = 0
+        #     for j in range(i, len(trajectory)):
+        #         r = trajectory[j][-1]
+        #         reward += gamma(j-i) * r
+        #     reward_to_go.append(reward)
+
 
         batch_trajectories.append((trajectory, reward_to_go))
     
@@ -190,14 +208,13 @@ for epoch in range(num_epochs):
     policy_grad = [mx.zeros_like(p) for p in net.params]
     batch_steps = 0
     avg_grad_norms = 0.0
-    avg_discounted_return = 0.0
     avg_log_prob = 0.0
 
     for (trajectory, reward_to_go) in batch_trajectories:
 
         log_prob = 0.0
 
-        for (state, action, _), reward in zip(trajectory, reward_to_go):
+        for (state, action, _return), reward in zip(trajectory, reward_to_go):
             action = mx.array(action)
             state = mx.asarray(state, dtype=mx.float32)
 
@@ -215,15 +232,17 @@ for epoch in range(num_epochs):
             batch_steps += 1
 
         avg_grad_norms += mx.array([la.norm(p) for p in policy_grad])
-        avg_discounted_return += sum(discounted_rewards)
         avg_log_prob += log_prob / len(trajectory)
 
     avg_grad_norms /= num_trajectories
-    avg_discounted_return /= num_trajectories
     avg_log_prob /= num_trajectories
 
+    episode_returns = mx.asarray(episode_returns)
+    mu = episode_returns.mean().item()
+    std = episode_returns.std().item()
+
     print(
-        f"Avg Discounted Return: {avg_discounted_return:2f} - Log Prob: {avg_log_prob / len(trajectory):.4f} - Policy Grad Norm: {mx.mean(avg_grad_norms):.3f}"
+        f"Epoch {epoch+1}: Mean Return: {mu:.2f} +/- {std:.2f} - Log Prob: {avg_log_prob / len(trajectory):.4f} - Policy Grad Norm: {mx.mean(avg_grad_norms):.3f}"
     )
 
     n = num_trajectories # max(batch_steps, 1) 
@@ -233,18 +252,15 @@ for epoch in range(num_epochs):
         policy_grad[i] /= n
         
         # Normalize the grad norm
-        grad_norm = la.norm(policy_grad[i])
-        policy_grad[i] /= grad_norm
+        # grad_norm = la.norm(policy_grad[i])
+        # policy_grad[i] /= grad_norm
 
     # One gradient ascent step on the parameters
-    param_norms = [f"{la.norm(p).item():2f}" for p in policy.net.params]
-    print(f"Before Param Norms: {param_norms}")
-
     for p, grad in zip(policy.net.params, policy_grad):
         p += lr * grad
+
     param_norms = [f"{la.norm(p).item():2f}" for p in policy.net.params]
-    print(f"After Param Norms: {param_norms}")
-    print(f"Epoch {epoch + 1} complete...")
+    # print(f"Epoch {epoch + 1} complete...")
 
 env.close()
 
