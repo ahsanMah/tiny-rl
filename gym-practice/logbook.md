@@ -2,6 +2,15 @@
 
 Documented below are my general findings from implementing the algorithms.
 
+## 04/26 - `reinforce.py`
+
+- Implemented reward-to-go as simple cumsum in reverse
+- Noticed that `max_episode_steps=100` gave results same as vanilla but bumping to 200 no longer causes instabilities
+- Normalizing the gradient norm helps
+- Interestingly when the initial state is good, we cant seem to build on it
+    - The model is always worse after training
+    - e.g. seed=4321 the initial reward is 60+ but ends near the 10s
+
 ## 04/26 - `vanilla_policy_grad.py`
 
 - Implemented barebones, full return (not reward-to-go) policy gradient
@@ -15,3 +24,4 @@ Documented below are my general findings from implementing the algorithms.
     - `(p + pt) * discounted_return` --> `p + (pt * discounted_return)`
     - Luckily monitoring the gradient norms showed me the explosions when increasing steps
 - Increasing the number of trajectories in a batch does not improve the convergence much
+- Choosing 0.9 as a decent discount factor

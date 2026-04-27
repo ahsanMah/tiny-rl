@@ -1,11 +1,12 @@
 import gymnasium as gym
 import mlx.core as mx
-import mlx.nn as nn
 from mlx.core import linalg as la
 from rich.pretty import pprint
 
+# mx.random.seed(4321)
+
 # Create our training environment - a cart with a pole that needs balancing
-env = gym.make("CartPole-v1", max_episode_steps=100)
+env = gym.make("CartPole-v1", max_episode_steps=500)
 eval_env = gym.make("CartPole-v1", render_mode="human")
 
 # Reset environment to start a new episode
@@ -55,11 +56,7 @@ class CategoricalDistribution:
     
     def sample(self, logits):
         probs = mx.exp(logits - mx.logsumexp(logits))
-        cdf = mx.zeros_like(probs)
-        cumsum = 0
-        for i in range(len(probs)):
-            cumsum += probs[i]
-            cdf[i] = cumsum
+        cdf = mx.cumsum(probs)
         random_val = mx.random.uniform(0, 1)
 
         # Binary search the index (or just linear for small logits)
@@ -87,7 +84,7 @@ print(net)
 print("================")
 
 lr = 0.01
-num_epochs = 10
+num_epochs = 20
 num_trajectories = 10
 policy = CategoricalDistribution(net)
 discount_factor = 0.99
@@ -192,9 +189,15 @@ for epoch in range(num_epochs):
         f"Avg Discounted Return: {avg_discounted_return:2f} - Log Prob: {avg_log_prob / len(trajectory):.4f} - Policy Grad Norm: {mx.mean(avg_grad_norms):.3f}"
     )
 
-    # Approximate expectation via sample mean over sampled timesteps.
-    n =  num_trajectories #max(batch_steps, 1) 
-    policy_grad = [p / n for p in policy_grad]
+    n = num_trajectories # max(batch_steps, 1) 
+    
+    for i in range(len(policy_grad)):
+        # Approximate expectation via sample mean over sampled timesteps.
+        policy_grad[i] /= n
+        
+        # Normalize the grad norm
+        grad_norm = la.norm(policy_grad[i])
+        policy_grad[i] /= grad_norm
 
     # One gradient ascent step on the parameters
     param_norms = [f"{la.norm(p).item():2f}" for p in policy.net.params]
