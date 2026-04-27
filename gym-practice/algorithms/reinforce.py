@@ -75,19 +75,21 @@ class CategoricalDistribution:
             return self.sample(logits)
         return int(mx.argmax(logits).item())
 
-# Initialize the network and start an episode
+# Initialize the networks and start an episode
 net = TinyLinearNet()
+value_fn = TinyLinearNet(input_dim=4, output_dim=1)
 mx.eval(net.params)
+mx.eval(value_fn.params)
 print("================")
 print("Using LinearNet:")
 print(net)
 print("================")
 
-lr = 0.01
-num_epochs = 20
-num_trajectories = 10
+lr = 0.002
+num_epochs = 10
+num_trajectories = 25
 policy = CategoricalDistribution(net)
-discount_factor = 0.99
+discount_factor = 0.95
 gamma = lambda t: discount_factor ** t
 
 # Setting the params in net allows the gradients
@@ -96,7 +98,37 @@ def loss_fn(params, action, state):
     policy.net.update(params)
     return policy.log_prob_action(action, state)
 
+def value_loss_fn(params, state, reward):
+    value_fn.update(params)
+    r_hat = value_fn.forward(state)
+    return mx.mean((r_hat - reward) ** 2)
+
+
+def train_value_fn(batch_trajectories):
+
+    grad_theta = [mx.zeros_like(p) for p in value_fn.params]
+    avg_loss = 0.0
+    step = 0
+    for trajectory, rewards in batch_trajectories:
+        # we update value_fn for each (state, reward) pair
+        for t, r in zip(trajectory, rewards):
+            state = t[0]
+            loss, _grad_t = value_grad_fn(value_fn.params, state=state, reward=reward)
+            avg_loss += loss
+            for grad, _grad in zip(grad_theta, _grad_t): 
+                grad += _grad
+
+        # SGD step
+        for p, grad in zip(value_fn.params, grad_theta):
+            p -= lr * grad
+    
+        avg_loss /= len(trajectory)
+        if step % 5 == 0:
+            print(f"Value Function - Step: {step} - Loss: {avg_loss:.3f}")
+        step += 1
+
 policy_grad_fn = mx.value_and_grad(loss_fn)
+value_grad_fn = mx.value_and_grad(value_loss_fn)
 
 
 # First evaluation pass
@@ -141,9 +173,19 @@ for epoch in range(num_epochs):
             total_reward += reward
             episode_over = terminated or truncated
 
-        # print(f"Episode finished! Total reward: {total_reward}")
-        batch_trajectories.append(trajectory)
-        
+        discounted_rewards = [gamma(i) * t[-1] for i, t in enumerate(trajectory)]
+        reward_to_go = mx.array(discounted_rewards)
+
+        # each time point is accumulation of *future* rewards only
+        # thus accum in reverse
+        for i in range(len(trajectory)-2, -1, -1):
+            reward_to_go[i] += reward_to_go[i+1]
+
+        batch_trajectories.append((trajectory, reward_to_go))
+    
+    # Update V(state) first so that we have good approx for policy grad
+    train_value_fn(batch_trajectories)
+
     # Aggregate batch of trajectories
     policy_grad = [mx.zeros_like(p) for p in net.params]
     batch_steps = 0
@@ -151,15 +193,7 @@ for epoch in range(num_epochs):
     avg_discounted_return = 0.0
     avg_log_prob = 0.0
 
-    for trajectory in batch_trajectories:
-        
-        discounted_rewards = [gamma(i) * t[-1] for i, t in enumerate(trajectory)]
-        reward_to_go = mx.array(discounted_rewards)
-
-        # each time point is accumulation of *future* rewards only
-        # thus accum in reverse
-        for i in range(len(trajectory)-2, -1, -1):
-            reward_to_go[i] += reward_to_go[i+1] 
+    for (trajectory, reward_to_go) in batch_trajectories:
 
         log_prob = 0.0
 
