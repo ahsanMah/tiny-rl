@@ -9,8 +9,14 @@ Documented below are my general findings from implementing the algorithms.
 - Normalizing the gradient norm helps
 - Interestingly when the initial state is good, we cant seem to build on it
     - The model is always worse after training
-    - e.g. seed=4321 the initial reward is 60+ but ends near the 10s
+    - e.g. `seed=4321` the initial reward is 60+ but ends near the 10s
 - Fixed a very silly bug in reward accumulation
+- Value function can be trained with just using existing (state, reward) pairs
+    - Required a small rewrite but is conceptually straightforward
+    - Encountered silent bug when regressing against a global variable and getting 0 loss smh
+- Baseline variant improves performance in `seed=4321`!
+- Still difficult to know which hyperparameter has the most outstanding effect:
+    - `max_episode_steps`, `lr`, `num_epochs`, `num_trajectories`, `discount_factor`
 
 ## 04/26 - `vanilla_policy_grad.py`
 

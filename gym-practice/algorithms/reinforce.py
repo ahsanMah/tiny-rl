@@ -6,7 +6,7 @@ from rich.pretty import pprint
 # mx.random.seed(4321)
 
 # Create our training environment - a cart with a pole that needs balancing
-env = gym.make("CartPole-v1", max_episode_steps=500)
+env = gym.make("CartPole-v1", max_episode_steps=200)
 eval_env = gym.make("CartPole-v1", render_mode="human")
 
 # Reset environment to start a new episode
@@ -85,11 +85,11 @@ print("Using LinearNet:")
 print(net)
 print("================")
 
-lr = 0.002
+lr = 0.005
 num_epochs = 10
-num_trajectories = 25
+num_trajectories = 50
 policy = CategoricalDistribution(net)
-discount_factor = 0.95
+discount_factor = 0.99
 gamma = lambda t: discount_factor ** t
 
 # Setting the params in net allows the gradients
@@ -107,13 +107,13 @@ def value_loss_fn(params, state, reward):
 def train_value_fn(batch_trajectories):
 
     grad_theta = [mx.zeros_like(p) for p in value_fn.params]
-    avg_loss = 0.0
     step = 0
     for trajectory, rewards in batch_trajectories:
+        avg_loss = 0.0
         # we update value_fn for each (state, reward) pair
         for t, r in zip(trajectory, rewards):
             state = t[0]
-            loss, _grad_t = value_grad_fn(value_fn.params, state=state, reward=reward)
+            loss, _grad_t = value_grad_fn(value_fn.params, state=state, reward=r)
             avg_loss += loss
             for grad, _grad in zip(grad_theta, _grad_t): 
                 grad += _grad
@@ -124,7 +124,7 @@ def train_value_fn(batch_trajectories):
     
         avg_loss /= len(trajectory)
         if step % 5 == 0:
-            print(f"Value Function - Step: {step} - Loss: {avg_loss:.3f}")
+            print(f"Value Function - Step: {step} - Loss: {avg_loss:.4f}")
         step += 1
 
 policy_grad_fn = mx.value_and_grad(loss_fn)
@@ -203,12 +203,15 @@ for epoch in range(num_epochs):
 
             log_prob_t, policy_grad_t = policy_grad_fn(policy.net.params, action=action, state=state)
             log_prob += float(log_prob_t.item())
-
+            
+            # adding a baseline can improve variance
+            # here we use an estimate fo the value function V^\pi(s_t)
+            reward_with_baseline = reward - value_fn.forward(state)
+            
             # Correct accumulation: add grad_t weighted by future return.
-            policy_grad = [
-                p + (pt * reward)
-                for p, pt in zip(policy_grad, policy_grad_t)
-            ]
+            for p, pt in zip(policy_grad, policy_grad_t):
+                p += pt * reward_with_baseline
+
             batch_steps += 1
 
         avg_grad_norms += mx.array([la.norm(p) for p in policy_grad])
