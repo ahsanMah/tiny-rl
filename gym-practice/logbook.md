@@ -10,6 +10,7 @@ Documented below are my general findings from implementing the algorithms.
 - Interestingly when the initial state is good, we cant seem to build on it
     - The model is always worse after training
     - e.g. seed=4321 the initial reward is 60+ but ends near the 10s
+- Fixed a very silly bug in reward accumulation
 
 ## 04/26 - `vanilla_policy_grad.py`
 

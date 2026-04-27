@@ -163,7 +163,7 @@ for epoch in range(num_epochs):
 
         log_prob = 0.0
 
-        for (state, action, reward) in trajectory:
+        for (state, action, _), reward in zip(trajectory, reward_to_go):
             action = mx.array(action)
             state = mx.asarray(state, dtype=mx.float32)
 
@@ -172,8 +172,8 @@ for epoch in range(num_epochs):
 
             # Correct accumulation: add grad_t weighted by future return.
             policy_grad = [
-                p + (pt * r)
-                for p, pt, r in zip(policy_grad, policy_grad_t, reward_to_go)
+                p + (pt * reward)
+                for p, pt in zip(policy_grad, policy_grad_t)
             ]
             batch_steps += 1
 
