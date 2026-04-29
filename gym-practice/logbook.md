@@ -2,6 +2,14 @@
 
 Documented below are my general findings from implementing the algorithms.
 
+## 04/28 - `reinforce_gae.py`
+- Implementing GAE variant for reinforce
+ - Note that two value function calls re required for TD residual estimate
+- Main trick is to compute advantages in reverse so that you can accumulate "future" advantages
+- Value function is still trained on reward-to-go as before
+- Yet another hyperparamter (ema)
+
+
 ## 04/26 - `reinforce.py`
 
 - Implemented reward-to-go as simple cumsum in reverse
