@@ -179,9 +179,9 @@ print(net)
 print("================")
 
 lr = 0.01
-lr_val = 0.01
+lr_val = 0.001
 num_epochs = 20
-num_trajectories = 64
+num_trajectories = 128
 policy = CategoricalDistribution(net)
 discount_factor = 0.99
 ema_factor = 0.96
@@ -202,36 +202,35 @@ def vec_loss_fn(params, action, state, advantage):
 
 def value_loss_fn(params, state, reward):
     value_fn.update(params)
-    r_hat = value_fn.forward(state)
-    return mx.mean((r_hat - reward) ** 2)
+    r_hat = value_fn.forward(state).flatten()
+    return mx.mean((r_hat - reward).square())
 
 
 def train_value_fn():
 
-    batch_size = 16
+    batch_size = 32
     step = 0
-    grad_theta = [mx.zeros_like(p) for p in value_fn.params]
 
-    for state, reward in zip(buffer.state, buffer.reward_to_go):
-        avg_loss = 0.0
+    drop_samples = len(buffer.state) % batch_size if batch_size < len(buffer.state) else 0
+    num_batches = max(1, len(buffer.state) // batch_size)
+
+    states = mx.stack([mx.asarray(s) for s in buffer.state[drop_samples:]], axis=0)
+    rewards = mx.stack([mx.asarray(s) for s in buffer.reward_to_go[drop_samples:]], axis=0)
+
+    state_batch = states.split(num_batches, axis=0)
+    reward_batch = rewards.split(num_batches, axis=0)
+
+    avg_loss = 0.0
+    for state, reward in zip(state_batch, reward_batch):
         # we update value_fn for each (state, reward) pair
-        loss, _grad_t = value_grad_fn(value_fn.params, state=state, reward=reward)
-        avg_loss += loss
-        for grad, _grad in zip(grad_theta, _grad_t):
-            grad += _grad
-
-        step += 1
-        if step % batch_size != 0:
-            continue # keep accumulating
+        loss, grad_theta = value_grad_fn(value_fn.params, state=state, reward=reward)
+        avg_loss += loss.item()
 
         # SGD step
         for p, grad in zip(value_fn.params, grad_theta):
             p -= lr_val * grad
 
-        # Zero out grads
-        grad_theta = [mx.zeros_like(p) for p in value_fn.params]
-
-    avg_loss /= step
+    avg_loss /= num_batches
     return avg_loss
 
 vec_policy_grad_fn = mx.value_and_grad(vec_loss_fn)
@@ -301,48 +300,14 @@ for epoch in range(num_epochs):
     logger.info(f"Value Loss: {value_fn_loss}")
 
     # Aggregate batch of trajectories
-    policy_grad = [mx.zeros_like(p) for p in net.params]
-    batch_steps = 0
-    avg_grad_norms = 0.0
 
-    # print("Buffer State:", buffer.state)
-    logger.info("vectorized pass start")
     state_batch = mx.stack([mx.asarray(s) for s in buffer.state], axis=0)
-    print("State batch:", state_batch.shape)
     action_batch =  mx.array(buffer.action)
     advantage_batch = mx.array(buffer.advantage)
-    log_probs, vec_policy_grad = vec_policy_grad_fn(policy.net.params, action=action_batch,
+    log_probs, policy_grad = vec_policy_grad_fn(policy.net.params, action=action_batch,
         state=state_batch, advantage=advantage_batch)
 
-
-    print("JVP PGs:", [g[:1] for g in policy_grad])
-    logger.info("vectorized pass END")
-
-   # for p in zip(policy_grad_updates, ):
-
-    logger.info("iterative pass start")
-
-    policy_grad = [mx.zeros_like(p) for p in net.params]
-    print([p.shape for p in policy_grad])
-    for state, action, advantage in zip(buffer.state, buffer.action, buffer.advantage):
-        action = mx.array([action])
-        state = mx.asarray(state, dtype=mx.float32)[None,:]
-
-        log_prob_t, policy_grad_t = policy_grad_fn(policy.net.params, action=action, state=state)
-
-    # Correct accumulation: add grad_t weighted by generalized advantage.
-        for p, pt in zip(policy_grad, policy_grad_t):
-            # print(p.shape, pt.shape)
-            p += pt * advantage
-
-    print("PGs:", [g[:1] for g in policy_grad])
-    logger.info("iterative pass END")
-    print([mx.isclose(p1,p2).all() for p1,p2 in zip(vec_policy_grad, policy_grad)])
-
-
-    batch_steps += 1
-    avg_grad_norms += mx.array([la.norm(p) for p in policy_grad])
-
+    avg_grad_norms = mx.array([la.norm(p) for p in policy_grad])
     avg_grad_norms /= num_trajectories
 
     episode_returns = mx.array(buffer.episode_return)
