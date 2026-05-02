@@ -6,7 +6,7 @@ from rich.pretty import pprint
 # mx.random.seed(4321)
 
 # Create our training environment - a cart with a pole that needs balancing
-env = gym.make("CartPole-v1", max_episode_steps=500)
+env = gym.make("CartPole-v1", max_episode_steps=200)
 eval_env = gym.make("CartPole-v1", render_mode="human")
 
 # Reset environment to start a new episode
@@ -85,12 +85,13 @@ print("Using LinearNet:")
 print(net)
 print("================")
 
-lr = 0.001
+lr = 0.01
+lr_val = 0.001
 num_epochs = 20
 num_trajectories = 100
 policy = CategoricalDistribution(net)
 discount_factor = 0.99
-ema_factor = 0.95
+ema_factor = 0.96
 gamma = lambda t: discount_factor ** t
 
 # Setting the params in net allows the gradients
@@ -121,10 +122,10 @@ def train_value_fn(batch_trajectories):
 
         # SGD step
         for p, grad in zip(value_fn.params, grad_theta):
-            p -= lr * grad
+            p -= lr_val * grad
     
         avg_loss /= len(trajectory)
-        if step % 10 == 0:
+        if step % 20 == 0:
             print(f"Value Function - Step: {step} - Loss: {avg_loss:.4f}")
         step += 1
 
@@ -147,6 +148,7 @@ for epoch in range(num_epochs):
     
     batch_trajectories = []
     episode_returns = []
+    steps_per_trajectory = []
     
     for i in range(num_trajectories):
         observation, info = env.reset()
@@ -175,8 +177,12 @@ for epoch in range(num_epochs):
             total_reward += reward
             episode_over = terminated or truncated
         
+        if terminated:
+            trajectory.append([observation, observation, action, 0.0])
+        
         discounted_rewards = [gamma(i) * traj[-1] for i, traj in enumerate(trajectory)]
         episode_returns.append(sum(discounted_rewards))
+        steps_per_trajectory.append(len(discounted_rewards))
 
         # this produces gamma^(\tau - t)
         # so each action's reward is its discounted future from 0 to end
@@ -249,11 +255,12 @@ for epoch in range(num_epochs):
     avg_log_prob /= num_trajectories
 
     episode_returns = mx.asarray(episode_returns)
+    avg_num_steps = sum(steps_per_trajectory) / num_trajectories
     mu = episode_returns.mean().item()
     std = episode_returns.std().item()
 
     print(
-        f"Epoch {epoch+1}: Mean Return: {mu:.2f} +/- {std:.2f} - Log Prob: {avg_log_prob:.4f} - Policy Grad Norm: {mx.mean(avg_grad_norms):.3f}"
+        f"Epoch {epoch+1}: Avg Steps: {avg_num_steps} - Mean Return: {mu:.2f} +/- {std:.2f} -  - Policy Grad Norm: {mx.mean(avg_grad_norms):.3f}"
     )
 
     n = num_trajectories # max(batch_steps, 1) 
