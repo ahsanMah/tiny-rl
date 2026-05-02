@@ -2,6 +2,48 @@
 
 Documented below are my general findings from implementing the algorithms.
 
+## 05/02 - vectorizing
+
+- Cumuluative sum vecotrization can be tricky
+- some options:
+    - manual for loop
+    - python accumulator (also for loop underneath but in C ...?)
+    - cumsum(x * powers) / powers
+```py
+    rewards = [0 , 1, 1, 1]
+    # rewards = self.reward[::-1]
+    reward_to_go = []
+    cumsum = 0
+    # r[0] = gamma(0)r[0] + gamma(1)r[1] + gamma(2)r[2] + gamma(3)r[3]
+    # r[1] =                gamma(0)r[1] + gamma(1)r[2] + gamma(2)r[3]
+    for r in rewards:
+        cumsum = r + gamma(1) * cumsum
+        reward_to_go.append(cumsum)
+    
+    print("cumsum:", reward_to_go)
+    reward_to_go = accumulate(
+        rewards, lambda r_sum, rt: rt + gamma(1) * r_sum, initial=None
+    )
+    print("itertools:", list(reward_to_go))
+
+    #cumsum / powers trick
+    rewards = mx.array(rewards)
+    gammas = mx.array([gamma(i) for i in range(len(rewards))])
+    # (in reverse)
+    # r[0] = gamma(0)r[0] + gamma(1)r[1] + gamma(2)r[2] + gamma(3)r[3]
+    # r[1] =                gamma(1)r[1] + gamma(2)r[2] + gamma(3)r[3]
+    rewards *= gammas
+    reward_to_go = mx.cumsum(rewards) / gammas
+    print("cumsum:", reward_to_go)
+```
+
+
+## 04/29
+
+- Important note about terminal values
+    - When the agent 'dies' after taking the step, the reward should be 0!
+    - to make the logic work correctly, we should precompute advantages before policy updates
+
 ## 04/28 - `reinforce_gae.py`
 - Implementing GAE variant for reinforce
  - Note that two value function calls re required for TD residual estimate
