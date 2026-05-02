@@ -3,7 +3,7 @@ import gymnasium as gym
 import mlx.core as mx
 
 # Create our training environment - a cart with a pole that needs balancing
-env = gym.make("CartPole-v1", render_mode="human")
+env = gym.make("CartPole-v1")
 
 # Reset environment to start a new episode
 observation, info = env.reset()
