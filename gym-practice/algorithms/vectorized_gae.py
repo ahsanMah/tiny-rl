@@ -311,8 +311,9 @@ for epoch in range(num_epochs):
     print("State batch:", state_batch.shape)
     action_batch =  mx.array(buffer.action)
     advantage_batch = mx.array(buffer.advantage)
-    log_probs, policy_grad = vec_policy_grad_fn(policy.net.params, action=action_batch,
+    log_probs, vec_policy_grad = vec_policy_grad_fn(policy.net.params, action=action_batch,
         state=state_batch, advantage=advantage_batch)
+
 
     print("JVP PGs:", [g[:1] for g in policy_grad])
     logger.info("vectorized pass END")
@@ -322,6 +323,7 @@ for epoch in range(num_epochs):
     logger.info("iterative pass start")
 
     policy_grad = [mx.zeros_like(p) for p in net.params]
+    print([p.shape for p in policy_grad])
     for state, action, advantage in zip(buffer.state, buffer.action, buffer.advantage):
         action = mx.array([action])
         state = mx.asarray(state, dtype=mx.float32)[None,:]
@@ -330,11 +332,12 @@ for epoch in range(num_epochs):
 
     # Correct accumulation: add grad_t weighted by generalized advantage.
         for p, pt in zip(policy_grad, policy_grad_t):
+            # print(p.shape, pt.shape)
             p += pt * advantage
 
-    print("PGs:", [g[:4] for g in policy_grad])
+    print("PGs:", [g[:1] for g in policy_grad])
     logger.info("iterative pass END")
-
+    print([mx.isclose(p1,p2).all() for p1,p2 in zip(vec_policy_grad, policy_grad)])
 
 
     batch_steps += 1
