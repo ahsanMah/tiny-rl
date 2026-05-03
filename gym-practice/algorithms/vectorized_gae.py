@@ -1,18 +1,26 @@
-from dataclasses import dataclass
+# Add parent directory to sys.path to import logger
+import os
+import sys
+import time
 from itertools import accumulate
 
 import gymnasium as gym
 import mlx.core as mx
+from loguru import logger
 from mlx.core import linalg as la
 from rich.pretty import pprint
-from loguru import logger
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from logger_utils import RLLogger
 
 # mx.random.seed(4321)
 
 # Create our training environment - a cart with a pole that needs balancing
 # env = gym.make_vec("CartPole-v1", num_envs=2, max_episode_steps=200)
 env = gym.make("CartPole-v1")
-eval_env = gym.make("CartPole-v1", )
+eval_env = gym.make(
+    "CartPole-v1",
+)
 
 # Reset environment to start a new episode
 observation, info = env.reset()
@@ -25,6 +33,7 @@ pprint(env.observation_space)
 
 # Example output: [ 0.01234567 -0.00987654  0.02345678  0.01456789]
 # [cart_position, cart_velocity, pole_angle, pole_angular_velocity]
+
 
 # Tiny linear net: 4 inputs -> hidden (16) -> 2 action logits
 # Weights initialized with simple random values
@@ -47,26 +56,17 @@ class TinyLinearNet:
         x = mx.maximum(x @ self.W1 + self.b1, 0)  # ReLU
         return x @ self.W2 + self.b2  # Raw logits
 
-class CategoricalDistribution:
 
+class CategoricalDistribution:
     def __init__(self, net):
         self.net = net
 
     def log_prob_action(self, action, observation):
-        '''Returns log_p(action | observation) assuming action is index'''
+        """Returns log_p(action | observation) assuming action is index"""
         logits = self.net.forward(observation)
         log_prob = logits - mx.logsumexp(logits, axis=1, keepdims=True)
-        # print("Action:", action.shape, "Observation:", observation.shape)
-        idxs = mx.arange(len(observation))
-        # print("Logits:", logits.shape, "indexed Log probs:", log_prob[idxs, action].shape)
-        # probs = mx.exp(log_softmax)
-        # return log_prob[idxs, action]
-        #
         selected = mx.take_along_axis(log_prob, action[:, None], axis=1).squeeze()
-        # print("selected:", selected.shape)
-        # print(log_prob[idxs, action][:4], selected[:4])
         return selected
-
 
     def sample(self, logits):
         probs = mx.exp(logits - mx.logsumexp(logits))
@@ -76,7 +76,7 @@ class CategoricalDistribution:
         # Binary search the index (or just linear for small logits)
         i = 0
         while random_val > cdf[i]:
-            i+=1
+            i += 1
 
         return i
 
@@ -89,9 +89,9 @@ class CategoricalDistribution:
             return self.sample(logits)
         return int(mx.argmax(logits).item())
 
-# @dataclass
+
 class Buffer:
-    '''Flat buffer of trajectories indexed by a pointer'''
+    """Flat buffer of trajectories indexed by a pointer"""
 
     def __init__(self):
         self.state: list = []
@@ -123,8 +123,8 @@ class Buffer:
 
     def complete(self, terminal_value=0):
         # Grab all recorded values and rewards
-        trajectory_values = self.value[self.ptr:]
-        rewards = self.reward[self.ptr:]
+        trajectory_values = self.value[self.ptr :]
+        rewards = self.reward[self.ptr :]
 
         v_st = trajectory_values
         # when state terminated due to death we add a zero reward
@@ -149,7 +149,8 @@ class Buffer:
         # r[1] =                gamma(0)r[1] + gamma(1)r[2] + gamma(2)r[3]
         # r[0] = gamma(0)r[0] + gamma(1)r[1] + gamma(2)r[2] + gamma(3)r[3]
         reward_to_go = accumulate(
-            rewards, lambda r_sum, rt: rt + gamma(1) * r_sum,
+            rewards,
+            lambda r_sum, rt: rt + gamma(1) * r_sum,
         )
         reward_to_go = list(reversed(list(reward_to_go)))
 
@@ -160,12 +161,12 @@ class Buffer:
         self.episode_return.append(sum(rewards))
         self.episode_steps.append(len(rewards))
 
-        assert len(self.reward) == len(self.advantage), print(f"{len(self.reward)}, {len(self.advantage)}")
+        assert len(self.reward) == len(self.advantage), print(
+            f"{len(self.reward)}, {len(self.advantage)}"
+        )
         assert len(self.state) == len(self.reward_to_go)
 
-
         self.ptr += len(rewards)
-
 
 
 # Initialize the networks and start an episode
@@ -182,11 +183,14 @@ lr = 0.01
 lr_val = 0.001
 grad_clip_value = 10
 num_epochs = 20
-num_trajectories = 128
+num_trajectories = 256
 policy = CategoricalDistribution(net)
 discount_factor = 0.99
 ema_factor = 0.96
-gamma = lambda t: discount_factor ** t
+gamma = lambda t: discount_factor**t
+
+metrics_logger = RLLogger("./tb-logs/", exp_name="cart-pole-vpg-gae")
+
 
 # Setting the params in net allows the gradients
 # to be recorded by autograd
@@ -194,12 +198,14 @@ def loss_fn(params, action, state):
     policy.net.update(params)
     return policy.log_prob_action(action, state)
 
+
 def vec_loss_fn(params, action, state, advantage):
     policy.net.update(params)
-    log_prob_of_policy  = policy.log_prob_action(action, state)
+    log_prob_of_policy = policy.log_prob_action(action, state)
     # \sum (\grad theta) * r <==> \grad \sum (r * theta)
     log_prob_of_policy = log_prob_of_policy * advantage
     return log_prob_of_policy.sum()
+
 
 def value_loss_fn(params, state, reward):
     value_fn.update(params)
@@ -210,13 +216,15 @@ def value_loss_fn(params, state, reward):
 def train_value_fn():
 
     batch_size = 32
-    step = 0
-
-    drop_samples = len(buffer.state) % batch_size if batch_size < len(buffer.state) else 0
+    drop_samples = (
+        len(buffer.state) % batch_size if batch_size < len(buffer.state) else 0
+    )
     num_batches = max(1, len(buffer.state) // batch_size)
 
     states = mx.stack([mx.asarray(s) for s in buffer.state[drop_samples:]], axis=0)
-    rewards = mx.stack([mx.asarray(s) for s in buffer.reward_to_go[drop_samples:]], axis=0)
+    rewards = mx.stack(
+        [mx.asarray(s) for s in buffer.reward_to_go[drop_samples:]], axis=0
+    )
 
     state_batch = states.split(num_batches, axis=0)
     reward_batch = rewards.split(num_batches, axis=0)
@@ -234,9 +242,9 @@ def train_value_fn():
     avg_loss /= num_batches
     return avg_loss
 
+
 vec_policy_grad_fn = mx.value_and_grad(vec_loss_fn)
 policy_grad_fn = mx.value_and_grad(loss_fn)
-
 value_grad_fn = mx.value_and_grad(value_loss_fn)
 
 
@@ -251,8 +259,9 @@ while not episode_over:
     episode_over = terminated or truncated
 logger.info(f"Initial reward: {initial_reward}")
 
+global_step = 0
+start_time = time.time()
 for epoch in range(num_epochs):
-
     batch_trajectories = []
     episode_returns = []
     steps_per_trajectory = []
@@ -289,9 +298,12 @@ for epoch in range(num_epochs):
 
             total_reward += reward
             episode_over = terminated or truncated
-
+            global_step += 1
 
         buffer.complete()
+        metrics_logger.log_episode(
+            global_step, reward=total_reward, length=buffer.episode_steps[-1]
+        )
 
     assert len(buffer.episode_return) == num_trajectories
 
@@ -303,12 +315,16 @@ for epoch in range(num_epochs):
     # Aggregate batch of trajectories
 
     state_batch = mx.stack([mx.asarray(s) for s in buffer.state], axis=0)
-    action_batch =  mx.array(buffer.action)
+    action_batch = mx.array(buffer.action)
     advantage_batch = mx.array(buffer.advantage)
-    log_probs, policy_grad = vec_policy_grad_fn(policy.net.params, action=action_batch,
-        state=state_batch, advantage=advantage_batch)
+    log_probs, policy_grad = vec_policy_grad_fn(
+        policy.net.params,
+        action=action_batch,
+        state=state_batch,
+        advantage=advantage_batch,
+    )
 
-    avg_grad_norms = mx.array([la.norm(p) for p in policy_grad])
+    avg_grad_norms = mx.array([la.norm(p) for p in policy_grad]).mean()
     avg_grad_norms /= num_trajectories
 
     episode_returns = mx.array(buffer.episode_return)
@@ -318,14 +334,12 @@ for epoch in range(num_epochs):
     avg_num_steps = episode_steps.mean().item()
 
     logger.info(
-        f"Epoch {epoch+1}: Avg Steps: {avg_num_steps:.1f} - Mean Return: {mu:.2f} +/- {std:.2f} - Policy Grad Norm: {mx.mean(avg_grad_norms):.3f}"
+        f"Epoch {epoch + 1}: Avg Steps: {avg_num_steps:.1f} - Mean Return: {mu:.2f} +/- {std:.2f} - Policy Grad Norm: {mx.mean(avg_grad_norms):.3f}"
     )
-
-    n = num_trajectories # max(batch_steps, 1)
 
     for i in range(len(policy_grad)):
         # Approximate expectation via sample mean over sampled timesteps.
-        policy_grad[i] /= n
+        policy_grad[i] /= num_trajectories
 
         # gradient clipping via the grad norm
         grad_norm = la.norm(policy_grad[i])
@@ -335,11 +349,31 @@ for epoch in range(num_epochs):
         # This is a no-op when grad_norm < 1 as scale = 1
         policy_grad[i] *= scale
 
+    old_log_p = policy.log_prob_action(action_batch, state_batch)
+
     # One gradient ascent step on the parameters
     for p, grad in zip(policy.net.params, policy_grad):
         p += lr * grad
 
-    # print(f"Epoch {epoch + 1} complete...")
+    new_log_p = policy.log_prob_action(action_batch, state_batch)
+    logratio = old_log_p - new_log_p
+
+    # 1. Standard Monte Carlo Estimator
+    # logratio = logprob_new - logprob_old
+    # approx_kl_mc = logratio.mean()
+
+    # 2. Schulman's Estimator (The standard in PPO/CleanRL)
+    approx_kl_schulman = 0.5 * (logratio**2).mean()
+
+    train_metrics = {
+        "policy_log_probs": log_probs.item(),
+        "policy_grad_norm": avg_grad_norms.item(),
+        "value_loss": value_fn_loss,
+        "approx_kl": approx_kl_schulman.item(),
+    }
+
+    metrics_logger.log_train_metrics(global_step, train_metrics)
+    metrics_logger.log_speed(global_step, steps_done=global_step, start_time=start_time)
 
 env.close()
 
@@ -354,5 +388,7 @@ while not episode_over:
     episode_over = terminated or truncated
 
 print(terminated, truncated, info)
-print(f"Episode finished! Total reward: {total_reward} - Initial reward was {initial_reward}")
+print(
+    f"Episode finished! Total reward: {total_reward} - Initial reward was {initial_reward}"
+)
 eval_env.close()
