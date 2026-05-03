@@ -180,6 +180,7 @@ print("================")
 
 lr = 0.01
 lr_val = 0.001
+grad_clip_value = 10
 num_epochs = 20
 num_trajectories = 128
 policy = CategoricalDistribution(net)
@@ -327,12 +328,12 @@ for epoch in range(num_epochs):
         policy_grad[i] /= n
 
         # gradient clipping via the grad norm
-        # grad_norm = la.norm(policy_grad[i])
-        # scale = clip_value / max(clip_value, grad_norm)
+        grad_norm = la.norm(policy_grad[i])
+        scale = grad_clip_value / max(grad_clip_value, grad_norm)
         # Note that dividing by norm gives you unit-norm
         # so multiplying by clip rescales norm from 1 -> chosen value
         # This is a no-op when grad_norm < 1 as scale = 1
-        # policy_grad[i] *= scale
+        policy_grad[i] *= scale
 
     # One gradient ascent step on the parameters
     for p, grad in zip(policy.net.params, policy_grad):
