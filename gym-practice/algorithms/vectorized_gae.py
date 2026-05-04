@@ -11,7 +11,7 @@ from mlx.core import linalg as la
 from rich.pretty import pprint
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from logger_utils import RLLogger
+from logger_utils import RLLogger, VideoLogger
 
 # mx.random.seed(4321)
 
@@ -21,6 +21,7 @@ env = gym.make("CartPole-v1")
 eval_env = gym.make(
     "CartPole-v1",
 )
+
 
 # Reset environment to start a new episode
 observation, info = env.reset()
@@ -182,7 +183,7 @@ print("================")
 lr = 0.01
 lr_val = 0.001
 grad_clip_value = 10
-num_epochs = 20
+num_epochs = 10
 num_trajectories = 256
 policy = CategoricalDistribution(net)
 discount_factor = 0.99
@@ -190,6 +191,9 @@ ema_factor = 0.96
 gamma = lambda t: discount_factor**t
 
 metrics_logger = RLLogger("./tb-logs/", exp_name="cart-pole-vpg-gae")
+eval_video_logger = VideoLogger(
+    env_name="CartPole-v1", exp_folder=f"./eval-logs/{metrics_logger.run_name}"
+)
 
 
 # Setting the params in net allows the gradients
@@ -247,19 +251,13 @@ vec_policy_grad_fn = mx.value_and_grad(vec_loss_fn)
 policy_grad_fn = mx.value_and_grad(loss_fn)
 value_grad_fn = mx.value_and_grad(value_loss_fn)
 
-
 # First evaluation pass
-observation, info = eval_env.reset()
-episode_over = False
-initial_reward = 0
-while not episode_over:
-    action = policy.get_action(observation, sample=False)
-    observation, reward, terminated, truncated, info = eval_env.step(action)
-    initial_reward += reward
-    episode_over = terminated or truncated
-logger.info(f"Initial reward: {initial_reward}")
-
 global_step = 0
+eval_video_logger.record_evaluation(policy, global_step)
+metrics_logger.log_video(
+    global_step, eval_video_logger.exp_folder, eval_video_logger.num_eval_episodes
+)
+
 start_time = time.time()
 for epoch in range(num_epochs):
     batch_trajectories = []
@@ -378,17 +376,9 @@ for epoch in range(num_epochs):
 env.close()
 
 # Final evaluation pass
-observation, info = eval_env.reset()
-episode_over = False
-total_reward = 0
-while not episode_over:
-    action = policy.get_action(observation, sample=False)
-    observation, reward, terminated, truncated, info = eval_env.step(action)
-    total_reward += reward
-    episode_over = terminated or truncated
-
-print(terminated, truncated, info)
-print(
-    f"Episode finished! Total reward: {total_reward} - Initial reward was {initial_reward}"
+eval_video_logger.record_evaluation(policy, global_step)
+metrics_logger.log_video(
+    global_step, eval_video_logger.exp_folder, eval_video_logger.num_eval_episodes
 )
-eval_env.close()
+
+metrics_logger.close()
