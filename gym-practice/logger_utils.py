@@ -174,7 +174,7 @@ class VideoLogger:
         avg_length = np.sum(env.length_queue)
         std_reward = np.std(env.return_queue)
 
-        logger.info(f"\nAverage reward: {avg_reward:.2f} ± {std_reward:.2f}")
+        logger.info(f"Average reward: {avg_reward:.2f} ± {std_reward:.2f}")
         logger.info(f"Average episode length: {avg_length:.1f} steps")
         logger.info(
             f"Success rate: {sum(1 for r in env.return_queue if r > 0) / len(env.return_queue):.1%}"

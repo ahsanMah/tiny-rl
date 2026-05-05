@@ -2,7 +2,25 @@
 
 Documented below are my general findings from implementing the algorithms.
 
-## 05/02 - vectorizing
+## 05/05 - Full Vectorization
+- We can use gymnaisums vectorized environments
+- Neural nets trivially take in batches but log_prob calculation needed to be modified
+  - actions are batch of indices to select logits
+  - mlx allows for easy selection via `mx.take_along_axis(log_prob, action[:, None], axis=1)`
+- Sampling also needed to be modded to grab the categorical index
+  - recall that basic procedure is:
+    - sample unform val `[0,1)`
+    - grab the 'bucket' according to probs (cumulative probabilities to be precise)
+    - i.e return `catgeory if uniform_val >= CDF[category]`
+  - Luckily I noticed that `mx.argmax` returns the first (left most) index
+  - So you can just `argmax(random < cdf)`
+- **Important**: my existing asserts for the Buffer helped!
+  - Forced me to really think about my terminal values
+  - When an episode/trajectory *truncates* your current action is still valid
+  - thus you shoudl feed in value of next_state: `value(observation)`
+  - Previously I was feeding `value(state)` which I believe was a subtle bug
+
+## 05/02 - Thinking through vectorizing
 
 - Cumuluative sum vecotrization can be tricky
 - some options:

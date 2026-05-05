@@ -15,13 +15,13 @@ from logger_utils import RLLogger, VideoLogger
 
 # mx.random.seed(4321)
 
+NUM_PARALLEL_ENVS = 2
 # Create our training environment - a cart with a pole that needs balancing
-# env = gym.make_vec("CartPole-v1", num_envs=2, max_episode_steps=200)
-env = gym.make("CartPole-v1")
-eval_env = gym.make(
+env = gym.make_vec(
     "CartPole-v1",
+    num_envs=NUM_PARALLEL_ENVS,
+    vectorization_mode="sync",
 )
-
 
 # Reset environment to start a new episode
 observation, info = env.reset()
@@ -69,17 +69,21 @@ class CategoricalDistribution:
         selected = mx.take_along_axis(log_prob, action[:, None], axis=1).squeeze()
         return selected
 
-    def sample(self, logits):
-        probs = mx.exp(logits - mx.logsumexp(logits))
-        cdf = mx.cumsum(probs)
-        random_val = mx.random.uniform(0, 1)
+    def sample(self, logits) -> list[int]:
+        probs = mx.exp(logits - mx.logsumexp(logits, axis=1, keepdims=True))
+        cdf = mx.cumsum(probs, axis=1)
+        random_val = mx.random.uniform(0, 1, shape=(probs.shape[0], 1))
+        mask = random_val < cdf
 
-        # Binary search the index (or just linear for small logits)
-        i = 0
-        while random_val > cdf[i]:
-            i += 1
+        # print("probs =", probs)
+        # print("cdf =", cdf)
+        # print("random_val =", random_val)
+        # print("mask =", mask)
 
-        return i
+        # grab first nonzero index
+        category_index = mx.argmax(mask, axis=1)
+
+        return category_index.tolist()
 
     def get_action(self, observation, sample=True):
         """Sample action for training, argmax action for evaluation."""
@@ -122,7 +126,7 @@ class Buffer:
         self.reward = []
         self.ptr = 0
 
-    def complete(self, terminal_value=0):
+    def complete(self, terminal_value=0.0):
         # Grab all recorded values and rewards
         trajectory_values = self.value[self.ptr :]
         rewards = self.reward[self.ptr :]
@@ -134,10 +138,10 @@ class Buffer:
 
         v_st = mx.array(v_st)
         v_st_next = mx.array(v_st_next)
-        rewards = mx.array(rewards)
+        reward_vec = mx.asarray(rewards)
 
-        td_residuals = rewards + gamma(1) * v_st_next - v_st
-        td_residuals = td_residuals.tolist()[::-1]
+        td_residuals = reward_vec + gamma(1) * v_st_next - v_st
+        td_residuals = td_residuals[::-1].tolist()
         # advantage = td_residual + ema_factor * gamma(1) * future_t_advantage
         advantage = accumulate(
             td_residuals,
@@ -145,18 +149,21 @@ class Buffer:
         )
         advantage = list(reversed(list(advantage)))
 
-        rewards = rewards.tolist()[::-1]
+        # rewards: list = rewards[::-1].tolist()
         reward_to_go = []
         # r[1] =                gamma(0)r[1] + gamma(1)r[2] + gamma(2)r[3]
         # r[0] = gamma(0)r[0] + gamma(1)r[1] + gamma(2)r[2] + gamma(3)r[3]
         reward_to_go = accumulate(
-            rewards,
-            lambda r_sum, rt: rt + gamma(1) * r_sum,
+            rewards[::-1], lambda r_sum, rt: rt + gamma(1) * r_sum
         )
         reward_to_go = list(reversed(list(reward_to_go)))
 
-        assert reward_to_go[-1] == rewards[-1], "Final timepoint should match"
-
+        # print("rewards =", rewards)
+        # print("reward_to_go =", reward_to_go)
+        # assert len(reward_to_go) == len(rewards)
+        assert reward_to_go[-1] == rewards[-1], (
+            f"Final timepoint should match got {reward_to_go[-1]} but expected {rewards[-1]}"
+        )
         self.advantage.extend(advantage)
         self.reward_to_go.extend(reward_to_go)
         self.episode_return.append(sum(rewards))
@@ -166,6 +173,9 @@ class Buffer:
             f"{len(self.reward)}, {len(self.advantage)}"
         )
         assert len(self.state) == len(self.reward_to_go)
+        assert len(self.action) == len(self.advantage), print(
+            f"{len(self.action)}, {len(self.advantage)}"
+        )
 
         self.ptr += len(rewards)
 
@@ -259,62 +269,97 @@ metrics_logger.log_video(
 )
 
 start_time = time.time()
+
 for epoch in range(num_epochs):
-    batch_trajectories = []
-    episode_returns = []
-    steps_per_trajectory = []
-    buffer = Buffer()
+    completed_episodes = 0
+    # Note: If we do not reset every epoch, any unfinished trajectory *resumes*
+    # Allowing the model to learn longer horizon tasks
+    observation_vec, info = env.reset()
 
-    for i in range(num_trajectories):
-        observation, info = env.reset()
-        total_reward = 0
-        trajectory = []
-        episode_over = False
+    # Each parallel env will have its own buffer updated
+    buffer_vec = [Buffer() for n in range(env.num_envs)]
 
-        while not episode_over:
-            # save current state
-            state = observation
+    while completed_episodes < num_trajectories:
+        # save current state
+        state_vec = observation_vec
 
-            # Choose an action using the tiny net (simulates a deterministic policy)
-            action = policy.get_action(observation)
-            # log_prob_action = policy.log_prob_action(action, observation)
+        # Choose an action using the tiny net (simulates a deterministic policy)
+        action_vec = policy.get_action(observation_vec)
 
-            # Take the action and see what happens
-            observation, reward, terminated, truncated, info = env.step(action)
+        # action_vec = env.action_space.sample()  # Random policy for demonstration
+        # print("action =", action_vec)
+        # log_prob_action = policy.log_prob_action(action, observation)
 
-            # reward: +1 for each step the pole stays upright
-            # terminated: True if pole falls too far (agent failed)
-            # truncated: True if we hit the time limit (500 steps)
-
-            if terminated:
-                value = 0
-            else:
-                value = value_fn.forward(state).item()
-
-            # given state, policy produced action with probability that received reward
-            buffer.update(state, observation, action, reward, value)
-
-            total_reward += reward
-            episode_over = terminated or truncated
-            global_step += 1
-
-        buffer.complete()
-        metrics_logger.log_episode(
-            global_step, reward=total_reward, length=buffer.episode_steps[-1]
+        # Take the action and see what happens
+        observation_vec, reward_vec, terminated_vec, truncated_vec, info_vec = env.step(
+            action_vec
         )
 
-    assert len(buffer.episode_return) == num_trajectories
+        # reward: +1 for each step the pole stays upright
+        # terminated: True if pole falls too far (agent failed)
+        # truncated: True if we hit the time limit (500 steps)
+
+        for i in range(env.num_envs):
+            global_step += 1
+            buffer = buffer_vec[i]
+            state = state_vec[i]
+            action = action_vec[i]
+            observation = observation_vec[i]
+            reward = reward_vec[i]
+            terminated = terminated_vec[i]
+            truncated = truncated_vec[i]
+
+            value = value_fn.forward(state).item()
+            # given state, policy produced action with probability that received reward
+            # print(state, observation, reward, terminated, truncated, value)
+            buffer.update(state, observation, action, reward, value)
+
+            episode_over = terminated or truncated
+            if terminated or truncated:
+                completed_episodes += 1
+                terminal_value = (
+                    0 if terminated else value_fn.forward(observation).item()
+                )
+                buffer.complete(terminal_value)
+                metrics_logger.log_episode(
+                    global_step,
+                    reward=buffer.episode_return[-1],
+                    length=buffer.episode_steps[-1],
+                )
+            # onto the next!
+
+    # if we do not check, we might be leaving incomplete trajectories in the buffers
+    # check the final termination states and complete the path that was not finished!
+    for i in range(env.num_envs):
+        terminated = terminated_vec[i]
+        truncated = truncated_vec[i]
+        observation = observation_vec[i]
+        buffer = buffer_vec[i]
+        episode_over = terminated or truncated
+        if not episode_over:
+            terminal_value = value_fn.forward(observation).item()
+            buffer.complete(terminal_value)
+        # else we would have completed it in the while-loop
 
     # Update V(state) first so that we have good approx for policy grad
     # FIXME: currently we use stale value estimates to train the policy
     value_fn_loss = train_value_fn()
     logger.info(f"Value Loss: {value_fn_loss}")
 
-    # Aggregate batch of trajectories
+    # Aggregate batch of trajectories across environments
+    # N x obs_space
+    state_batch = mx.stack(
+        [mx.asarray(s) for buffer in buffer_vec for s in buffer.state], axis=0
+    )
+    # N x 1
+    action_batch = mx.concatenate(
+        [mx.asarray(buffer.action, dtype=mx.float32) for buffer in buffer_vec], axis=0
+    )
+    # N x 1
+    advantage_batch = mx.concatenate(
+        [mx.asarray(buffer.advantage) for buffer in buffer_vec], axis=0
+    )
 
-    state_batch = mx.stack([mx.asarray(s) for s in buffer.state], axis=0)
-    action_batch = mx.array(buffer.action)
-    advantage_batch = mx.array(buffer.advantage)
     log_probs, policy_grad = vec_policy_grad_fn(
         policy.net.params,
         action=action_batch,
@@ -325,8 +370,12 @@ for epoch in range(num_epochs):
     avg_grad_norms = mx.array([la.norm(p) for p in policy_grad]).mean()
     avg_grad_norms /= num_trajectories
 
-    episode_returns = mx.array(buffer.episode_return)
-    episode_steps = mx.array(buffer.episode_steps)
+    episode_returns = mx.concatenate(
+        [mx.array(buffer.episode_return) for buffer in buffer_vec], axis=0
+    )
+    episode_steps = mx.concatenate(
+        [mx.array(buffer.episode_steps) for buffer in buffer_vec], axis=0
+    )
     mu = episode_returns.mean().item()
     std = episode_returns.std().item()
     avg_num_steps = episode_steps.mean().item()
