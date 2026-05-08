@@ -3,6 +3,7 @@ import os
 import sys
 import time
 from itertools import accumulate
+from multiprocessing import set_executable
 from this import s
 
 import click
@@ -19,7 +20,7 @@ from logger_utils import RLLogger, VideoLogger
 
 DEFAULT_ENV_NAME = "CartPole-v1"
 DEFAULT_NUM_PARALLEL_ENVS = 4
-DEFAULT_MAX_EPISODE_STEPS = 128
+DEFAULT_MAX_EPISODE_STEPS = 500
 
 DEFAULT_HIDDEN_DIM = 32
 DEFAULT_INIT_SCALE = 0.1
@@ -116,7 +117,6 @@ class Buffer:
 
     def __init__(self):
         self.state: list = []
-        self.observation: list = []
         self.action: list[int] = []
         self.reward: list[float] = []
         self.value: list[float] = []
@@ -128,9 +128,8 @@ class Buffer:
         self.episode_return = []
         self.episode_steps = []
 
-    def update(self, s, o, a, r, v):
+    def update(self, s, a, r, v):
         self.state.append(s)
-        self.observation.append(o)
         self.action.append(a)
         self.reward.append(r)
         self.value.append(v)
@@ -255,11 +254,6 @@ def train_value_fn(states, rewards):
     states = states[drop_samples:]
     rewards = rewards[drop_samples:]
 
-    # states = mx.stack([mx.asarray(s) for s in buffer.state[drop_samples:]], axis=0)
-    # rewards = mx.stack(
-    #     [mx.asarray(s) for s in buffer.reward_to_go[drop_samples:]], axis=0
-    # )
-
     state_batch = states.split(num_batches, axis=0)
     reward_batch = rewards.split(num_batches, axis=0)
 
@@ -270,11 +264,26 @@ def train_value_fn(states, rewards):
         avg_loss += loss.item()
 
         # SGD step
+        grad_theta = clip_grad_norm(grad_theta, grad_clip_value)
         for p, grad in zip(value_fn.params, grad_theta):
             p -= lr_val * grad
 
     avg_loss /= num_batches
     return avg_loss
+
+
+def clip_grad_norm(grad, grad_clip_value):
+
+    for i in range(len(grad)):
+        # gradient clipping via the grad norm
+        grad_norm = la.norm(grad[i])
+        scale = grad_clip_value / max(grad_clip_value, grad_norm)
+        # Note that dividing by norm gives you unit-norm
+        # so multiplying by clip rescales norm from 1 -> chosen value
+        # This is a no-op when grad_norm < 1 as scale = 1
+        grad[i] *= scale
+
+    return grad
 
 
 vec_policy_grad_fn = mx.value_and_grad(vec_loss_fn)
@@ -329,6 +338,7 @@ def run(
         num_envs=num_parallel_envs,
         vectorization_mode="sync",
         max_episode_steps=max_episode_steps,
+        vector_kwargs={"autoreset_mode": gym.vector.AutoresetMode.SAME_STEP},
     )
 
     # Reset environment to start a new episode
@@ -338,10 +348,8 @@ def run(
         observation, info = env.reset(seed=seed)
     # observation: what the agent can "see" - cart position, velocity, pole angle, etc.
 
-    print(f"Starting observation: {observation}")
-    print(f"Action space:{env.action_space}")
-    print("Observation space:")
-    pprint(env.observation_space)
+    print(f"Observation Space: {env.single_observation_space}")
+    print(f"Action Space:{env.single_action_space}")
 
     # Example output: [ 0.01234567 -0.00987654  0.02345678  0.01456789]
     # [cart_position, cart_velocity, pole_angle, pole_angular_velocity]
@@ -412,8 +420,13 @@ def run(
             for state in state_vec:
                 state_stats.update(state)
 
+            if state_normalization:
+                state_vec = normalize(state_vec, state_stats)
+
+            # print("for loop:", state_vec)
+
             # Choose an action using the tiny net (simulates a deterministic policy)
-            action_vec = policy.get_action(observation_vec)
+            action_vec = policy.get_action(state_vec, sample=True)
 
             # Take the action and see what happens
             observation_vec, reward_vec, terminated_vec, truncated_vec, info_vec = (
@@ -437,15 +450,12 @@ def run(
                 terminated = terminated_vec[i]
                 truncated = truncated_vec[i]
 
-                if state_normalization:
-                    state = normalize(state, state_stats)
-                    observation = normalize(state, state_stats)
                 # reward = normalize(reward, reward_stats)
                 value = value_fn.forward(state).item()
 
                 # given state, policy produced action with probability that received reward
-
-                if global_step % 10_000 == 0:
+                if global_step % 2_000 == 0:
+                    print("global_step =", global_step)
                     print(
                         state, observation, reward, terminated, truncated, action, value
                     )
@@ -455,15 +465,19 @@ def run(
                         "var =",
                         state_stats.var,
                     )
-                # print(state, observation)
 
-                buffer.update(state, observation, action, reward, value)
+                buffer.update(state, action, reward, value)
 
                 episode_over = terminated or truncated
                 if terminated or truncated:
                     completed_episodes += 1
+                    final_observation = (
+                        normalize(info_vec["final_obs"][i], state_stats)
+                        if state_normalization
+                        else info_vec["final_obs"][i]
+                    )
                     terminal_value = (
-                        0 if terminated else value_fn.forward(observation).item()
+                        0 if terminated else value_fn.forward(final_observation).item()
                     )
                     buffer.complete(terminal_value)
                     metrics_logger.log_episode(
@@ -478,16 +492,17 @@ def run(
         for i in range(env.num_envs):
             terminated = terminated_vec[i]
             truncated = truncated_vec[i]
-            observation = observation_vec[i]
+            observation = (
+                normalize(observation_vec[i], state_stats)
+                if state_normalization
+                else observation_vec[i]
+            )
             buffer = buffer_vec[i]
             episode_over = terminated or truncated
             if not episode_over:
                 terminal_value = value_fn.forward(observation).item()
                 buffer.complete(terminal_value)
             # else we would have completed it in the while-loop
-
-        # Update V(state) first so that we have good approx for policy grad
-        # FIXME: currently we use stale value estimates to train the policy
 
         # Aggregate batch of trajectories across environments
         # N x obs_space
@@ -501,7 +516,7 @@ def run(
 
         # N x 1
         action_batch = mx.concatenate(
-            [mx.asarray(buffer.action, dtype=mx.float32) for buffer in buffer_vec],
+            [mx.asarray(buffer.action, dtype=mx.int8) for buffer in buffer_vec],
             axis=0,
         )
         # N x 1
@@ -516,6 +531,8 @@ def run(
         print("reward_to_go_batch.shape =", reward_to_go_batch.shape)
         value_fn_loss = train_value_fn(state_batch, reward_to_go_batch)
 
+        # Update V(state) first so that we have good approx for policy grad
+        # we will still use slightly stale value estimates to train the policy
         if epoch == 0:
             continue
 
@@ -543,14 +560,7 @@ def run(
             # Approximate expectation via sample mean over sampled timesteps.
             policy_grad[i] /= num_trajectories
 
-            # gradient clipping via the grad norm
-            grad_norm = la.norm(policy_grad[i])
-            scale = grad_clip_value / max(grad_clip_value, grad_norm)
-            # Note that dividing by norm gives you unit-norm
-            # so multiplying by clip rescales norm from 1 -> chosen value
-            # This is a no-op when grad_norm < 1 as scale = 1
-            policy_grad[i] *= scale
-
+        grad = clip_grad_norm(policy_grad, grad_clip_value)
         old_log_p = policy.log_prob_action(action_batch, state_batch)
 
         # One gradient ascent step on the parameters
@@ -581,7 +591,7 @@ def run(
 
         logger.info(f"======= Epoch {epoch} ======= ")
         logger.info(f"Avg Steps: {avg_num_steps:.1f}")
-        logger.info(f"Mean Return: {mu:.2f} +/- {std:.2f}")
+        logger.info(f"Mean Reward-to-Go: {mu:.2f} +/- {std:.2f}")
         logger.info(f"Approx KL: {approx_kl_schulman:.4f}")
         logger.info(f"Value Loss: {value_fn_loss:.2f}")
         logger.info(f"Avg Policy Gradient Norm: {avg_grad_norms:.2f}")
