@@ -1,14 +1,14 @@
 # Add parent directory to sys.path to import logger
 import os
-import re
 import sys
 import time
 from itertools import accumulate
+from this import s
 
+import click
 import gymnasium as gym
 import mlx.core as mx
 from loguru import logger
-from mlx.core import e
 from mlx.core import linalg as la
 from rich.pretty import pprint
 
@@ -17,29 +17,32 @@ from logger_utils import RLLogger, VideoLogger
 
 # mx.random.seed(4321)
 
-ENV_NAME = "Acrobot-v1"
-ENV_NAME = "CartPole-v1"
-NUM_PARALLEL_ENVS = 4
+DEFAULT_ENV_NAME = "CartPole-v1"
+DEFAULT_NUM_PARALLEL_ENVS = 4
+DEFAULT_MAX_EPISODE_STEPS = 128
 
-# Create our training environment - a cart with a pole that needs balancing
-env = gym.make_vec(
-    ENV_NAME,
-    num_envs=NUM_PARALLEL_ENVS,
-    vectorization_mode="sync",
-    max_episode_steps=128,
-)
+DEFAULT_HIDDEN_DIM = 32
+DEFAULT_INIT_SCALE = 0.1
+DEFAULT_INIT_SCALE_FINAL = 0.01
+DEFAULT_VALUE_INIT_SCALE = 0.1
+DEFAULT_VALUE_INIT_SCALE_FINAL = 1.0
 
-# Reset environment to start a new episode
-observation, info = env.reset()
-# observation: what the agent can "see" - cart position, velocity, pole angle, etc.
+DEFAULT_POLICY_LR = 0.01
+DEFAULT_VALUE_LR = 0.02
+DEFAULT_GRAD_CLIP_VALUE = 2.0
+DEFAULT_NUM_EPOCHS = 20
+DEFAULT_NUM_TRAJECTORIES = 128
+DEFAULT_VAL_TRAIN_BATCH_SIZE = 32
+DEFAULT_DISCOUNT_FACTOR = 0.95
+DEFAULT_EMA_FACTOR = 0.96
+DEFAULT_STATE_NORMALIZATION = False
 
-print(f"Starting observation: {observation}")
-print(f"Action space:{env.action_space}")
-print("Observation space:")
-pprint(env.observation_space)
+DEFAULT_LOG_DIR = "./tb-logs/"
+DEFAULT_EVAL_LOG_DIR = "./eval-logs"
 
-# Example output: [ 0.01234567 -0.00987654  0.02345678  0.01456789]
-# [cart_position, cart_velocity, pole_angle, pole_angular_velocity]
+
+def gamma(t):
+    return discount_factor**t
 
 
 # Tiny linear net: 4 inputs -> hidden (16) -> 2 action logits
@@ -211,52 +214,6 @@ class VecStats:
         return self.m2 / (self.count - 1) if self.count > 1 else 0.0
 
 
-# Initialize the networks and start an episode
-
-obs_shape = env.single_observation_space.shape[0]
-action_shape = env.single_action_space.n
-
-net = TinyLinearNet(input_dim=obs_shape, output_dim=action_shape)
-value_fn = TinyLinearNet(
-    input_dim=obs_shape,
-    output_dim=1,
-    init_scale=0.1,
-    init_scale_final=1.0,
-)
-mx.eval(net.params)
-mx.eval(value_fn.params)
-print("================")
-print("Using LinearNet:")
-print(net)
-print("================")
-
-lr = 0.01
-lr_val = 0.02
-grad_clip_value = 2
-num_epochs = 20
-num_trajectories = 128
-val_train_batch_size = 32
-policy = CategoricalDistribution(net)
-discount_factor = 0.95
-ema_factor = 0.96
-gamma = lambda t: discount_factor**t
-
-metrics_logger = RLLogger("./tb-logs/", exp_name=f"{ENV_NAME}-vpg-gae")
-eval_video_logger = VideoLogger(
-    env_name=ENV_NAME, exp_folder=f"./eval-logs/{metrics_logger.run_name}"
-)
-
-
-state_min = env.single_observation_space.low
-state_max = env.single_observation_space.high
-print("state_min =", state_min)
-print("state_max =", state_max)
-
-# The statsitics will be recorded for the lifetime fo the algorithm
-state_stats = VecStats()
-reward_stats = VecStats()
-
-
 def normalize(x, stats, eps=1e-8):
     mu, var = stats.mean, stats.var
     # print(f"State mean: {mu}, var: {var}, count: {state_stats.count}")
@@ -323,200 +280,441 @@ def train_value_fn(states, rewards):
 vec_policy_grad_fn = mx.value_and_grad(vec_loss_fn)
 value_grad_fn = mx.value_and_grad(value_loss_fn)
 
-# First evaluation pass
-global_step = 0
-# eval_video_logger.record_evaluation(policy, global_step)
-# metrics_logger.log_video(
-#     global_step, eval_video_logger.exp_folder, eval_video_logger.num_eval_episodes
-# )
 
-start_time = time.time()
+def run(
+    env_name,
+    num_parallel_envs,
+    max_episode_steps,
+    hidden_dim,
+    init_scale,
+    init_scale_final,
+    value_init_scale,
+    value_init_scale_final,
+    policy_lr,
+    value_lr,
+    grad_clip,
+    num_epochs,
+    num_trajectories,
+    value_batch_size,
+    state_normalization,
+    discount,
+    ema,
+    seed,
+    log_dir,
+    eval_log_dir,
+):
+    global \
+        lr, \
+        lr_val, \
+        grad_clip_value, \
+        val_train_batch_size, \
+        discount_factor, \
+        ema_factor, \
+        policy, \
+        value_fn
 
-for epoch in range(num_epochs):
-    completed_episodes = 0
-    # Note: If we do not reset every epoch, any unfinished trajectory *resumes*
-    # Allowing the model to learn longer horizon tasks
-    observation_vec, info = env.reset()
+    lr = policy_lr
+    lr_val = value_lr
+    grad_clip_value = grad_clip
+    val_train_batch_size = value_batch_size
+    discount_factor = discount
+    ema_factor = ema
 
-    # Each parallel env will have its own buffer updated
-    buffer_vec = [Buffer() for n in range(env.num_envs)]
+    if seed is not None:
+        mx.random.seed(seed)
 
-    while completed_episodes < num_trajectories:
-        # save current state
-        state_vec = observation_vec
-        for state in state_vec:
-            state_stats.update(state)
+    # Create our training environment - a cart with a pole that needs balancing
+    env = gym.make_vec(
+        env_name,
+        num_envs=num_parallel_envs,
+        vectorization_mode="sync",
+        max_episode_steps=max_episode_steps,
+    )
 
-        # Choose an action using the tiny net (simulates a deterministic policy)
-        action_vec = policy.get_action(observation_vec)
+    # Reset environment to start a new episode
+    if seed is None:
+        observation, info = env.reset()
+    else:
+        observation, info = env.reset(seed=seed)
+    # observation: what the agent can "see" - cart position, velocity, pole angle, etc.
 
-        # Take the action and see what happens
-        observation_vec, reward_vec, terminated_vec, truncated_vec, info_vec = env.step(
-            action_vec
-        )
+    print(f"Starting observation: {observation}")
+    print(f"Action space:{env.action_space}")
+    print("Observation space:")
+    pprint(env.observation_space)
 
-        for reward in reward_vec:
-            reward_stats.update(reward)
+    # Example output: [ 0.01234567 -0.00987654  0.02345678  0.01456789]
+    # [cart_position, cart_velocity, pole_angle, pole_angular_velocity]
 
-        # reward: +1 for each step the pole stays upright
-        # terminated: True if pole falls too far (agent failed)
-        # truncated: True if we hit the time limit (500 steps)
+    # Initialize the networks and start an episode
 
+    obs_shape = env.single_observation_space.shape[0]
+    action_shape = env.single_action_space.n
+
+    net = TinyLinearNet(
+        input_dim=obs_shape,
+        hidden_dim=hidden_dim,
+        output_dim=action_shape,
+        init_scale=init_scale,
+        init_scale_final=init_scale_final,
+    )
+    value_fn = TinyLinearNet(
+        input_dim=obs_shape,
+        hidden_dim=hidden_dim,
+        output_dim=1,
+        init_scale=value_init_scale,
+        init_scale_final=value_init_scale_final,
+    )
+    mx.eval(net.params)
+    mx.eval(value_fn.params)
+    print("================")
+    print("Using LinearNet:")
+    print(net)
+    print("================")
+
+    policy = CategoricalDistribution(net)
+
+    metrics_logger = RLLogger(log_dir, exp_name=f"{env_name}-vpg-gae")
+    eval_video_logger = VideoLogger(
+        env_name=env_name, exp_folder=f"{eval_log_dir}/{metrics_logger.run_name}"
+    )
+
+    state_min = env.single_observation_space.low
+    state_max = env.single_observation_space.high
+    print("state_min =", state_min)
+    print("state_max =", state_max)
+
+    # The statsitics will be recorded for the lifetime fo the algorithm
+    state_stats = VecStats()
+    reward_stats = VecStats()
+
+    # First evaluation pass
+    global_step = 0
+    # eval_video_logger.record_evaluation(policy, global_step)
+    # metrics_logger.log_video(
+    #     global_step, eval_video_logger.exp_folder, eval_video_logger.num_eval_episodes
+    # )
+
+    start_time = time.time()
+
+    for epoch in range(num_epochs):
+        completed_episodes = 0
+        # Note: If we do not reset every epoch, any unfinished trajectory *resumes*
+        # Allowing the model to learn longer horizon tasks
+        observation_vec, info = env.reset()
+
+        # Each parallel env will have its own buffer updated
+        buffer_vec = [Buffer() for n in range(env.num_envs)]
+
+        while completed_episodes < num_trajectories:
+            # save current state
+            state_vec = observation_vec
+            for state in state_vec:
+                state_stats.update(state)
+
+            # Choose an action using the tiny net (simulates a deterministic policy)
+            action_vec = policy.get_action(observation_vec)
+
+            # Take the action and see what happens
+            observation_vec, reward_vec, terminated_vec, truncated_vec, info_vec = (
+                env.step(action_vec)
+            )
+
+            for reward in reward_vec:
+                reward_stats.update(reward)
+
+            # reward: +1 for each step the pole stays upright
+            # terminated: True if pole falls too far (agent failed)
+            # truncated: True if we hit the time limit (500 steps)
+
+            for i in range(env.num_envs):
+                global_step += 1
+                buffer = buffer_vec[i]
+                state = state_vec[i]
+                action = action_vec[i]
+                observation = observation_vec[i]
+                reward = reward_vec[i]
+                terminated = terminated_vec[i]
+                truncated = truncated_vec[i]
+
+                if state_normalization:
+                    state = normalize(state, state_stats)
+                    observation = normalize(state, state_stats)
+                # reward = normalize(reward, reward_stats)
+                value = value_fn.forward(state).item()
+
+                # given state, policy produced action with probability that received reward
+
+                if global_step % 10_000 == 0:
+                    print(
+                        state, observation, reward, terminated, truncated, action, value
+                    )
+                    print(
+                        "state stats: mean =",
+                        state_stats.mean,
+                        "var =",
+                        state_stats.var,
+                    )
+                # print(state, observation)
+
+                buffer.update(state, observation, action, reward, value)
+
+                episode_over = terminated or truncated
+                if terminated or truncated:
+                    completed_episodes += 1
+                    terminal_value = (
+                        0 if terminated else value_fn.forward(observation).item()
+                    )
+                    buffer.complete(terminal_value)
+                    metrics_logger.log_episode(
+                        global_step,
+                        reward=buffer.episode_return[-1],
+                        length=buffer.episode_steps[-1],
+                    )
+                # onto the next!
+
+        # if we do not check, we might be leaving incomplete trajectories in the buffers
+        # check the final termination states and complete the path that was not finished!
         for i in range(env.num_envs):
-            global_step += 1
-            buffer = buffer_vec[i]
-            state = state_vec[i]
-            action = action_vec[i]
-            observation = observation_vec[i]
-            reward = reward_vec[i]
             terminated = terminated_vec[i]
             truncated = truncated_vec[i]
-
-            state = normalize(state, state_stats)
-            observation = normalize(state, state_stats)
-            # reward = normalize(reward, reward_stats)
-            value = value_fn.forward(state).item()
-
-            # given state, policy produced action with probability that received reward
-
-            if global_step % 10_000 == 0:
-                print(state, observation, reward, terminated, truncated, action, value)
-                print("state stats: mean =", state_stats.mean, "var =", state_stats.var)
-            # print(state, observation)
-
-            buffer.update(state, observation, action, reward, value)
-
+            observation = observation_vec[i]
+            buffer = buffer_vec[i]
             episode_over = terminated or truncated
-            if terminated or truncated:
-                completed_episodes += 1
-                terminal_value = (
-                    0 if terminated else value_fn.forward(observation).item()
-                )
+            if not episode_over:
+                terminal_value = value_fn.forward(observation).item()
                 buffer.complete(terminal_value)
-                metrics_logger.log_episode(
-                    global_step,
-                    reward=buffer.episode_return[-1],
-                    length=buffer.episode_steps[-1],
-                )
-            # onto the next!
+            # else we would have completed it in the while-loop
 
-    # if we do not check, we might be leaving incomplete trajectories in the buffers
-    # check the final termination states and complete the path that was not finished!
-    for i in range(env.num_envs):
-        terminated = terminated_vec[i]
-        truncated = truncated_vec[i]
-        observation = observation_vec[i]
-        buffer = buffer_vec[i]
-        episode_over = terminated or truncated
-        if not episode_over:
-            terminal_value = value_fn.forward(observation).item()
-            buffer.complete(terminal_value)
-        # else we would have completed it in the while-loop
+        # Update V(state) first so that we have good approx for policy grad
+        # FIXME: currently we use stale value estimates to train the policy
 
-    # Update V(state) first so that we have good approx for policy grad
-    # FIXME: currently we use stale value estimates to train the policy
+        # Aggregate batch of trajectories across environments
+        # N x obs_space
+        state_batch = mx.stack(
+            [mx.asarray(s) for buffer in buffer_vec for s in buffer.state], axis=0
+        )
 
-    # Aggregate batch of trajectories across environments
-    # N x obs_space
-    state_batch = mx.stack(
-        [mx.asarray(s) for buffer in buffer_vec for s in buffer.state], axis=0
+        # Normalize via the running mean and var
+        # state_batch = normalize_state(state_batch)
+        print(f"After normalization mean: {state_batch.mean(axis=0)}")
+
+        # N x 1
+        action_batch = mx.concatenate(
+            [mx.asarray(buffer.action, dtype=mx.float32) for buffer in buffer_vec],
+            axis=0,
+        )
+        # N x 1
+        advantage_batch = mx.concatenate(
+            [mx.asarray(buffer.advantage) for buffer in buffer_vec], axis=0
+        )
+
+        reward_to_go_batch = mx.concatenate(
+            [mx.asarray(buffer.reward_to_go) for buffer in buffer_vec], axis=0
+        )
+        print("state_batch.shape =", state_batch.shape)
+        print("reward_to_go_batch.shape =", reward_to_go_batch.shape)
+        value_fn_loss = train_value_fn(state_batch, reward_to_go_batch)
+
+        if epoch == 0:
+            continue
+
+        log_probs, policy_grad = vec_policy_grad_fn(
+            policy.net.params,
+            action=action_batch,
+            state=state_batch,
+            advantage=advantage_batch,
+        )
+
+        avg_grad_norms = mx.array([la.norm(p) for p in policy_grad]).mean()
+        avg_grad_norms /= num_trajectories
+
+        episode_returns = mx.concatenate(
+            [mx.array(buffer.episode_return) for buffer in buffer_vec], axis=0
+        )
+        episode_steps = mx.concatenate(
+            [mx.array(buffer.episode_steps) for buffer in buffer_vec], axis=0
+        )
+        mu = reward_to_go_batch.mean().item()
+        std = reward_to_go_batch.std().item()
+        avg_num_steps = episode_steps.mean().item()
+
+        for i in range(len(policy_grad)):
+            # Approximate expectation via sample mean over sampled timesteps.
+            policy_grad[i] /= num_trajectories
+
+            # gradient clipping via the grad norm
+            grad_norm = la.norm(policy_grad[i])
+            scale = grad_clip_value / max(grad_clip_value, grad_norm)
+            # Note that dividing by norm gives you unit-norm
+            # so multiplying by clip rescales norm from 1 -> chosen value
+            # This is a no-op when grad_norm < 1 as scale = 1
+            policy_grad[i] *= scale
+
+        old_log_p = policy.log_prob_action(action_batch, state_batch)
+
+        # One gradient ascent step on the parameters
+        for p, grad in zip(policy.net.params, policy_grad):
+            p += lr * grad
+
+        new_log_p = policy.log_prob_action(action_batch, state_batch)
+        logratio = old_log_p - new_log_p
+
+        # 1. Standard Monte Carlo Estimator
+        # logratio = logprob_new - logprob_old
+        # approx_kl_mc = logratio.mean()
+
+        # 2. Schulman's Estimator (The standard in PPO/CleanRL)
+        approx_kl_schulman = 0.5 * (logratio**2).mean()
+
+        train_metrics = {
+            "policy_log_probs": log_probs.item(),
+            "policy_grad_norm": avg_grad_norms.item(),
+            "value_loss": value_fn_loss,
+            "approx_kl": approx_kl_schulman.item(),
+        }
+
+        metrics_logger.log_train_metrics(global_step, train_metrics)
+        metrics_logger.log_speed(
+            global_step, steps_done=global_step, start_time=start_time
+        )
+
+        logger.info(f"======= Epoch {epoch} ======= ")
+        logger.info(f"Avg Steps: {avg_num_steps:.1f}")
+        logger.info(f"Mean Return: {mu:.2f} +/- {std:.2f}")
+        logger.info(f"Approx KL: {approx_kl_schulman:.4f}")
+        logger.info(f"Value Loss: {value_fn_loss:.2f}")
+        logger.info(f"Avg Policy Gradient Norm: {avg_grad_norms:.2f}")
+
+    env.close()
+
+    # Final evaluation pass
+    # eval_video_logger.record_evaluation(policy, global_step)
+    # metrics_logger.log_video(
+    #     global_step, eval_video_logger.exp_folder, eval_video_logger.num_eval_episodes
+    # )
+
+    metrics_logger.close()
+
+
+@click.command()
+@click.option("--env-name", default=DEFAULT_ENV_NAME, show_default=True)
+@click.option(
+    "--num-parallel-envs",
+    default=DEFAULT_NUM_PARALLEL_ENVS,
+    show_default=True,
+    type=int,
+)
+@click.option(
+    "--max-episode-steps",
+    default=DEFAULT_MAX_EPISODE_STEPS,
+    show_default=True,
+    type=int,
+)
+@click.option("--hidden-dim", default=DEFAULT_HIDDEN_DIM, show_default=True, type=int)
+@click.option("--init-scale", default=DEFAULT_INIT_SCALE, show_default=True, type=float)
+@click.option(
+    "--init-scale-final",
+    default=DEFAULT_INIT_SCALE_FINAL,
+    show_default=True,
+    type=float,
+)
+@click.option(
+    "--value-init-scale",
+    default=DEFAULT_VALUE_INIT_SCALE,
+    show_default=True,
+    type=float,
+)
+@click.option(
+    "--value-init-scale-final",
+    default=DEFAULT_VALUE_INIT_SCALE_FINAL,
+    show_default=True,
+    type=float,
+)
+@click.option("--policy-lr", default=DEFAULT_POLICY_LR, show_default=True, type=float)
+@click.option("--value-lr", default=DEFAULT_VALUE_LR, show_default=True, type=float)
+@click.option(
+    "--grad-clip-value",
+    "grad_clip",
+    default=DEFAULT_GRAD_CLIP_VALUE,
+    show_default=True,
+    type=float,
+)
+@click.option("--num-epochs", default=DEFAULT_NUM_EPOCHS, show_default=True, type=int)
+@click.option(
+    "--num-trajectories", default=DEFAULT_NUM_TRAJECTORIES, show_default=True, type=int
+)
+@click.option(
+    "--value-batch-size",
+    "value_batch_size",
+    default=DEFAULT_VAL_TRAIN_BATCH_SIZE,
+    show_default=True,
+    type=int,
+)
+@click.option(
+    "--discount-factor",
+    "discount",
+    default=DEFAULT_DISCOUNT_FACTOR,
+    show_default=True,
+    type=float,
+)
+@click.option(
+    "--ema-factor", "ema", default=DEFAULT_EMA_FACTOR, show_default=True, type=float
+)
+@click.option(
+    "--state-normalization",
+    default=DEFAULT_STATE_NORMALIZATION,
+    show_default=True,
+    type=bool,
+)
+@click.option("--seed", default=None, type=int, show_default=True)
+@click.option("--log-dir", default=DEFAULT_LOG_DIR, show_default=True)
+@click.option("--eval-log-dir", default=DEFAULT_EVAL_LOG_DIR, show_default=True)
+def cli(
+    env_name,
+    num_parallel_envs,
+    max_episode_steps,
+    hidden_dim,
+    init_scale,
+    init_scale_final,
+    value_init_scale,
+    value_init_scale_final,
+    policy_lr,
+    value_lr,
+    grad_clip,
+    num_epochs,
+    num_trajectories,
+    value_batch_size,
+    state_normalization,
+    discount,
+    ema,
+    seed,
+    log_dir,
+    eval_log_dir,
+):
+    run(
+        env_name=env_name,
+        num_parallel_envs=num_parallel_envs,
+        max_episode_steps=max_episode_steps,
+        hidden_dim=hidden_dim,
+        init_scale=init_scale,
+        init_scale_final=init_scale_final,
+        value_init_scale=value_init_scale,
+        value_init_scale_final=value_init_scale_final,
+        policy_lr=policy_lr,
+        value_lr=value_lr,
+        grad_clip=grad_clip,
+        num_epochs=num_epochs,
+        num_trajectories=num_trajectories,
+        value_batch_size=value_batch_size,
+        discount=discount,
+        ema=ema,
+        seed=seed,
+        log_dir=log_dir,
+        eval_log_dir=eval_log_dir,
+        state_normalization=state_normalization,
     )
 
-    # Normalize via the running mean and var
-    # state_batch = normalize_state(state_batch)
-    print(f"After normalization mean: {state_batch.mean(axis=0)}")
 
-    # N x 1
-    action_batch = mx.concatenate(
-        [mx.asarray(buffer.action, dtype=mx.float32) for buffer in buffer_vec], axis=0
-    )
-    # N x 1
-    advantage_batch = mx.concatenate(
-        [mx.asarray(buffer.advantage) for buffer in buffer_vec], axis=0
-    )
-
-    reward_to_go_batch = mx.concatenate(
-        [mx.asarray(buffer.reward_to_go) for buffer in buffer_vec], axis=0
-    )
-    print("state_batch.shape =", state_batch.shape)
-    print("reward_to_go_batch.shape =", reward_to_go_batch.shape)
-    value_fn_loss = train_value_fn(state_batch, reward_to_go_batch)
-
-    if epoch == 0:
-        continue
-
-    log_probs, policy_grad = vec_policy_grad_fn(
-        policy.net.params,
-        action=action_batch,
-        state=state_batch,
-        advantage=advantage_batch,
-    )
-
-    avg_grad_norms = mx.array([la.norm(p) for p in policy_grad]).mean()
-    avg_grad_norms /= num_trajectories
-
-    episode_returns = mx.concatenate(
-        [mx.array(buffer.episode_return) for buffer in buffer_vec], axis=0
-    )
-    episode_steps = mx.concatenate(
-        [mx.array(buffer.episode_steps) for buffer in buffer_vec], axis=0
-    )
-    mu = reward_to_go_batch.mean().item()
-    std = reward_to_go_batch.std().item()
-    avg_num_steps = episode_steps.mean().item()
-
-    for i in range(len(policy_grad)):
-        # Approximate expectation via sample mean over sampled timesteps.
-        policy_grad[i] /= num_trajectories
-
-        # gradient clipping via the grad norm
-        grad_norm = la.norm(policy_grad[i])
-        scale = grad_clip_value / max(grad_clip_value, grad_norm)
-        # Note that dividing by norm gives you unit-norm
-        # so multiplying by clip rescales norm from 1 -> chosen value
-        # This is a no-op when grad_norm < 1 as scale = 1
-        policy_grad[i] *= scale
-
-    old_log_p = policy.log_prob_action(action_batch, state_batch)
-
-    # One gradient ascent step on the parameters
-    for p, grad in zip(policy.net.params, policy_grad):
-        p += lr * grad
-
-    new_log_p = policy.log_prob_action(action_batch, state_batch)
-    logratio = old_log_p - new_log_p
-
-    # 1. Standard Monte Carlo Estimator
-    # logratio = logprob_new - logprob_old
-    # approx_kl_mc = logratio.mean()
-
-    # 2. Schulman's Estimator (The standard in PPO/CleanRL)
-    approx_kl_schulman = 0.5 * (logratio**2).mean()
-
-    train_metrics = {
-        "policy_log_probs": log_probs.item(),
-        "policy_grad_norm": avg_grad_norms.item(),
-        "value_loss": value_fn_loss,
-        "approx_kl": approx_kl_schulman.item(),
-    }
-
-    metrics_logger.log_train_metrics(global_step, train_metrics)
-    metrics_logger.log_speed(global_step, steps_done=global_step, start_time=start_time)
-
-    logger.info(f"======= Epoch {epoch} ======= ")
-    logger.info(f"Avg Steps: {avg_num_steps:.1f}")
-    logger.info(f"Mean Return: {mu:.2f} +/- {std:.2f}")
-    logger.info(f"Approx KL: {approx_kl_schulman:.4f}")
-    logger.info(f"Value Loss: {value_fn_loss:.2f}")
-    logger.info(f"Avg Policy Gradient Norm: {avg_grad_norms:.2f}")
-
-
-env.close()
-
-# Final evaluation pass
-# eval_video_logger.record_evaluation(policy, global_step)
-# metrics_logger.log_video(
-#     global_step, eval_video_logger.exp_folder, eval_video_logger.num_eval_episodes
-# )
-
-metrics_logger.close()
+if __name__ == "__main__":
+    cli()
