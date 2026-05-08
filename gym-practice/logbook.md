@@ -2,6 +2,14 @@
 
 Documented below are my general findings from implementing the algorithms.
 
+## 05/07 - other Environments
+
+- When switching to MountainCar or Acrobot, performance degrades
+- My intial thoughts were that the scale of the state spaces was just too small
+- Normalizing via a running mean / var is a possible solution
+  - However this is leading to instabilities in CartPole testing
+
+
 ## 05/05 - Full Vectorization
 - We can use gymnaisums vectorized environments
 - Neural nets trivially take in batches but log_prob calculation needed to be modified
