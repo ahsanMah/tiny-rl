@@ -139,18 +139,19 @@ class CategoricalDistribution:
         category_index = mx.argmax(mask, axis=1)
 
         return category_index.tolist()
-
+        
     def get_action(self, observation, sample=True):
         """Sample action for training, argmax action for evaluation."""
         obs = mx.asarray(observation, dtype=mx.float32)
-        log_probs = self.get_log_probs(obs)
         if sample:
+            log_probs = self.get_log_probs(obs)
             # int(mx.random.categorical(logits).item())
             return self.sample(log_probs)
 
         # Note that this returns a single action
         # i.e it assumes batch of 1
-        return int(mx.argmax(log_probs).item())
+        logits = self.net(observation)
+        return int(mx.argmax(logits).item())
 
 
 class Buffer:
@@ -258,7 +259,7 @@ def value_loss_fn(params, state, reward):
     return mx.mean((r_hat - reward).square())
 
 
-def get_minibatches(x, batch_size=32):
+def get_minibatches(x, batch_size=64):
     num_samples = len(x)
     drop_samples = num_samples % batch_size if batch_size < num_samples else 0
     num_batches = max(1, num_samples // batch_size)
@@ -336,6 +337,7 @@ def train_policy(policy, states, actions, advantages):
     new_log_probs = policy.log_prob_action(actions, states)
     logratio = old_log_probs - new_log_probs
     approx_kl_schulman = 0.5 * (logratio**2).mean().item()
+    logger.info(f"Number of epochs of policy training: {len(state_batches)}")
 
     return avg_loss, approx_kl_schulman
 
@@ -397,6 +399,7 @@ def run(
     val_train_batch_size = value_batch_size
     discount_factor = discount
     ema_factor = ema
+    num_timesteps_per_epoch = 10_000
 
     if seed is not None:
         mx.random.seed(seed)
@@ -479,7 +482,7 @@ def run(
     start_time = time.time()
 
     for epoch in range(num_epochs):
-        completed_episodes = 0
+        collected_timesteps = 0
         # Note: If we do not reset every epoch, any unfinished trajectory *resumes*
         # Allowing the model to learn longer horizon tasks
         observation_vec, info = env.reset()
@@ -487,7 +490,7 @@ def run(
         # Each parallel env will have its own buffer updated
         buffer_vec = [Buffer() for n in range(env.num_envs)]
 
-        while completed_episodes < num_trajectories:
+        while collected_timesteps < num_timesteps_per_epoch:
             # save current state
             state_vec = observation_vec
             for state in state_vec:
@@ -510,6 +513,7 @@ def run(
 
             for i in range(env.num_envs):
                 global_step += 1
+                collected_timesteps += 1
                 buffer = buffer_vec[i]
                 state = state_vec[i]
                 action = action_vec[i]
@@ -538,7 +542,6 @@ def run(
 
                 episode_over = terminated or truncated
                 if terminated or truncated:
-                    completed_episodes += 1
                     final_observation = (
                         normalize(info_vec["final_obs"][i], state_stats)
                         if state_normalization
