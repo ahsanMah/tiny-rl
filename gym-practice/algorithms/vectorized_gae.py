@@ -3,15 +3,12 @@ import os
 import sys
 import time
 from itertools import accumulate
-from multiprocessing import set_executable
-from this import s
 
 import click
 import gymnasium as gym
 import mlx.core as mx
 from loguru import logger
 from mlx.core import linalg as la
-from rich.pretty import pprint
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from logger_utils import RLLogger, VideoLogger
@@ -36,14 +33,33 @@ DEFAULT_NUM_TRAJECTORIES = 128
 DEFAULT_VAL_TRAIN_BATCH_SIZE = 32
 DEFAULT_DISCOUNT_FACTOR = 0.95
 DEFAULT_EMA_FACTOR = 0.96
-DEFAULT_STATE_NORMALIZATION = False
+DEFAULT_STATE_NORMALIZATION = True
 
+DEFAULT_RECORD_EVAL_VIDEOS = True
 DEFAULT_LOG_DIR = "./tb-logs/"
 DEFAULT_EVAL_LOG_DIR = "./eval-logs"
 
 
 def gamma(t):
     return discount_factor**t
+
+
+class VecStats:
+    def __init__(self):
+        """Computes running meand and variance according to Welford's algorithm"""
+        self.mean = 0
+        self.count = 0
+        self.m2 = 0
+
+    def update(self, x):
+        self.count += 1
+        prev_mean = self.mean * 1.0  # just to get a copy if arr
+        self.mean += (x - self.mean) / self.count
+        self.m2 += (x - prev_mean) * (x - self.mean)
+
+    @property
+    def var(self):
+        return self.m2 / (self.count - 1) if self.count > 1 else 0.0
 
 
 # Tiny linear net: 4 inputs -> hidden (16) -> 2 action logits
@@ -56,11 +72,13 @@ class TinyLinearNet:
         output_dim=2,
         init_scale=0.1,
         init_scale_final=0.01,
+        state_stats=None,
     ):
         self.W1 = mx.random.normal((input_dim, hidden_dim)) * init_scale
         self.b1 = mx.zeros(hidden_dim)
         self.W2 = mx.random.normal((hidden_dim, output_dim)) * init_scale_final
         self.b2 = mx.zeros(output_dim)
+        self.state_stats = state_stats
 
     @property
     def params(self) -> list:
@@ -73,6 +91,11 @@ class TinyLinearNet:
         """x: (4,) -> logits: (2,)"""
         x = mx.maximum(x @ self.W1 + self.b1, 0)  # ReLU
         return x @ self.W2 + self.b2  # Raw logits
+
+    def __call__(self, state):
+        if self.state_stats is not None:
+            state = normalize(state, self.state_stats)
+        return self.forward(state)
 
 
 class CategoricalDistribution:
@@ -105,7 +128,7 @@ class CategoricalDistribution:
     def get_action(self, observation, sample=True):
         """Sample action for training, argmax action for evaluation."""
         obs = mx.asarray(observation, dtype=mx.float32)
-        logits = self.net.forward(obs)
+        logits = self.net(obs)
         if sample:
             # int(mx.random.categorical(logits).item())
             return self.sample(logits)
@@ -195,24 +218,6 @@ class Buffer:
         self.ptr += len(rewards)
 
 
-class VecStats:
-    def __init__(self):
-        """Computes running meand and variance according to Welford's algorithm"""
-        self.mean = 0
-        self.count = 0
-        self.m2 = 0
-
-    def update(self, x):
-        self.count += 1
-        prev_mean = self.mean * 1.0  # just to get a copy if arr
-        self.mean += (x - self.mean) / self.count
-        self.m2 += (x - prev_mean) * (x - self.mean)
-
-    @property
-    def var(self):
-        return self.m2 / (self.count - 1) if self.count > 1 else 0.0
-
-
 def normalize(x, stats, eps=1e-8):
     mu, var = stats.mean, stats.var
     # print(f"State mean: {mu}, var: {var}, count: {state_stats.count}")
@@ -239,7 +244,7 @@ def vec_loss_fn(params, action, state, advantage):
 
 def value_loss_fn(params, state, reward):
     value_fn.update(params)
-    r_hat = value_fn.forward(state).flatten()
+    r_hat = value_fn(state).flatten()
     return mx.mean((r_hat - reward).square())
 
 
@@ -311,6 +316,7 @@ def run(
     seed,
     log_dir,
     eval_log_dir,
+    record_eval_videos,
 ):
     global \
         lr, \
@@ -359,12 +365,17 @@ def run(
     obs_shape = env.single_observation_space.shape[0]
     action_shape = env.single_action_space.n
 
+    # The statsitics will be recorded for the lifetime fo the algorithm
+    state_stats = VecStats()
+    reward_stats = VecStats()
+
     net = TinyLinearNet(
         input_dim=obs_shape,
         hidden_dim=hidden_dim,
         output_dim=action_shape,
         init_scale=init_scale,
         init_scale_final=init_scale_final,
+        state_stats=state_stats if state_normalization else None,
     )
     value_fn = TinyLinearNet(
         input_dim=obs_shape,
@@ -372,6 +383,7 @@ def run(
         output_dim=1,
         init_scale=value_init_scale,
         init_scale_final=value_init_scale_final,
+        state_stats=state_stats if state_normalization else None,
     )
     mx.eval(net.params)
     mx.eval(value_fn.params)
@@ -392,16 +404,15 @@ def run(
     print("state_min =", state_min)
     print("state_max =", state_max)
 
-    # The statsitics will be recorded for the lifetime fo the algorithm
-    state_stats = VecStats()
-    reward_stats = VecStats()
-
     # First evaluation pass
     global_step = 0
-    # eval_video_logger.record_evaluation(policy, global_step)
-    # metrics_logger.log_video(
-    #     global_step, eval_video_logger.exp_folder, eval_video_logger.num_eval_episodes
-    # )
+    if record_eval_videos:
+        eval_video_logger.record_evaluation(policy, global_step)
+        metrics_logger.log_video(
+            global_step,
+            eval_video_logger.exp_folder,
+            eval_video_logger.num_eval_episodes,
+        )
 
     start_time = time.time()
 
@@ -420,8 +431,8 @@ def run(
             for state in state_vec:
                 state_stats.update(state)
 
-            if state_normalization:
-                state_vec = normalize(state_vec, state_stats)
+            # if state_normalization:
+            #     state_vec = normalize(state_vec, state_stats)
 
             # print("for loop:", state_vec)
 
@@ -454,7 +465,7 @@ def run(
                 value = value_fn.forward(state).item()
 
                 # given state, policy produced action with probability that received reward
-                if global_step % 2_000 == 0:
+                if global_step % 10_000 == 0:
                     print("global_step =", global_step)
                     print(
                         state, observation, reward, terminated, truncated, action, value
@@ -509,10 +520,6 @@ def run(
         state_batch = mx.stack(
             [mx.asarray(s) for buffer in buffer_vec for s in buffer.state], axis=0
         )
-
-        # Normalize via the running mean and var
-        # state_batch = normalize_state(state_batch)
-        print(f"After normalization mean: {state_batch.mean(axis=0)}")
 
         # N x 1
         action_batch = mx.concatenate(
@@ -599,10 +606,13 @@ def run(
     env.close()
 
     # Final evaluation pass
-    # eval_video_logger.record_evaluation(policy, global_step)
-    # metrics_logger.log_video(
-    #     global_step, eval_video_logger.exp_folder, eval_video_logger.num_eval_episodes
-    # )
+    if record_eval_videos:
+        eval_video_logger.record_evaluation(policy, global_step)
+        metrics_logger.log_video(
+            global_step,
+            eval_video_logger.exp_folder,
+            eval_video_logger.num_eval_episodes,
+        )
 
     metrics_logger.close()
 
@@ -723,6 +733,7 @@ def cli(
         log_dir=log_dir,
         eval_log_dir=eval_log_dir,
         state_normalization=state_normalization,
+        record_eval_videos=DEFAULT_RECORD_EVAL_VIDEOS,
     )
 
 

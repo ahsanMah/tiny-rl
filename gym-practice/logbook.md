@@ -2,6 +2,13 @@
 
 Documented below are my general findings from implementing the algorithms.
 
+## 05/08 - Debugging Normalization
+- State was being normalized but the policy was still gettng unnormalized observations during play
+- The environment resetting was causing slight problems due to the next-step of gymnasium
+  - fixed to same-step where the final observation is kept separate and the reset obs is returned on failure
+- One big factor was the gradient explosion was occuring due to the normalization
+  - Normalizing the  value function gradient norm via clipping seems to have fixed this!
+
 ## 05/07 - other Environments
 
 - When switching to MountainCar or Acrobot, performance degrades
