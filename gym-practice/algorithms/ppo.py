@@ -252,36 +252,27 @@ def loss_fn(params, action, state):
     return policy.log_prob_action(action, state)
 
 
-def vec_loss_fn(params, action, state, advantage):
-    policy.net.update(params)
-    log_prob_of_policy = policy.log_prob_action(action, state)
-    # \sum (\grad theta) * r <==> \grad \sum (r * theta)
-    log_prob_of_policy = log_prob_of_policy * advantage
-    return log_prob_of_policy.sum()
-
-
 def value_loss_fn(params, state, reward):
     value_fn.update(params)
     r_hat = value_fn(state).flatten()
     return mx.mean((r_hat - reward).square())
 
 
+def get_minibatches(x, batch_size=32):
+    num_samples = len(x)
+    drop_samples = num_samples % batch_size if batch_size < num_samples else 0
+    num_batches = max(1, num_samples // batch_size)
+    x = x[drop_samples:]
+    return x.split(num_batches, axis=0)
+
+
 def train_value_fn(states, rewards):
 
-    num_samples = len(states)
-    drop_samples = (
-        num_samples % val_train_batch_size if val_train_batch_size < num_samples else 0
-    )
-    num_batches = max(1, num_samples // val_train_batch_size)
-
-    states = states[drop_samples:]
-    rewards = rewards[drop_samples:]
-
-    state_batch = states.split(num_batches, axis=0)
-    reward_batch = rewards.split(num_batches, axis=0)
+    state_batches = get_minibatches(states, val_train_batch_size)
+    reward_batches = get_minibatches(rewards, val_train_batch_size)
 
     avg_loss = 0.0
-    for state, reward in zip(state_batch, reward_batch):
+    for state, reward in zip(state_batches, reward_batches):
         # we update value_fn for each (state, reward) pair
         loss, grad_theta = value_grad_fn(value_fn.params, state=state, reward=reward)
         avg_loss += loss.item()
@@ -291,8 +282,62 @@ def train_value_fn(states, rewards):
         for p, grad in zip(value_fn.params, grad_theta):
             p -= lr_val * grad
 
-    avg_loss /= num_batches
+    avg_loss /= len(state_batches)
     return avg_loss
+
+
+def policy_loss_fn(params, old_log_prob, action, state, advantage, clip_ratio=0.2):
+
+    policy.net.update(params)
+    # log_prob of action given state
+    log_prob = policy.log_prob_action(action, state)
+
+    # Clipped surrogate objective
+    # r_t = probability_ratio
+    r_t = mx.exp(log_prob - old_log_prob)
+    # TODO: keep track of how many timepoints were clipped
+    r_t = mx.minimum(r_t, mx.clip(r_t, 1 - clip_ratio, 1 + clip_ratio))
+
+    loss = r_t * advantage
+    return loss.mean()
+
+
+def train_policy(policy, states, actions, advantages):
+    old_log_probs = policy.log_prob_action(actions, states)
+
+    state_batches = get_minibatches(states)
+    action_batches = get_minibatches(actions)
+    advantage_batches = get_minibatches(advantages)
+    old_log_prob_batches = get_minibatches(old_log_probs)
+
+    # We will perform multiple gradient updates
+    avg_loss = 0.0
+    for state, action, advantage, old_log_prob in zip(
+        state_batches,
+        action_batches,
+        advantage_batches,
+        old_log_prob_batches,
+    ):
+        loss, policy_grad = policy_grad_fn(
+            policy.net.params,
+            old_log_prob=old_log_prob,
+            state=state,
+            action=action,
+            advantage=advantage,
+        )
+        avg_loss += loss.item()
+        # Gradient ascent step on the parameters sgd style
+        policy_grad = clip_grad_norm(policy_grad, grad_clip_value)
+        for p, grad in zip(policy.net.params, policy_grad):
+            p += lr * grad
+
+    avg_loss /= len(state_batches)
+
+    new_log_probs = policy.log_prob_action(actions, states)
+    logratio = old_log_probs - new_log_probs
+    approx_kl_schulman = 0.5 * (logratio**2).mean().item()
+
+    return avg_loss, approx_kl_schulman
 
 
 def clip_grad_norm(grad, grad_clip_value):
@@ -309,7 +354,7 @@ def clip_grad_norm(grad, grad_clip_value):
     return grad
 
 
-vec_policy_grad_fn = mx.value_and_grad(vec_loss_fn)
+policy_grad_fn = mx.value_and_grad(policy_loss_fn)
 value_grad_fn = mx.value_and_grad(value_loss_fn)
 
 
@@ -448,11 +493,6 @@ def run(
             for state in state_vec:
                 state_stats.update(state)
 
-            # if state_normalization:
-            #     state_vec = normalize(state_vec, state_stats)
-
-            # print("for loop:", state_vec)
-
             # Choose an action using the tiny net (simulates a deterministic policy)
             action_vec = policy.get_action(state_vec, sample=True)
 
@@ -560,15 +600,12 @@ def run(
         if epoch == 0:
             continue
 
-        log_probs, policy_grad = vec_policy_grad_fn(
-            policy.net.params,
-            action=action_batch,
-            state=state_batch,
-            advantage=advantage_batch,
+        policy_loss, approx_kl_schulman = train_policy(
+            policy, state_batch, action_batch, advantage_batch
         )
 
-        avg_grad_norms = mx.array([la.norm(p) for p in policy_grad]).mean()
-        avg_grad_norms /= num_trajectories
+        # avg_grad_norms = mx.array([la.norm(p) for p in policy_grad]).mean()
+        # avg_grad_norms /= num_trajectories
 
         episode_returns = mx.concatenate(
             [mx.array(buffer.episode_return) for buffer in buffer_vec], axis=0
@@ -576,36 +613,14 @@ def run(
         episode_steps = mx.concatenate(
             [mx.array(buffer.episode_steps) for buffer in buffer_vec], axis=0
         )
-        mu = reward_to_go_batch.mean().item()
-        std = reward_to_go_batch.std().item()
+
         avg_num_steps = episode_steps.mean().item()
 
-        for i in range(len(policy_grad)):
-            # Approximate expectation via sample mean over sampled timesteps.
-            policy_grad[i] /= num_trajectories
-
-        grad = clip_grad_norm(policy_grad, grad_clip_value)
-        old_log_p = policy.log_prob_action(action_batch, state_batch)
-
-        # One gradient ascent step on the parameters
-        for p, grad in zip(policy.net.params, policy_grad):
-            p += lr * grad
-
-        new_log_p = policy.log_prob_action(action_batch, state_batch)
-        logratio = old_log_p - new_log_p
-
-        # 1. Standard Monte Carlo Estimator
-        # logratio = logprob_new - logprob_old
-        # approx_kl_mc = logratio.mean()
-
-        # 2. Schulman's Estimator (The standard in PPO/CleanRL)
-        approx_kl_schulman = 0.5 * (logratio**2).mean()
-
         train_metrics = {
-            "policy_log_probs": log_probs.item(),
-            "policy_grad_norm": avg_grad_norms.item(),
+            "policy_loss": policy_loss,
+            # "policy_grad_norm": avg_grad_norms.item(),
             "value_loss": value_fn_loss,
-            "approx_kl": approx_kl_schulman.item(),
+            "approx_kl": approx_kl_schulman,
         }
 
         metrics_logger.log_train_metrics(global_step, train_metrics)
@@ -615,10 +630,16 @@ def run(
 
         logger.info(f"======= Epoch {epoch} ======= ")
         logger.info(f"Avg Steps: {avg_num_steps:.1f}")
-        logger.info(f"Mean Reward-to-Go: {mu:.2f} +/- {std:.2f}")
+        logger.info(
+            f"Mean Return: {episode_returns.mean().item():.2f} +/- {episode_returns.std().item():.2f}"
+        )
+        logger.info(
+            f"Mean Reward-to-Go: {reward_to_go_batch.mean().item():.2f} +/- {reward_to_go_batch.std().item():.2f}"
+        )
         logger.info(f"Approx KL: {approx_kl_schulman:.4f}")
         logger.info(f"Value Loss: {value_fn_loss:.2f}")
-        logger.info(f"Avg Policy Gradient Norm: {avg_grad_norms:.2f}")
+        logger.info(f"Policy Loss: {policy_loss:.2f}")
+        # logger.info(f"Avg Policy Gradient Norm: {avg_grad_norms:.2f}")
 
     env.close()
 
