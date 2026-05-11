@@ -44,11 +44,17 @@ def load_nasdaq_dataset(
     return dataset
 
 
-def filter_ticker(dataset: Dataset, ticker: str) -> Dataset:
+def filter_ticker(
+    dataset: Dataset, ticker: str, ticker_column_name="ticker"
+) -> Dataset:
     """Filter a dataset to a single ticker symbol."""
 
     ticker_norm = ticker.strip().upper()
-    return dataset.filter(lambda row: row.get("ticker") == ticker_norm)
+    filtered = dataset.filter(
+        lambda row: row.get(ticker_column_name) == ticker_norm
+    )
+    print("Filtered samples:", len(filtered))
+    return filtered
 
 
 def split_train_test(
