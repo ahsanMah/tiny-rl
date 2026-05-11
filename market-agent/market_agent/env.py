@@ -118,7 +118,7 @@ class MarketEnv(gym.Env):
     def _apply_action(self, action: Action) -> None:
         price = self._current_price()
         if action == Action.SELL:
-            if self._position > -self.config.max_position:
+            if self._position > 0:
                 self._position -= 1
                 self._cash += price
         elif action == Action.BUY:
