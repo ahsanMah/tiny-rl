@@ -1,3 +1,5 @@
+from datetime import datetime
+
 import numpy as np
 
 from market_agent.data import (
@@ -23,14 +25,25 @@ def run_random_episodes(
         _, info = env.reset(seed=seed + episode)
         total_reward = 0.0
         print(f"Episode {episode}")
-        print("step  idx  action  price     reward     position   cash")
+        print("step  date        action  price     reward     position   cash")
         for step in range(1, max_steps + 1):
             action = int(rng.integers(0, env.action_space.n))
             _, reward, terminated, truncated, info = env.step(action)
             total_reward += reward
             price = env.dataset[info["index"]][env.config.price_column]
+            raw_date = env.dataset[info["index"]].get("date")
+            if isinstance(raw_date, str):
+                try:
+                    date_value = datetime.fromisoformat(raw_date)
+                    date_label = date_value.strftime("%Y-%m-%d")
+                except ValueError:
+                    date_label = raw_date
+            elif hasattr(raw_date, "strftime"):
+                date_label = raw_date.strftime("%Y-%m-%d")
+            else:
+                date_label = "n/a"
             print(
-                f"{step:>4}  {info['index']:>3}  {Action(action).name:<6}"
+                f"{step:>4}  {date_label:<10}  {Action(action).name:<6}"
                 f"  {price:>7.2f}  {reward:>8.2f}"
                 f"  {info['position']:>9}  {info['cash']:>7.2f}"
             )
