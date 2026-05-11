@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import IntEnum
 from typing import Any, Dict, Optional, Sequence
 
-import numpy as np
-from datasets import Dataset
-from datasets import Value
 import gymnasium as gym
+import numpy as np
+from datasets import Dataset, Value
 from gymnasium import spaces
 
 
@@ -22,6 +22,12 @@ class MarketEnvConfig:
     price_column: str = "close"
     reward_scale: float = 1.0
     feature_columns: Optional[Sequence[str]] = None
+
+
+class Action(IntEnum):
+    SELL = 0
+    HOLD = 1
+    BUY = 2
 
 
 class MarketEnv(gym.Env):
@@ -54,7 +60,7 @@ class MarketEnv(gym.Env):
             shape=(self.config.window_size, len(self._feature_columns)),
             dtype=np.float32,
         )
-        self.action_space = spaces.Discrete(3)
+        self.action_space = spaces.Discrete(len(Action))
 
     def reset(
         self,
@@ -71,10 +77,8 @@ class MarketEnv(gym.Env):
         info = self._get_info()
         return observation, info
 
-    def step(
-        self, action: int
-    ) -> tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
-        self._apply_action(action)
+    def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
+        self._apply_action(Action(action))
         self._index += 1
         terminated = self._index >= len(self.dataset) - 1
         observation = self._get_observation()
@@ -111,18 +115,26 @@ class MarketEnv(gym.Env):
             )
         return numeric_columns
 
-    def _apply_action(self, action: int) -> None:
-        if action == 0:
-            self._position = max(-self.config.max_position, self._position - 1)
-        elif action == 2:
-            self._position = min(self.config.max_position, self._position + 1)
+    def _apply_action(self, action: Action) -> None:
+        price = self._current_price()
+        if action == Action.SELL:
+            if self._position > -self.config.max_position:
+                self._position -= 1
+                self._cash += price
+        elif action == Action.BUY:
+            if self._position < self.config.max_position and self._cash >= price:
+                self._position += 1
+                self._cash -= price
 
     def _compute_reward(self) -> float:
-        price = float(self.dataset[self._index][self.config.price_column])
+        price = self._current_price()
         value = self._cash + self._position * price
         reward = (value - self._prev_value) * self.config.reward_scale
         self._prev_value = value
         return reward
+
+    def _current_price(self) -> float:
+        return float(self.dataset[self._index][self.config.price_column])
 
     def _get_info(self) -> Dict[str, Any]:
         return {
