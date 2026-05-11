@@ -21,6 +21,7 @@ class DatasetSplitConfig:
 def load_nasdaq_dataset(
     *,
     data_dir: str = "data",
+    data_files: Optional[str] = None,
     split: Optional[str] = None,
     streaming: bool = False,
 ) -> Dataset | DatasetDict:
@@ -28,6 +29,7 @@ def load_nasdaq_dataset(
 
     Args:
         data_dir: Local cache directory.
+        data_files: Optional data file name to load from the dataset.
         split: Optional dataset split name to load directly.
         streaming: Whether to stream the dataset.
     """
@@ -35,6 +37,7 @@ def load_nasdaq_dataset(
     dataset = load_dataset(
         "benstaf/nasdaq_2013_2023",
         cache_dir=data_dir,
+        data_files=data_files,
         split=split,
         streaming=streaming,
     )
@@ -82,7 +85,10 @@ def ensure_datetime_sorted(
 
 
 def main() -> None:
-    dataset = load_nasdaq_dataset(split="train")
+    dataset = load_nasdaq_dataset(
+        data_files="trade_data_2019_2023.csv",
+        split="train",
+    )
     print("Columns:", dataset.column_names)
 
 
