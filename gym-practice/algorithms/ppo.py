@@ -2,14 +2,15 @@
 PPO built on vecotrized GAE
 
 TODO
-- [ ] Add clipped surrogate reward
-- [ ] Swirch to Adam
+- [x] Add clipped surrogate reward
+- [ ] Switch to Adam
 - [ ] Add entropy factor
 - [ ] Switch to continuous action distribution (gaussian)
 
 
 """
 
+import math
 import os
 import sys
 import time
@@ -18,6 +19,7 @@ from itertools import accumulate
 import click
 import gymnasium as gym
 import mlx.core as mx
+import numpy as np
 from loguru import logger
 from mlx.core import linalg as la
 
@@ -139,7 +141,7 @@ class CategoricalDistribution:
         category_index = mx.argmax(mask, axis=1)
 
         return category_index.tolist()
-        
+
     def get_action(self, observation, sample=True):
         """Sample action for training, argmax action for evaluation."""
         obs = mx.asarray(observation, dtype=mx.float32)
@@ -152,6 +154,49 @@ class CategoricalDistribution:
         # i.e it assumes batch of 1
         logits = self.net(observation)
         return int(mx.argmax(logits).item())
+
+
+class GaussianDistribution:
+    def __init__(self, net):
+        self.net = net
+
+        # Your action space could be a scalar
+        # OR a multidim vector (think multiple joints moving)
+
+    @property
+    def std(self):
+        # assume diag covariance of 1 - should be learnable in future
+        return 1
+
+    def log_prob_action(self, action, observation):
+        # N x action_dim
+        mu = self.net(observation)
+        var = self.std**2
+
+        # logprob(Normal(action, mu=diag, cov=1))
+
+        log_std = math.log(self.std)
+        normalization_constant = -0.5 * math.log(2 * math.pi)
+        log_prob = -((action - mu) ** 2) / (2 * var) - log_std + normalization_constant
+
+        # Sum over independent Gaussians
+        log_prob = log_prob.sum(axis=1)
+        return log_prob
+
+    def sample(self, observation):
+        mu = self.net(observation)
+        z = mx.random.normal(shape=mu.shape)
+        return z * self.std + mu
+
+    def get_action(self, observation, sample=True):
+        """Sample action for training, deterministic action for evaluation."""
+        observation = mx.asarray(observation, dtype=mx.float32)
+        if sample:
+            return self.sample(observation)
+
+        # No sampling, the mu is deterministic given a state
+        mu = self.net(observation)
+        return mu
 
 
 class Buffer:
@@ -427,7 +472,12 @@ def run(
     # [cart_position, cart_velocity, pole_angle, pole_angular_velocity]
 
     obs_shape = env.single_observation_space.shape[0]
-    action_shape = env.single_action_space.n
+
+    continuous_action_space = env.single_action_space.dtype == np.float32
+    if continuous_action_space:
+        action_shape = env.single_action_space.shape[0]
+    else:
+        action_shape = env.single_action_space.n
 
     # The statsitics will be recorded for the lifetime fo the algorithm
     state_stats = VecStats()
@@ -457,7 +507,11 @@ def run(
     print(net)
     print("================")
 
-    policy = CategoricalDistribution(net)
+    policy = (
+        GaussianDistribution(net)
+        if continuous_action_space
+        else CategoricalDistribution(net)
+    )
 
     metrics_logger = RLLogger(log_dir, exp_name=f"{env_name}-ppo")
     eval_video_logger = VideoLogger(
