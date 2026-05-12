@@ -16,7 +16,6 @@ import sys
 import time
 from itertools import accumulate
 
-import click
 import gymnasium as gym
 import mlx.core as mx
 import numpy as np
@@ -27,30 +26,6 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from logger_utils import RLLogger, VideoLogger
 
 # mx.random.seed(4321)
-
-DEFAULT_ENV_NAME = "CartPole-v1"
-DEFAULT_NUM_PARALLEL_ENVS = 4
-DEFAULT_MAX_EPISODE_STEPS = 500
-
-DEFAULT_HIDDEN_DIM = 32
-DEFAULT_INIT_SCALE = 0.1
-DEFAULT_INIT_SCALE_FINAL = 0.01
-DEFAULT_VALUE_INIT_SCALE = 0.1
-DEFAULT_VALUE_INIT_SCALE_FINAL = 1.0
-
-DEFAULT_POLICY_LR = 0.01
-DEFAULT_VALUE_LR = 0.02
-DEFAULT_GRAD_CLIP_VALUE = 2.0
-DEFAULT_NUM_EPOCHS = 20
-DEFAULT_NUM_TRAJECTORIES = 128
-DEFAULT_VAL_TRAIN_BATCH_SIZE = 32
-DEFAULT_DISCOUNT_FACTOR = 0.95
-DEFAULT_EMA_FACTOR = 0.96
-DEFAULT_STATE_NORMALIZATION = True
-
-DEFAULT_RECORD_EVAL_VIDEOS = True
-DEFAULT_LOG_DIR = "./tb-logs/"
-DEFAULT_EVAL_LOG_DIR = "./eval-logs"
 
 
 def gamma(t):
@@ -718,135 +693,3 @@ def run(
         )
 
     metrics_logger.close()
-
-
-@click.command()
-@click.option("--env-name", default=DEFAULT_ENV_NAME, show_default=True)
-@click.option(
-    "--num-parallel-envs",
-    default=DEFAULT_NUM_PARALLEL_ENVS,
-    show_default=True,
-    type=int,
-)
-@click.option(
-    "--max-episode-steps",
-    default=DEFAULT_MAX_EPISODE_STEPS,
-    show_default=True,
-    type=int,
-)
-@click.option("--hidden-dim", default=DEFAULT_HIDDEN_DIM, show_default=True, type=int)
-@click.option("--init-scale", default=DEFAULT_INIT_SCALE, show_default=True, type=float)
-@click.option(
-    "--init-scale-final",
-    default=DEFAULT_INIT_SCALE_FINAL,
-    show_default=True,
-    type=float,
-)
-@click.option(
-    "--value-init-scale",
-    default=DEFAULT_VALUE_INIT_SCALE,
-    show_default=True,
-    type=float,
-)
-@click.option(
-    "--value-init-scale-final",
-    default=DEFAULT_VALUE_INIT_SCALE_FINAL,
-    show_default=True,
-    type=float,
-)
-@click.option("--policy-lr", default=DEFAULT_POLICY_LR, show_default=True, type=float)
-@click.option("--value-lr", default=DEFAULT_VALUE_LR, show_default=True, type=float)
-@click.option(
-    "--grad-clip-value",
-    "grad_clip",
-    default=DEFAULT_GRAD_CLIP_VALUE,
-    show_default=True,
-    type=float,
-)
-@click.option("--num-epochs", default=DEFAULT_NUM_EPOCHS, show_default=True, type=int)
-@click.option(
-    "--num-trajectories", default=DEFAULT_NUM_TRAJECTORIES, show_default=True, type=int
-)
-@click.option(
-    "--value-batch-size",
-    "value_batch_size",
-    default=DEFAULT_VAL_TRAIN_BATCH_SIZE,
-    show_default=True,
-    type=int,
-)
-@click.option(
-    "--discount-factor",
-    "discount",
-    default=DEFAULT_DISCOUNT_FACTOR,
-    show_default=True,
-    type=float,
-)
-@click.option(
-    "--ema-factor", "ema", default=DEFAULT_EMA_FACTOR, show_default=True, type=float
-)
-@click.option(
-    "--state-normalization",
-    default=DEFAULT_STATE_NORMALIZATION,
-    show_default=True,
-    type=bool,
-)
-@click.option("--seed", default=None, type=int, show_default=True)
-@click.option("--log-dir", default=DEFAULT_LOG_DIR, show_default=True)
-@click.option("--eval-log-dir", default=DEFAULT_EVAL_LOG_DIR, show_default=True)
-@click.option(
-    "--record-eval-videos",
-    "record_eval_videos",
-    default=DEFAULT_RECORD_EVAL_VIDEOS,
-    show_default=True,
-    type=bool,
-)
-def cli(
-    env_name,
-    num_parallel_envs,
-    max_episode_steps,
-    hidden_dim,
-    init_scale,
-    init_scale_final,
-    value_init_scale,
-    value_init_scale_final,
-    policy_lr,
-    value_lr,
-    grad_clip,
-    num_epochs,
-    num_trajectories,
-    value_batch_size,
-    state_normalization,
-    discount,
-    ema,
-    seed,
-    log_dir,
-    eval_log_dir,
-    record_eval_videos,
-):
-    run(
-        env_name=env_name,
-        num_parallel_envs=num_parallel_envs,
-        max_episode_steps=max_episode_steps,
-        hidden_dim=hidden_dim,
-        init_scale=init_scale,
-        init_scale_final=init_scale_final,
-        value_init_scale=value_init_scale,
-        value_init_scale_final=value_init_scale_final,
-        policy_lr=policy_lr,
-        value_lr=value_lr,
-        grad_clip=grad_clip,
-        num_epochs=num_epochs,
-        num_trajectories=num_trajectories,
-        value_batch_size=value_batch_size,
-        discount=discount,
-        ema=ema,
-        seed=seed,
-        log_dir=log_dir,
-        eval_log_dir=eval_log_dir,
-        state_normalization=state_normalization,
-        record_eval_videos=record_eval_videos,
-    )
-
-
-if __name__ == "__main__":
-    cli()
