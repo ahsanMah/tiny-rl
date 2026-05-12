@@ -5,7 +5,7 @@ TODO
 - [x] Add clipped surrogate reward
 - [ ] Switch to Adam
 - [ ] Add entropy factor
-- [ ] Switch to continuous action distribution (gaussian)
+- [x] Switch to continuous action distribution (gaussian)
 
 
 """
@@ -155,6 +155,10 @@ class CategoricalDistribution:
         logits = self.net(observation)
         return int(mx.argmax(logits).item())
 
+    def update(self, params):
+        self.net.update(params)
+        return
+
 
 class GaussianDistribution:
     def __init__(self, net):
@@ -197,6 +201,10 @@ class GaussianDistribution:
         # No sampling, the mu is deterministic given a state
         mu = self.net(observation)
         return mu
+
+    def update(self, params):
+        self.net.update(params)
+        return
 
 
 class Buffer:
@@ -334,7 +342,7 @@ def train_value_fn(states, rewards):
 
 def policy_loss_fn(params, old_log_prob, action, state, advantage, clip_ratio=0.2):
 
-    policy.net.update(params)
+    policy.update(params)
     # log_prob of action given state
     log_prob = policy.log_prob_action(action, state)
 
@@ -454,7 +462,7 @@ def run(
         env_name,
         num_envs=num_parallel_envs,
         vectorization_mode="sync",
-        max_episode_steps=max_episode_steps,
+        # max_episode_steps=max_episode_steps,
         vector_kwargs={"autoreset_mode": gym.vector.AutoresetMode.SAME_STEP},
     )
 
