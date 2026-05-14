@@ -391,7 +391,7 @@ value_grad_fn = mx.value_and_grad(value_loss_fn)
 def run(
     env_name,
     num_parallel_envs,
-    max_episode_steps,
+    num_timesteps_per_epoch,
     hidden_dim,
     init_scale,
     init_scale_final,
@@ -401,7 +401,6 @@ def run(
     value_lr,
     grad_clip,
     num_epochs,
-    num_trajectories,
     value_batch_size,
     state_normalization,
     discount,
@@ -410,6 +409,7 @@ def run(
     log_dir,
     eval_log_dir,
     record_eval_videos,
+    **kwargs,  # catchall for unused args
 ):
     global \
         lr, \
@@ -427,7 +427,7 @@ def run(
     val_train_batch_size = value_batch_size
     discount_factor = discount
     ema_factor = ema
-    num_timesteps_per_epoch = 10_000
+    # num_timesteps_per_epoch = 10_000
 
     if seed is not None:
         mx.random.seed(seed)

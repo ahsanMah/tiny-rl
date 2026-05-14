@@ -16,6 +16,7 @@ console = Console()
 DEFAULTS = {
     "env_name": "CartPole-v1",
     "num_parallel_envs": 4,
+    "num_timesteps_per_epoch": 2048,
     "max_episode_steps": 500,
     "hidden_dim": 32,
     "init_scale": 0.1,
@@ -49,6 +50,12 @@ DEFAULTS = {
 @click.option(
     "--num-parallel-envs",
     default=DEFAULTS["num_parallel_envs"],
+    show_default=True,
+    type=int,
+)
+@click.option(
+    "--num-timesteps-per-epoch",
+    default=DEFAULTS["num_timesteps_per_epoch"],
     show_default=True,
     type=int,
 )
@@ -139,6 +146,7 @@ def main(
     algorithm,
     env_name,
     num_parallel_envs,
+    num_timesteps_per_epoch,
     max_episode_steps,
     hidden_dim,
     init_scale,
@@ -167,6 +175,7 @@ def main(
     table.add_row("Algorithm", algorithm)
     table.add_row("Environment", env_name)
     table.add_row("Parallel Envs", str(num_parallel_envs))
+    table.add_row("Timesteps/Epoch", str(num_timesteps_per_epoch))
     table.add_row("Max Episode Steps", str(max_episode_steps))
     table.add_row("Hidden Dim", str(hidden_dim))
     table.add_row("Init Scale", str(init_scale))
@@ -197,29 +206,32 @@ def main(
 
     # Dynamically import and run the selected algorithm
     algo_module = __import__(f"algorithms.{algorithm}", fromlist=["run"])
-    algo_module.run(
-        env_name=env_name,
-        num_parallel_envs=num_parallel_envs,
-        max_episode_steps=max_episode_steps,
-        hidden_dim=hidden_dim,
-        init_scale=init_scale,
-        init_scale_final=init_scale_final,
-        value_init_scale=value_init_scale,
-        value_init_scale_final=value_init_scale_final,
-        policy_lr=policy_lr,
-        value_lr=value_lr,
-        grad_clip=grad_clip,
-        num_epochs=num_epochs,
-        num_trajectories=num_trajectories,
-        value_batch_size=value_batch_size,
-        state_normalization=state_normalization,
-        discount=discount,
-        ema=ema,
-        seed=seed,
-        log_dir=log_dir,
-        eval_log_dir=eval_log_dir,
-        record_eval_videos=record_eval_videos,
-    )
+    algo_kwargs = {
+        "env_name": env_name,
+        "num_parallel_envs": num_parallel_envs,
+        "max_episode_steps": max_episode_steps,
+        "hidden_dim": hidden_dim,
+        "init_scale": init_scale,
+        "init_scale_final": init_scale_final,
+        "value_init_scale": value_init_scale,
+        "value_init_scale_final": value_init_scale_final,
+        "policy_lr": policy_lr,
+        "value_lr": value_lr,
+        "grad_clip": grad_clip,
+        "num_epochs": num_epochs,
+        "num_trajectories": num_trajectories,
+        "value_batch_size": value_batch_size,
+        "state_normalization": state_normalization,
+        "discount": discount,
+        "ema": ema,
+        "seed": seed,
+        "log_dir": log_dir,
+        "eval_log_dir": eval_log_dir,
+        "record_eval_videos": record_eval_videos,
+        "num_timesteps_per_epoch": num_timesteps_per_epoch,
+    }
+
+    algo_module.run(**algo_kwargs)
 
 
 if __name__ == "__main__":
