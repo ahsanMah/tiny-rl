@@ -3,6 +3,7 @@ import os
 import sys
 import time
 from itertools import accumulate
+from posix import stat
 from typing import NamedTuple
 
 import gymnasium as gym
@@ -68,7 +69,7 @@ class Buffer:
         self.reward = []
         self.ptr = 0
 
-    def complete(self, terminal_value=0.0):
+    def complete(self, discount_factor, ema_factor, terminal_value=0.0):
         # Grab all recorded values and rewards
         trajectory_values = self.value[self.ptr :]
         rewards = self.reward[self.ptr :]
@@ -78,16 +79,16 @@ class Buffer:
         # otherwise this should be the value_fn(state)
         v_st_next = v_st[1:] + [terminal_value]
 
-        v_st = mx.array(v_st)
-        v_st_next = mx.array(v_st_next)
-        reward_vec = mx.asarray(rewards)
+        v_st = jnp.array(v_st)
+        v_st_next = jnp.array(v_st_next)
+        reward_vec = jnp.asarray(rewards)
 
-        td_residuals = reward_vec + gamma(1) * v_st_next - v_st
+        td_residuals = reward_vec + discount_factor * v_st_next - v_st
         td_residuals = td_residuals[::-1].tolist()
-        # advantage = td_residual + ema_factor * gamma(1) * future_t_advantage
+        # advantage = td_residual + ema_factor * discount_factor * future_t_advantage
         advantage = accumulate(
             td_residuals,
-            lambda future_adv, td: td + ema_factor * gamma(1) * future_adv,
+            lambda future_adv, td: td + ema_factor * discount_factor * future_adv,
         )
         advantage = list(reversed(list(advantage)))
 
@@ -96,7 +97,7 @@ class Buffer:
         # r[1] =                gamma(0)r[1] + gamma(1)r[2] + gamma(2)r[3]
         # r[0] = gamma(0)r[0] + gamma(1)r[1] + gamma(2)r[2] + gamma(3)r[3]
         reward_to_go = accumulate(
-            rewards[::-1], lambda r_sum, rt: rt + gamma(1) * r_sum
+            rewards[::-1], lambda r_sum, rt: rt + discount_factor * r_sum
         )
         reward_to_go = list(reversed(list(reward_to_go)))
 
@@ -130,7 +131,26 @@ class TinyLinearNet(nnx.Module):
         self.ln = nnx.LayerNorm(dmid, rngs=rngs)
         self.linear2 = nnx.Linear(dmid, dout, rngs=rngs)
 
+        # state stats
+        self.count = nnx.Variable(jnp.zeros(1, dtype=jnp.int32))
+        self.mu = nnx.Variable(jnp.zeros(shape=(1, din)))
+        self.m2 = nnx.Variable(jnp.zeros(shape=(1, din)))
+
+    def _normalize(self, x, eps=1e-5):
+        self._update_stats(x)
+        var = self.m2 / self.count
+        return (x - self.mu) / (var + eps) ** 0.5
+
+    def _update_stats(self, x):
+        _x = jnp.mean(x, axis=0, keepdims=True)
+        prev_mean = self.mu * 1.0
+
+        self.count[...] += x.shape[0]
+        self.mu[...] += (_x - self.mu) / self.count
+        self.m2[...] += (_x - prev_mean) * (_x - self.mu)
+
     def __call__(self, x: jax.Array):
+        x = self._normalize(x)
         x = nnx.gelu(self.ln(self.linear1(x)))
         return self.linear2(x)
 
@@ -185,49 +205,38 @@ def normalize(x, stats, eps=1e-8):
 
 def get_minibatches(x, batch_size=64):
     num_samples = len(x)
-    drop_samples = num_samples % batch_size if batch_size < num_samples else 0
-    num_batches = max(1, num_samples // batch_size)
-    x = x[drop_samples:]
-    return x.split(num_batches, axis=0)
+    num_batches = max(1, (num_samples + batch_size - 1) // batch_size)
+    # drop_samples = num_samples % batch_size if batch_size < num_samples else 0
+    # x = x[drop_samples:]
+    # return jnp.split(x, num_batches, axis=0)
+
+    xs = jnp.array_split(x, num_batches)
+    xs = jnp.stack(xs)
+    return xs
 
 
-def train_value_fn(states, rewards, val_train_batch_size=128):
+@nnx.jit
+def value_train_step(value_fn, optimizer, states: jax.Array, rewards: jax.Array):
+    def value_loss_fn(value_fn: nnx.Module, states: jax.Array, rewards: jax.Array):
+        return jnp.mean((value_fn(states) - rewards) ** 2)
 
+    loss, grads = nnx.value_and_grad(value_loss_fn)(value_fn, states, rewards)
+    optimizer.update(value_fn, grads)  # In place updates.
+    return loss
+
+
+def train_value_fn(value_fn, optimizer, states, rewards, val_train_batch_size=128):
     state_batches = get_minibatches(states, val_train_batch_size)
     reward_batches = get_minibatches(rewards, val_train_batch_size)
 
     avg_loss = 0.0
     for state, reward in zip(state_batches, reward_batches):
         # we update value_fn for each (state, reward) pair
-        loss, grad_theta = value_grad_fn(value_fn.params, state=state, reward=reward)
+        loss = value_train_step(value_fn, optimizer, states=state, rewards=reward)
         avg_loss += loss.item()
-
-        # SGD step
-        grad_theta = clip_grad_norm(grad_theta, grad_clip_value)
-        for p, grad in zip(value_fn.params, grad_theta):
-            p -= lr_val * grad
 
     avg_loss /= len(state_batches)
     return avg_loss
-
-
-# @nnx.jit  # Automatic state management
-# def train_step(model, optimizer, x, y, rngs):
-#     def loss_fn(model: nnx.Module, rngs: nnx.Rngs):
-#         y_pred = model(x, rngs)
-#         return jnp.mean((y_pred - y) ** 2)
-
-#     loss, grads = nnx.value_and_grad(loss_fn)(model, rngs)
-#     optimizer.update(model, grads)  # In place updates.
-
-#     return loss
-
-
-# x, y = jnp.ones((5, 2)), jnp.ones((5, 10))
-# loss = train_step(model, optimizer, x, y, rngs)
-
-# print(f"{loss = }")
-# print(f"{optimizer.step.value = }")
 
 
 def policy_log_prob(net: nnx.Module, action: jax.Array, state: jax.Array):
@@ -243,7 +252,6 @@ def policy_log_prob(net: nnx.Module, action: jax.Array, state: jax.Array):
 batched_policy_log_prob = vmap(policy_log_prob, in_axes=[None, 0, 0])
 
 
-@jit
 def policy_loss_fn(net: nnx.Module, rollout: Rollout, clip_ratio: float):
 
     # log_prob of action given state
@@ -278,7 +286,7 @@ def train_policy(policy, optimizer, states, actions, advantages):
     action_batches = get_minibatches(actions)
     advantage_batches = get_minibatches(advantages)
 
-    old_log_probs = batched_policy_log_prob(policy.net, action_batches, state_batches)
+    old_log_probs = batched_policy_log_prob(policy, action_batches, state_batches)
     old_log_probs = get_minibatches(old_log_probs)
 
     # We will perform multiple gradient updates
@@ -291,11 +299,11 @@ def train_policy(policy, optimizer, states, actions, advantages):
             advantages=advantage_batches[i],
             log_probs=old_log_probs[i],
         )
-        avg_loss += policy_train_step(policy.net, optimizer, rollout=rollout)
+        avg_loss += policy_train_step(policy, optimizer, rollout=rollout)
 
     avg_loss /= len(state_batches)
 
-    new_log_probs = policy.log_prob_action(actions, states)
+    new_log_probs = batched_policy_log_prob(policy, action_batches, state_batches)
     logratio = old_log_probs - new_log_probs
     approx_kl_schulman = 0.5 * (logratio**2).mean().item()
     logger.info(f"Number of epochs of policy training: {len(state_batches)}")
@@ -320,7 +328,7 @@ def clip_grad_norm(grad, grad_clip_value):
 def run(
     env_name,
     num_parallel_envs,
-    max_episode_steps,
+    num_timesteps_per_epoch,
     hidden_dim,
     init_scale,
     init_scale_final,
@@ -339,6 +347,7 @@ def run(
     log_dir,
     eval_log_dir,
     record_eval_videos,
+    **kwargs,  # catchall for unused args
 ):
 
     lr = policy_lr
@@ -347,7 +356,7 @@ def run(
     val_train_batch_size = value_batch_size
     discount_factor = discount
     ema_factor = ema
-    num_timesteps_per_epoch = 10_000
+    # num_timesteps_per_epoch = 1024  # 10_000
 
     rng_key = jax.random.key(seed)
 
@@ -407,14 +416,14 @@ def run(
     )
 
     policy_optimizer = nnx.Optimizer(policy, optax.adam(1e-3), wrt=nnx.Param)
-    value_optimizer = nnx.Optimizer(policy, optax.adam(1e-3), wrt=nnx.Param)
+    value_optimizer = nnx.Optimizer(value_fn, optax.adam(1e-3), wrt=nnx.Param)
 
     print("================")
     print("Policy Network:")
     print(policy)
     print("================")
 
-    metrics_logger = RLLogger(log_dir, exp_name=f"{env_name}-ppo")
+    metrics_logger = RLLogger(log_dir, exp_name=f"{env_name}-ppo-jax")
     eval_video_logger = VideoLogger(
         env_name=env_name, exp_folder=f"{eval_log_dir}/{metrics_logger.run_name}"
     )
@@ -461,6 +470,9 @@ def run(
                 env.step(action_vec)
             )
 
+            observation_vec = jnp.asarray(observation_vec)
+            reward_vec = jnp.asarray(reward_vec)
+
             for reward in reward_vec:
                 reward_stats.update(reward)
 
@@ -479,20 +491,19 @@ def run(
                 terminated = terminated_vec[i]
                 truncated = truncated_vec[i]
 
-                # reward = normalize(reward, reward_stats)
-                value = value_fn(state).item()
+                value = value_fn(state).flatten().item()
 
                 # given state, policy produced action with probability that received reward
-                if global_step % 10_000 == 0:
+                if global_step % 1_000 == 0:
                     print("global_step =", global_step)
                     print(
                         state, observation, reward, terminated, truncated, action, value
                     )
                     print(
                         "state stats: mean =",
-                        state_stats.mean,
+                        value_fn.mu,
                         "var =",
-                        state_stats.var,
+                        value_fn.m2 / value_fn.count,
                     )
 
                 buffer.update(state, action, reward, value)
@@ -507,7 +518,7 @@ def run(
                     terminal_value = (
                         0 if terminated else value_fn(final_observation).item()
                     )
-                    buffer.complete(terminal_value)
+                    buffer.complete(discount_factor, ema_factor, terminal_value)
                     metrics_logger.log_episode(
                         global_step,
                         reward=buffer.episode_return[-1],
@@ -529,12 +540,14 @@ def run(
             episode_over = terminated or truncated
             if not episode_over:
                 terminal_value = value_fn(observation).item()
-                buffer.complete(terminal_value)
+                buffer.complete(discount_factor, ema_factor, terminal_value)
             # else we would have completed it in the while-loop
 
         # Aggregate batch of trajectories across environments
+        # concatenate_buffers = lambda x: jnp.concatenate([jnp.asarray()])
+
         # N x obs_space
-        state_batch = jnp.concatenate(
+        state_batch = jnp.stack(
             [jnp.asarray(s) for buffer in buffer_vec for s in buffer.state], axis=0
         )
 
@@ -553,7 +566,9 @@ def run(
         )
         print("state_batch.shape =", state_batch.shape)
         print("reward_to_go_batch.shape =", reward_to_go_batch.shape)
-        # value_fn_loss = train_value_fn(state_batch, reward_to_go_batch)
+        value_fn_loss = train_value_fn(
+            value_fn, value_optimizer, state_batch, reward_to_go_batch
+        )
 
         # Update V(state) first so that we have good approx for policy grad
         # we will still use slightly stale value estimates to train the policy
