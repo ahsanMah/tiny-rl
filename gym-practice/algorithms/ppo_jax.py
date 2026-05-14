@@ -8,10 +8,11 @@ from typing import NamedTuple
 import gymnasium as gym
 import jax
 import jax.numpy as jnp
+import jax.numpy.linalg as la
 import numpy as np
 import optax
 from flax import nnx
-from jax import jit
+from jax import jit, vmap
 from loguru import logger
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -144,9 +145,9 @@ class Rollout(NamedTuple):
     actions: jax.Array
     states: jax.Array
     advantages: jax.Array
+    log_probs: jax.Array
 
 
-# class Gaussian:
 def gaussian_sample(mu, log_std, key: jax.Array, shape: tuple = ()) -> jnp.ndarray:
     eps = jax.random.normal(key, shape=shape)
     return mu + jnp.exp(log_std) * eps  # reparameterization trick
@@ -167,9 +168,8 @@ def gaussian_log_prob(
     #     return jnp.sum(dist.log_std + 0.5 * jnp.log(2 * jnp.pi * jnp.e), axis=-1)
 
 
-@jit
-def get_action(policy: Policy, observation: jax.Array, key: jax.Array):
-    mu = policy.net(observation)
+def get_random_action(policy: nnx.Module, observation: jax.Array, key: jax.Array):
+    mu = policy(observation)
     log_std = jnp.ones_like(mu)
     return gaussian_sample(mu, log_std, key, shape=mu.shape)
 
@@ -237,10 +237,14 @@ def policy_log_prob(net: nnx.Module, action: jax.Array, state: jax.Array):
     return gaussian_log_prob(action, mu=mu, log_std=log_std)
 
 
+# The function takes in net, action, states
+# We want to use the same net but apply it to a list of batches
+# Thus first argument is *not* batched but the other two are batched (at dim = 0)
+batched_policy_log_prob = vmap(policy_log_prob, in_axes=[None, 0, 0])
+
+
 @jit
-def policy_loss_fn(
-    net: nnx.Module, old_log_prob: jax.Array, rollout: Rollout, clip_ratio: float
-):
+def policy_loss_fn(net: nnx.Module, rollout: Rollout, clip_ratio: float):
 
     # log_prob of action given state
     # mu = net(rollout.states)
@@ -250,7 +254,7 @@ def policy_loss_fn(
 
     # Clipped surrogate objective
     # r_t = probability_ratio
-    r_t = jnp.exp(log_prob - old_log_prob)
+    r_t = jnp.exp(log_prob - rollout.log_probs)
     # TODO: keep track of how many timepoints were clipped
     r_t = jnp.minimum(r_t, jnp.clip(r_t, 1 - clip_ratio, 1 + clip_ratio))
 
@@ -260,29 +264,34 @@ def policy_loss_fn(
 
 @nnx.jit
 def policy_train_step(net, optimizer, rollout: Rollout, clip_ratio=0.2):
-    # Fixme: check if this is correct - ideally old log prob should be before agd updates ...?
-    old_log_prob = policy_log_prob(net, action=rollout.actions, state=rollout.states)
     loss, grads = nnx.value_and_grad(policy_loss_fn)(
-        net, old_log_prob=old_log_prob, rollout=rollout, clip_ratio=clip_ratio
+        net, rollout=rollout, clip_ratio=clip_ratio
     )
     optimizer.update(net, grads)  # In place updates.
 
     return loss
 
 
-def train_policy(policy, states, actions, advantages):
+def train_policy(policy, optimizer, states, actions, advantages):
 
     state_batches = get_minibatches(states)
     action_batches = get_minibatches(actions)
     advantage_batches = get_minibatches(advantages)
 
+    old_log_probs = batched_policy_log_prob(policy.net, action_batches, state_batches)
+    old_log_probs = get_minibatches(old_log_probs)
+
     # We will perform multiple gradient updates
     avg_loss = 0.0
-    for state, action, advantage in zip(
-        state_batches, action_batches, advantage_batches
-    ):
-        rollout = Rollout(action, state, advantage)
-        loss = policy_train_step(net, optimizer, rollout=rollout)
+    num_batches = len(state_batches)
+    for i in range(num_batches):
+        rollout = Rollout(
+            actions=action_batches[i],
+            states=state_batches[i],
+            advantages=advantage_batches[i],
+            log_probs=old_log_probs[i],
+        )
+        avg_loss += policy_train_step(policy.net, optimizer, rollout=rollout)
 
     avg_loss /= len(state_batches)
 
@@ -377,7 +386,7 @@ def run(
     reward_stats = VecStats()
 
     # Initialize the networks and start an episode
-    net = TinyLinearNet(
+    policy = TinyLinearNet(
         din=obs_shape,
         dmid=hidden_dim,
         dout=action_shape,
@@ -387,67 +396,23 @@ def run(
         # state_stats=state_stats if state_normalization else None,
     )
 
-    print(net)
-    optimizer = nnx.Optimizer(net, optax.adam(1e-3), wrt=nnx.Param)
-    print(optimizer)
-
-    mu = jnp.zeros(shape=(3, 1))
-    log_std = jnp.ones_like(mu)
-    sample = gaussian_sample(mu, log_std, rng_key)
-    logp = gaussian_log_prob(sample, mu, log_std)
-    print(f"{sample = }, {logp =}")
-
-    policy = Policy(net)
-    action = get_action(policy, jnp.asarray(observation), key=rng_key)
-    print(f"{action = }")
-
-    advantage = jnp.ones_like(action)
-    old_log_p = jnp.zeros_like(action)
-    rollout = Rollout(action, observation, advantage)
-    loss = policy_loss_fn(
-        net,
-        rollout=rollout,
-        old_log_prob=old_log_p,
-        clip_ratio=0.2,
-    )
-    print(f"{loss = }")
-
-    # by default will be wrt to first argument
-    policy_grad_fn = jax.value_and_grad(policy_loss_fn)
-    loss_g, grad = policy_grad_fn(
-        net,
-        rollout=rollout,
-        old_log_prob=old_log_p,
-        clip_ratio=0.2,
-    )
-    print(f"{loss_g = }")
-    print(grad)
-
-    for _ in range(10):
-        loss_nnx = policy_train_step(net, optimizer, rollout=rollout)
-        print(f"{loss_nnx = }")
-
-    exit()
     value_fn = TinyLinearNet(
-        input_dim=obs_shape,
-        hidden_dim=hidden_dim,
-        output_dim=1,
-        init_scale=value_init_scale,
-        init_scale_final=value_init_scale_final,
-        state_stats=state_stats if state_normalization else None,
+        din=obs_shape,
+        dmid=hidden_dim,
+        dout=1,
+        rngs=nnx.Rngs(seed),
+        init_scale=init_scale,
+        # init_scale_final=init_scale_final,
+        # state_stats=state_stats if state_normalization else None,
     )
-    mx.eval(net.params)
-    mx.eval(value_fn.params)
-    print("================")
-    print("Using LinearNet:")
-    print(net)
-    print("================")
 
-    policy = (
-        GaussianDistribution(net)
-        if continuous_action_space
-        else CategoricalDistribution(net)
-    )
+    policy_optimizer = nnx.Optimizer(policy, optax.adam(1e-3), wrt=nnx.Param)
+    value_optimizer = nnx.Optimizer(policy, optax.adam(1e-3), wrt=nnx.Param)
+
+    print("================")
+    print("Policy Network:")
+    print(policy)
+    print("================")
 
     metrics_logger = RLLogger(log_dir, exp_name=f"{env_name}-ppo")
     eval_video_logger = VideoLogger(
@@ -480,6 +445,7 @@ def run(
         # Each parallel env will have its own buffer updated
         buffer_vec = [Buffer() for n in range(env.num_envs)]
 
+        terminated_vec, truncated_vec = [], []
         while collected_timesteps < num_timesteps_per_epoch:
             # save current state
             state_vec = observation_vec
@@ -487,7 +453,8 @@ def run(
                 state_stats.update(state)
 
             # Choose an action using the tiny net (simulates a deterministic policy)
-            action_vec = policy.get_action(state_vec, sample=True)
+            rng_key, key = jax.random.split(rng_key)
+            action_vec = get_random_action(policy, state_vec, key)
 
             # Take the action and see what happens
             observation_vec, reward_vec, terminated_vec, truncated_vec, info_vec = (
@@ -513,7 +480,7 @@ def run(
                 truncated = truncated_vec[i]
 
                 # reward = normalize(reward, reward_stats)
-                value = value_fn.forward(state).item()
+                value = value_fn(state).item()
 
                 # given state, policy produced action with probability that received reward
                 if global_step % 10_000 == 0:
@@ -538,7 +505,7 @@ def run(
                         else info_vec["final_obs"][i]
                     )
                     terminal_value = (
-                        0 if terminated else value_fn.forward(final_observation).item()
+                        0 if terminated else value_fn(final_observation).item()
                     )
                     buffer.complete(terminal_value)
                     metrics_logger.log_episode(
@@ -561,32 +528,32 @@ def run(
             buffer = buffer_vec[i]
             episode_over = terminated or truncated
             if not episode_over:
-                terminal_value = value_fn.forward(observation).item()
+                terminal_value = value_fn(observation).item()
                 buffer.complete(terminal_value)
             # else we would have completed it in the while-loop
 
         # Aggregate batch of trajectories across environments
         # N x obs_space
-        state_batch = mx.stack(
-            [mx.asarray(s) for buffer in buffer_vec for s in buffer.state], axis=0
+        state_batch = jnp.concatenate(
+            [jnp.asarray(s) for buffer in buffer_vec for s in buffer.state], axis=0
         )
 
         # N x 1
-        action_batch = mx.concatenate(
-            [mx.asarray(buffer.action, dtype=mx.int8) for buffer in buffer_vec],
+        action_batch = jnp.concatenate(
+            [jnp.asarray(buffer.action, dtype=jnp.int8) for buffer in buffer_vec],
             axis=0,
         )
         # N x 1
-        advantage_batch = mx.concatenate(
-            [mx.asarray(buffer.advantage) for buffer in buffer_vec], axis=0
+        advantage_batch = jnp.concatenate(
+            [jnp.asarray(buffer.advantage) for buffer in buffer_vec], axis=0
         )
 
-        reward_to_go_batch = mx.concatenate(
-            [mx.asarray(buffer.reward_to_go) for buffer in buffer_vec], axis=0
+        reward_to_go_batch = jnp.concatenate(
+            [jnp.asarray(buffer.reward_to_go) for buffer in buffer_vec], axis=0
         )
         print("state_batch.shape =", state_batch.shape)
         print("reward_to_go_batch.shape =", reward_to_go_batch.shape)
-        value_fn_loss = train_value_fn(state_batch, reward_to_go_batch)
+        # value_fn_loss = train_value_fn(state_batch, reward_to_go_batch)
 
         # Update V(state) first so that we have good approx for policy grad
         # we will still use slightly stale value estimates to train the policy
@@ -594,17 +561,17 @@ def run(
             continue
 
         policy_loss, approx_kl_schulman = train_policy(
-            policy, state_batch, action_batch, advantage_batch
+            policy, policy_optimizer, state_batch, action_batch, advantage_batch
         )
 
         # avg_grad_norms = mx.array([la.norm(p) for p in policy_grad]).mean()
         # avg_grad_norms /= num_trajectories
 
-        episode_returns = mx.concatenate(
-            [mx.array(buffer.episode_return) for buffer in buffer_vec], axis=0
+        episode_returns = jnp.concatenate(
+            [jnp.array(buffer.episode_return) for buffer in buffer_vec], axis=0
         )
-        episode_steps = mx.concatenate(
-            [mx.array(buffer.episode_steps) for buffer in buffer_vec], axis=0
+        episode_steps = jnp.concatenate(
+            [jnp.array(buffer.episode_steps) for buffer in buffer_vec], axis=0
         )
 
         avg_num_steps = episode_steps.mean().item()
