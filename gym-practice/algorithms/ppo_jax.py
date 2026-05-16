@@ -3,7 +3,6 @@ import os
 import sys
 import time
 from itertools import accumulate
-from posix import stat
 from typing import NamedTuple
 
 import gymnasium as gym
@@ -215,7 +214,7 @@ def get_minibatches(x, batch_size=64):
     return xs
 
 
-@nnx.jit
+# @nnx.jit
 def value_train_step(value_fn, optimizer, states: jax.Array, rewards: jax.Array):
     def value_loss_fn(value_fn: nnx.Module, states: jax.Array, rewards: jax.Array):
         return jnp.mean((value_fn(states) - rewards) ** 2)
@@ -259,6 +258,9 @@ def policy_loss_fn(net: nnx.Module, rollout: Rollout, clip_ratio: float):
     # log_prob = gaussian_log_prob(rollout.actions, mu=mu, log_std=log_std)
 
     log_prob = policy_log_prob(net, action=rollout.actions, state=rollout.states)
+    # print(
+    #     f"log_prob.shape = {log_prob.shape}, rollout.log_probs.shape = {rollout.log_probs.shape}"
+    # )
 
     # Clipped surrogate objective
     # r_t = probability_ratio
@@ -267,10 +269,11 @@ def policy_loss_fn(net: nnx.Module, rollout: Rollout, clip_ratio: float):
     r_t = jnp.minimum(r_t, jnp.clip(r_t, 1 - clip_ratio, 1 + clip_ratio))
 
     loss = r_t * rollout.advantages
-    return loss.mean()
+    # print(f"loss.shape = {loss.shape}, advantages.shape = {rollout.advantages.shape}")
+    return -loss.mean()
 
 
-@nnx.jit
+# @nnx.jit
 def policy_train_step(net, optimizer, rollout: Rollout, clip_ratio=0.2):
     loss, grads = nnx.value_and_grad(policy_loss_fn)(
         net, rollout=rollout, clip_ratio=clip_ratio
@@ -286,8 +289,11 @@ def train_policy(policy, optimizer, states, actions, advantages):
     action_batches = get_minibatches(actions)
     advantage_batches = get_minibatches(advantages)
 
+    # print(
+    #     f"{state_batches.shape = }, {action_batches.shape = }, {advantage_batches.shape = }"
+    # )
     old_log_probs = batched_policy_log_prob(policy, action_batches, state_batches)
-    old_log_probs = get_minibatches(old_log_probs)
+    # print(f"{old_log_probs.shape = }")
 
     # We will perform multiple gradient updates
     avg_loss = 0.0
@@ -446,6 +452,7 @@ def run(
     start_time = time.time()
 
     for epoch in range(num_epochs):
+        epoch_start_time = time.time()
         collected_timesteps = 0
         # Note: If we do not reset every epoch, any unfinished trajectory *resumes*
         # Allowing the model to learn longer horizon tasks
@@ -551,21 +558,24 @@ def run(
             [jnp.asarray(s) for buffer in buffer_vec for s in buffer.state], axis=0
         )
 
-        # N x 1
+        # N x action_dim
         action_batch = jnp.concatenate(
-            [jnp.asarray(buffer.action, dtype=jnp.int8) for buffer in buffer_vec],
+            [jnp.asarray(buffer.action) for buffer in buffer_vec],
             axis=0,
         )
-        # N x 1
+        # N,
         advantage_batch = jnp.concatenate(
             [jnp.asarray(buffer.advantage) for buffer in buffer_vec], axis=0
         )
 
+        # N x 1
         reward_to_go_batch = jnp.concatenate(
             [jnp.asarray(buffer.reward_to_go) for buffer in buffer_vec], axis=0
-        )
+        ).reshape(-1, 1)
+
         print("state_batch.shape =", state_batch.shape)
         print("reward_to_go_batch.shape =", reward_to_go_batch.shape)
+        print("advantage_batch.shape =", advantage_batch.shape)
         value_fn_loss = train_value_fn(
             value_fn, value_optimizer, state_batch, reward_to_go_batch
         )
@@ -614,6 +624,9 @@ def run(
         logger.info(f"Approx KL: {approx_kl_schulman:.4f}")
         logger.info(f"Value Loss: {value_fn_loss:.2f}")
         logger.info(f"Policy Loss: {policy_loss:.2f}")
+        logger.info(f"Epoch Time: {time.time() - epoch_start_time:.2f} s")
+        logger.info(f"Time Elapsed: {(time.time() - start_time) / 60:.2f} min")
+
         # logger.info(f"Avg Policy Gradient Norm: {avg_grad_norms:.2f}")
 
     env.close()
