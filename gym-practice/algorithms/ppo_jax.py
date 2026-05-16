@@ -263,11 +263,21 @@ def policy_loss_fn(net: nnx.Module, rollout: Rollout, clip_ratio: float):
     # )
 
     # Clipped surrogate objective
-    # r_t = probability_ratio
-    r_t = jnp.exp(log_prob - rollout.log_probs)
-    # TODO: keep track of how many timepoints were clipped
-    r_t = jnp.minimum(r_t, jnp.clip(r_t, 1 - clip_ratio, 1 + clip_ratio))
+    # probability_ratio =  change in policy
+    # The whole point is to stay near your old policy throughout the SGD updates
+    probability_ratio = jnp.exp(log_prob - rollout.log_probs)
 
+    # TODO: keep track of how many timepoints were clipped
+    unclipped_ratio = probability_ratio * rollout.advantages
+    clipped_ratio = (
+        jnp.clip(probability_ratio, 1 - clip_ratio, 1 + clip_ratio) * rollout.advantages
+    )
+
+    # Keep negative values unclipped but clip positives
+    # "pessimistic" because any update due to gains (positive advntage) are clipped
+    # but negative advantages are kept to their original scale
+    # so that you quickly go back to your old policy
+    r_t = jnp.minimum(unclipped_ratio, clipped_ratio)
     loss = r_t * rollout.advantages
     # print(f"loss.shape = {loss.shape}, advantages.shape = {rollout.advantages.shape}")
     return -loss.mean()
