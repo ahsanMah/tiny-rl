@@ -214,7 +214,7 @@ def get_minibatches(x, batch_size=64):
     return xs
 
 
-# @nnx.jit
+@nnx.jit
 def value_train_step(value_fn, optimizer, states: jax.Array, rewards: jax.Array):
     def value_loss_fn(value_fn: nnx.Module, states: jax.Array, rewards: jax.Array):
         return jnp.mean((value_fn(states) - rewards) ** 2)
@@ -224,6 +224,7 @@ def value_train_step(value_fn, optimizer, states: jax.Array, rewards: jax.Array)
     return loss
 
 
+@jit
 def train_value_fn(value_fn, optimizer, states, rewards, val_train_batch_size=128):
     state_batches = get_minibatches(states, val_train_batch_size)
     reward_batches = get_minibatches(rewards, val_train_batch_size)
@@ -232,7 +233,7 @@ def train_value_fn(value_fn, optimizer, states, rewards, val_train_batch_size=12
     for state, reward in zip(state_batches, reward_batches):
         # we update value_fn for each (state, reward) pair
         loss = value_train_step(value_fn, optimizer, states=state, rewards=reward)
-        avg_loss += loss.item()
+        avg_loss += loss
 
     avg_loss /= len(state_batches)
     return avg_loss
@@ -283,7 +284,7 @@ def policy_loss_fn(net: nnx.Module, rollout: Rollout, clip_ratio: float):
     return -loss.mean()
 
 
-# @nnx.jit
+@nnx.jit
 def policy_train_step(net, optimizer, rollout: Rollout, clip_ratio=0.2):
     loss, grads = nnx.value_and_grad(policy_loss_fn)(
         net, rollout=rollout, clip_ratio=clip_ratio
@@ -293,6 +294,7 @@ def policy_train_step(net, optimizer, rollout: Rollout, clip_ratio=0.2):
     return loss
 
 
+@jit
 def train_policy(policy, optimizer, states, actions, advantages):
 
     state_batches = get_minibatches(states)
@@ -321,7 +323,7 @@ def train_policy(policy, optimizer, states, actions, advantages):
 
     new_log_probs = batched_policy_log_prob(policy, action_batches, state_batches)
     logratio = old_log_probs - new_log_probs
-    approx_kl_schulman = 0.5 * (logratio**2).mean().item()
+    approx_kl_schulman = 0.5 * (logratio**2).mean()
     logger.info(f"Number of epochs of policy training: {len(state_batches)}")
 
     return avg_loss, approx_kl_schulman
@@ -365,6 +367,7 @@ def run(
     record_eval_videos,
     **kwargs,  # catchall for unused args
 ):
+    print(f"JAX devices: {jax.devices()}")
 
     lr = policy_lr
     lr_val = value_lr
@@ -431,8 +434,8 @@ def run(
         # state_stats=state_stats if state_normalization else None,
     )
 
-    policy_optimizer = nnx.Optimizer(policy, optax.adam(1e-3), wrt=nnx.Param)
-    value_optimizer = nnx.Optimizer(value_fn, optax.adam(1e-3), wrt=nnx.Param)
+    policy_optimizer = nnx.Optimizer(policy, optax.adam(policy_lr), wrt=nnx.Param)
+    value_optimizer = nnx.Optimizer(value_fn, optax.adam(value_lr), wrt=nnx.Param)
 
     print("================")
     print("Policy Network:")
@@ -586,8 +589,13 @@ def run(
         print("state_batch.shape =", state_batch.shape)
         print("reward_to_go_batch.shape =", reward_to_go_batch.shape)
         print("advantage_batch.shape =", advantage_batch.shape)
+
+        _value_loss_train_start = time.time()
         value_fn_loss = train_value_fn(
             value_fn, value_optimizer, state_batch, reward_to_go_batch
+        )
+        logger.info(
+            f"Value function training time: {time.time() - _value_loss_train_start:.2f} s"
         )
 
         # Update V(state) first so that we have good approx for policy grad
@@ -595,8 +603,12 @@ def run(
         if epoch == 0:
             continue
 
+        _policy_loss_train_start = time.time()
         policy_loss, approx_kl_schulman = train_policy(
             policy, policy_optimizer, state_batch, action_batch, advantage_batch
+        )
+        logger.info(
+            f"Policy training time: {time.time() - _policy_loss_train_start:.2f} s"
         )
 
         # avg_grad_norms = mx.array([la.norm(p) for p in policy_grad]).mean()
