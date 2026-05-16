@@ -2,6 +2,19 @@
 
 Documented below are my general findings from implementing the algorithms.
 
+## 05/16 - Notes on JAX Implementation adn More
+
+- Main hope for JAX port is to allow scaling up (say on TPU or GPU)
+- Currently performance is actually *degraded* compared to MLX
+- JAX does not natively support metal so we need CPU backend whoich is slower
+- There is an alpha stage jax-mps library but performance is still mediocre
+  - This mainly due to many CPU <-> Device syncs
+  - MLX perhaps better understood the unified memory situation so it handled these internally
+  - But in JAX each sync is explicit and costly (evne though its the same memory)
+- Funnily enough, even the portions without sync using only JAX are also slower compared to CPU only backend
+- Uncovered many silent bugs with shapes being changed and braodcasted unexpectedly
+- Clipped objective was also incorrect where advantage was being multiplied after clipping rather than before
+
 ## 05/08 - Debugging Normalization
 - State was being normalized but the policy was still gettng unnormalized observations during play
 - The environment resetting was causing slight problems due to the next-step of gymnasium
