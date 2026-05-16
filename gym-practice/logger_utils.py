@@ -7,7 +7,6 @@ import gymnasium as gym
 import numpy as np
 from gymnasium.wrappers import RecordEpisodeStatistics, RecordVideo
 from loguru import logger
-from mlx.core import e
 from tensorboardX import SummaryWriter
 
 
