@@ -67,12 +67,17 @@ def load_video_frames(
     path: str | Path,
     *,
     target_fps: float = 8.0,
-    half_resolution: bool = True,
+    spatial_downsample: int = 2,
     max_frames: int | None = None,
 ) -> tuple[np.ndarray, dict[str, float | tuple[int, int] | int]]:
     path = Path(path)
     reader = iio.get_reader(path, format="ffmpeg")
     meta = reader.get_meta_data()
+
+    if spatial_downsample <= 0:
+        raise ValueError(
+            f"spatial_downsample must be > 0, got {spatial_downsample}"
+        )
 
     source_fps = float(meta.get("fps", target_fps))
     frame_step = max(int(round(source_fps / target_fps)), 1)
@@ -83,8 +88,14 @@ def load_video_frames(
         if index % frame_step != 0:
             continue
         frame = np.asarray(frame)
-        if half_resolution:
-            frame = frame[::2, ::2]
+        frame = frame[::spatial_downsample, ::spatial_downsample]
+        height = frame.shape[0] - (frame.shape[0] % 4)
+        width = frame.shape[1] - (frame.shape[1] % 4)
+        if height < 4 or width < 4:
+            raise ValueError(
+                f"Downsampled frame is too small for UNet: {frame.shape[:2]}"
+            )
+        frame = frame[:height, :width]
         frame = frame.astype(np.float32) / 127.5 - 1.0
         frames.append(frame)
         if max_frames is not None and len(frames) >= max_frames:
@@ -106,6 +117,7 @@ def load_video_frames(
         "frame_step": frame_step,
         "source_size": tuple(source_size),
         "processed_size": (int(frame_array.shape[2]), int(frame_array.shape[1])),
+        "spatial_downsample": spatial_downsample,
         "num_frames": int(frame_array.shape[0]),
     }
     return frame_array, info
@@ -145,14 +157,14 @@ def load_video_dataset(
     *,
     clip_length: int,
     target_fps: float = 8.0,
-    half_resolution: bool = True,
+    spatial_downsample: int = 2,
     clip_stride: int | None = None,
     max_clips: int | None = None,
 ) -> tuple[mx.array, dict[str, float | tuple[int, int] | int]]:
     frames, info = load_video_frames(
         path,
         target_fps=target_fps,
-        half_resolution=half_resolution,
+        spatial_downsample=spatial_downsample,
     )
     clips = frames_to_clips(
         frames,
@@ -289,7 +301,9 @@ def train_on_dataset(
             int(videos.shape[4]),
         )
         samples = sample_euler(model, sample_shape=sample_shape, num_steps=sample_steps)
-        save_clip_previews(samples, sample_dir, max_clips=sample_shape[0], fps=sample_fps)
+        save_clip_previews(
+            samples, sample_dir, max_clips=sample_shape[0], fps=sample_fps
+        )
         print(f"saved samples to: {sample_dir}")
 
     return model, losses
@@ -342,7 +356,7 @@ def train_overfit_video(
     batch_size: int = 1,
     frames: int = 4,
     target_fps: float = 8.0,
-    half_resolution: bool = True,
+    spatial_downsample: int = 2,
     clip_stride: int | None = None,
     max_clips: int | None = None,
     preview_dir: str | Path | None = None,
@@ -359,7 +373,7 @@ def train_overfit_video(
         video_path,
         clip_length=frames,
         target_fps=target_fps,
-        half_resolution=half_resolution,
+        spatial_downsample=spatial_downsample,
         clip_stride=clip_stride,
         max_clips=max_clips,
     )
@@ -372,6 +386,7 @@ def train_overfit_video(
             "frame_step": int(info["frame_step"]),
             "source_size": info["source_size"],
             "processed_size": info["processed_size"],
+            "spatial_downsample": int(info["spatial_downsample"]),
             "num_frames": int(info["num_frames"]),
             "num_clips": int(info["num_clips"]),
             "clip_length": int(info["clip_length"]),
@@ -417,10 +432,11 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--width", type=int, default=32)
     parser.add_argument("--channels", type=int, default=3)
     parser.add_argument("--base-channels", type=int, default=16)
-    parser.add_argument("--learning-rate", type=float, default=1e-3)
+    parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--log-every", type=int, default=50)
     parser.add_argument("--video-target-fps", type=float, default=8.0)
+    parser.add_argument("--video-downsample", type=int, default=2)
     parser.add_argument("--clip-stride", type=int, default=None)
     parser.add_argument("--max-clips", type=int, default=None)
     parser.add_argument("--preview-dir", type=str, default=None)
@@ -444,7 +460,7 @@ def main() -> None:
             batch_size=args.batch_size,
             frames=args.frames,
             target_fps=args.video_target_fps,
-            half_resolution=not args.full_resolution,
+            spatial_downsample=1 if args.full_resolution else args.video_downsample,
             clip_stride=args.clip_stride,
             max_clips=args.max_clips,
             preview_dir=args.preview_dir,
