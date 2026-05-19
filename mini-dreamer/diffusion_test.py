@@ -218,6 +218,28 @@ def sample_batch(videos: mx.array, batch_size: int) -> mx.array:
     return videos[indices]
 
 
+def sample_euler(
+    model: UNet3D,
+    *,
+    sample_shape: tuple[int, int, int, int, int],
+    num_steps: int = 32,
+) -> mx.array:
+    if num_steps <= 0:
+        raise ValueError(f"num_steps must be > 0, got {num_steps}")
+
+    x = mx.random.normal(sample_shape)
+    dt = 1.0 / num_steps
+    batch_size = sample_shape[0]
+
+    for step in range(num_steps):
+        t = mx.full((batch_size,), step / num_steps)
+        v = model(x, t)
+        x = x + dt * v
+
+    mx.eval(x)
+    return x
+
+
 def train_on_dataset(
     videos: mx.array,
     *,
@@ -226,6 +248,10 @@ def train_on_dataset(
     base_channels: int = 16,
     learning_rate: float = 1e-3,
     log_every: int = 50,
+    sample_dir: str | Path | None = None,
+    num_samples: int = 4,
+    sample_steps: int = 32,
+    sample_fps: float = 8.0,
 ):
     model = UNet3D(
         in_channels=int(videos.shape[-1]),
@@ -254,6 +280,18 @@ def train_on_dataset(
                 f"steps/s={steps_per_sec:.2f}"
             )
 
+    if sample_dir is not None:
+        sample_shape = (
+            min(num_samples, int(videos.shape[0])),
+            int(videos.shape[1]),
+            int(videos.shape[2]),
+            int(videos.shape[3]),
+            int(videos.shape[4]),
+        )
+        samples = sample_euler(model, sample_shape=sample_shape, num_steps=sample_steps)
+        save_clip_previews(samples, sample_dir, max_clips=sample_shape[0], fps=sample_fps)
+        print(f"saved samples to: {sample_dir}")
+
     return model, losses
 
 
@@ -270,6 +308,10 @@ def train_overfit_random_noise(
     learning_rate: float = 1e-3,
     seed: int = 0,
     log_every: int = 50,
+    sample_dir: str | Path | None = None,
+    num_samples: int = 4,
+    sample_steps: int = 32,
+    sample_fps: float = 8.0,
 ):
     videos = make_random_video_dataset(
         num_videos=num_videos,
@@ -286,6 +328,10 @@ def train_overfit_random_noise(
         base_channels=base_channels,
         learning_rate=learning_rate,
         log_every=log_every,
+        sample_dir=sample_dir,
+        num_samples=num_samples,
+        sample_steps=sample_steps,
+        sample_fps=sample_fps,
     )
 
 
@@ -302,6 +348,9 @@ def train_overfit_video(
     preview_dir: str | Path | None = None,
     preview_clips: int = 4,
     preview_only: bool = False,
+    sample_dir: str | Path | None = None,
+    num_samples: int = 4,
+    sample_steps: int = 32,
     base_channels: int = 16,
     learning_rate: float = 1e-3,
     log_every: int = 50,
@@ -348,6 +397,10 @@ def train_overfit_video(
         base_channels=base_channels,
         learning_rate=learning_rate,
         log_every=log_every,
+        sample_dir=sample_dir,
+        num_samples=num_samples,
+        sample_steps=sample_steps,
+        sample_fps=float(info["actual_fps"]),
     )
 
 
@@ -373,6 +426,10 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--preview-dir", type=str, default=None)
     parser.add_argument("--preview-clips", type=int, default=4)
     parser.add_argument("--preview-only", action="store_true")
+    parser.add_argument("--sample-dir", type=str, default=None)
+    parser.add_argument("--num-samples", type=int, default=4)
+    parser.add_argument("--sample-steps", type=int, default=32)
+    parser.add_argument("--sample-fps", type=float, default=8.0)
     parser.add_argument("--full-resolution", action="store_true")
     return parser
 
@@ -393,6 +450,9 @@ def main() -> None:
             preview_dir=args.preview_dir,
             preview_clips=args.preview_clips,
             preview_only=args.preview_only,
+            sample_dir=args.sample_dir,
+            num_samples=args.num_samples,
+            sample_steps=args.sample_steps,
             base_channels=args.base_channels,
             learning_rate=args.learning_rate,
             log_every=args.log_every,
@@ -411,6 +471,10 @@ def main() -> None:
         learning_rate=args.learning_rate,
         seed=args.seed,
         log_every=args.log_every,
+        sample_dir=args.sample_dir,
+        num_samples=args.num_samples,
+        sample_steps=args.sample_steps,
+        sample_fps=args.sample_fps,
     )
 
 
