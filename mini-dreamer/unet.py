@@ -6,37 +6,98 @@ import mlx.core as mx
 import mlx.nn as nn
 
 
-def timestep_embedding(t: mx.array, dim: int, max_period: int = 10000) -> mx.array:
-    if t.ndim == 0:
-        t = mx.broadcast_to(t, (1,))
+def _is_mx_array(node: object) -> bool:
+    return hasattr(node, "shape") and hasattr(node, "dtype")
 
-    t = t.astype(mx.float32)
-    half = dim // 2
 
-    if half == 0:
-        return mx.zeros((t.shape[0], dim), dtype=t.dtype)
+def _iter_param_tree(tree: object, prefix: str = ""):
+    if _is_mx_array(tree):
+        yield prefix, tree
+        return
 
-    freqs = mx.exp(-math.log(max_period) * mx.arange(0, half) / half)
-    args = t[:, None] * freqs[None, :]
-    emb = mx.concatenate([mx.cos(args), mx.sin(args)], axis=-1)
+    if isinstance(tree, dict):
+        for key, value in tree.items():
+            name = f"{prefix}.{key}" if prefix else str(key)
+            yield from _iter_param_tree(value, name)
+        return
 
-    if dim % 2 == 1:
-        emb = mx.concatenate([emb, mx.zeros((t.shape[0], 1), dtype=emb.dtype)], axis=-1)
+    if isinstance(tree, (list, tuple)):
+        for idx, value in enumerate(tree):
+            name = f"{prefix}[{idx}]" if prefix else f"[{idx}]"
+            yield from _iter_param_tree(value, name)
+        return
 
-    return emb
+
+def format_param_table(model: nn.Module, *, sort: bool = True) -> str:
+    rows = []
+    for name, param in _iter_param_tree(model.parameters()):
+        shape = tuple(param.shape)
+        count = int(math.prod(shape)) if shape else 1
+        rows.append((name, shape, count))
+
+    if sort:
+        rows.sort(key=lambda row: row[0])
+
+    if rows:
+        name_width = max(len("Parameter"), max(len(name) for name, _, _ in rows))
+        shape_width = max(len("Shape"), max(len(str(shape)) for _, shape, _ in rows))
+        count_width = max(len("Count"), max(len(f"{count:,}") for _, _, count in rows))
+    else:
+        name_width = len("Parameter")
+        shape_width = len("Shape")
+        count_width = len("Count")
+
+    lines = [
+        f"{'Parameter'.ljust(name_width)}  {'Shape'.ljust(shape_width)}  {'Count'.rjust(count_width)}",
+        f"{'-' * name_width}  {'-' * shape_width}  {'-' * count_width}",
+    ]
+
+    for name, shape, count in rows:
+        lines.append(
+            f"{name.ljust(name_width)}  {str(shape).ljust(shape_width)}  {f'{count:,}'.rjust(count_width)}"
+        )
+
+    total = sum(count for _, _, count in rows)
+    lines.append(f"{'-' * name_width}  {'-' * shape_width}  {'-' * count_width}")
+    lines.append(
+        f"{'TOTAL'.ljust(name_width)}  {'-'.ljust(shape_width)}  {f'{total:,}'.rjust(count_width)}"
+    )
+    return "\n".join(lines)
+
+
+def print_param_table(model: nn.Module) -> None:
+    print(format_param_table(model))
+
+
+class GaussianFourierEmbedding(nn.Module):
+    def __init__(self, dim: int, scale: float = 1.0):
+        super().__init__()
+        assert dim % 2 == 0, "Dimension must be even for Fourier embedding."
+        self.dim = dim
+        half = dim // 2
+        self.weight = mx.random.normal((half,)) * scale
+
+    def __call__(self, t: mx.array) -> mx.array:
+        if t.ndim == 0:
+            t = mx.broadcast_to(t, (1,))
+
+        t = t.astype(mx.float32)
+        args = t[:, None] * self.weight[None, :] * (2 * math.pi)
+        emb = mx.concatenate([mx.sin(args), mx.cos(args)], axis=-1)
+        return emb
 
 
 class TimeEmbedding(nn.Module):
-    def __init__(self, dim: int, hidden_mult: int = 4):
+    def __init__(self, dim: int, hidden_mult: int = 4, scale: float = 1.0):
         super().__init__()
         hidden = dim * hidden_mult
+        self.fourier = GaussianFourierEmbedding(dim, scale=scale)
         self.lin1 = nn.Linear(dim, hidden)
         self.act = nn.SiLU()
         self.lin2 = nn.Linear(hidden, dim)
-        self.dim = dim
 
     def __call__(self, t: mx.array) -> mx.array:
-        emb = timestep_embedding(t, self.dim)
+        emb = self.fourier(t)
         return self.lin2(self.act(self.lin1(emb)))
 
 
@@ -53,11 +114,7 @@ class ConvBlock3D(nn.Module):
         self.act = nn.SiLU()
 
         if time_embed_dim is not None:
-            self.to_film1 = nn.Linear(time_embed_dim, in_channels * 2)
-            self.to_film2 = nn.Linear(time_embed_dim, out_channels * 2)
-        else:
-            self.to_film1 = None
-            self.to_film2 = None
+            self.to_film = nn.Linear(time_embed_dim, out_channels * 2)
 
     def _apply_film(
         self, h: mx.array, t_emb: mx.array | None, proj: nn.Linear | None
@@ -75,14 +132,11 @@ class ConvBlock3D(nn.Module):
         return h * (1 + scale) + shift
 
     def __call__(self, x: mx.array, t_emb: mx.array | None = None) -> mx.array:
-        h = self.norm1(x)
-        h = self._apply_film(h, t_emb, self.to_film1)
-        x = self.conv1(self.act(h))
-
-        h = self.norm2(x)
-        h = self._apply_film(h, t_emb, self.to_film2)
-        x = self.conv2(self.act(h))
-        return x
+        h = self.conv1(self.act(self.norm1(x)))
+        h = self.norm2(h)
+        h = self._apply_film(h, t_emb, self.to_film)
+        h = self.conv2(self.act(h))
+        return h
 
 
 class Downsample3D(nn.Module):
@@ -196,7 +250,8 @@ class UNet3D(nn.Module):
 
 if __name__ == "__main__":
     model = UNet3D(in_channels=1, out_channels=2, base_channels=16)
-    x = mx.random.normal((1, 16, 32, 32, 1))
+    print_param_table(model)
+    x = mx.random.normal((1, 4, 32, 32, 1))
     t = mx.array([10])
     y = model(x, t)
     print("input:", x.shape, "output:", y.shape)
