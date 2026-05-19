@@ -165,6 +165,52 @@ def load_video_dataset(
     return clips, info
 
 
+def to_uint8_video(x: np.ndarray) -> np.ndarray:
+    return np.clip((x + 1.0) * 127.5, 0.0, 255.0).astype(np.uint8)
+
+
+def save_clip_previews(
+    clips: mx.array,
+    output_dir: str | Path,
+    *,
+    max_clips: int = 4,
+    fps: float = 8.0,
+) -> None:
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    clips_np = np.asarray(clips)
+    preview_count = min(max_clips, int(clips_np.shape[0]))
+    clips_uint8 = to_uint8_video(clips_np[:preview_count])
+
+    num_clips, num_frames, height, width, channels = clips_uint8.shape
+    if channels not in (1, 3, 4):
+        raise ValueError(f"Unsupported channel count for preview: {channels}")
+
+    sheet = np.zeros((num_clips * height, num_frames * width, channels), dtype=np.uint8)
+    for clip_idx in range(num_clips):
+        for frame_idx in range(num_frames):
+            y0 = clip_idx * height
+            x0 = frame_idx * width
+            sheet[y0 : y0 + height, x0 : x0 + width] = clips_uint8[clip_idx, frame_idx]
+
+    if channels == 1:
+        sheet = sheet[..., 0]
+    iio.imwrite(output_dir / "clips_sheet.png", sheet)
+
+    frame_duration_ms = int(round(1000.0 / max(fps, 1e-6)))
+    for clip_idx in range(num_clips):
+        gif_frames = clips_uint8[clip_idx]
+        if channels == 1:
+            gif_frames = gif_frames[..., 0]
+        iio.mimsave(
+            output_dir / f"clip_{clip_idx:03d}.gif",
+            list(gif_frames),
+            duration=frame_duration_ms,
+            loop=0,
+        )
+
+
 def sample_batch(videos: mx.array, batch_size: int) -> mx.array:
     if batch_size >= videos.shape[0]:
         return videos[:batch_size]
@@ -253,6 +299,9 @@ def train_overfit_video(
     half_resolution: bool = True,
     clip_stride: int | None = None,
     max_clips: int | None = None,
+    preview_dir: str | Path | None = None,
+    preview_clips: int = 4,
+    preview_only: bool = False,
     base_channels: int = 16,
     learning_rate: float = 1e-3,
     log_every: int = 50,
@@ -279,6 +328,19 @@ def train_overfit_video(
             "clip_length": int(info["clip_length"]),
         },
     )
+
+    if preview_dir is not None:
+        save_clip_previews(
+            videos,
+            preview_dir,
+            max_clips=preview_clips,
+            fps=float(info["actual_fps"]),
+        )
+        print(f"saved previews to: {preview_dir}")
+
+    if preview_only:
+        return None, []
+
     return train_on_dataset(
         videos,
         steps=steps,
@@ -308,6 +370,9 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--video-target-fps", type=float, default=8.0)
     parser.add_argument("--clip-stride", type=int, default=None)
     parser.add_argument("--max-clips", type=int, default=None)
+    parser.add_argument("--preview-dir", type=str, default=None)
+    parser.add_argument("--preview-clips", type=int, default=4)
+    parser.add_argument("--preview-only", action="store_true")
     parser.add_argument("--full-resolution", action="store_true")
     return parser
 
@@ -325,6 +390,9 @@ def main() -> None:
             half_resolution=not args.full_resolution,
             clip_stride=args.clip_stride,
             max_clips=args.max_clips,
+            preview_dir=args.preview_dir,
+            preview_clips=args.preview_clips,
+            preview_only=args.preview_only,
             base_channels=args.base_channels,
             learning_rate=args.learning_rate,
             log_every=args.log_every,
