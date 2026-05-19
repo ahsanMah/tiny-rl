@@ -101,11 +101,10 @@ class TimeEmbedding(nn.Module):
         return self.lin2(self.act(self.lin1(emb)))
 
 
-class ConvBlock3D(nn.Module):
-    def __init__(
-        self, in_channels: int, out_channels: int, time_embed_dim: int | None = None
-    ):
+class ConvResBlock3D(nn.Module):
+    def __init__(self, in_channels: int, time_embed_dim: int | None = None):
         super().__init__()
+        out_channels: int = in_channels
         self.norm1 = nn.RMSNorm(in_channels)
         self.norm2 = nn.RMSNorm(out_channels)
 
@@ -136,13 +135,15 @@ class ConvBlock3D(nn.Module):
         h = self.norm2(h)
         h = self._apply_film(h, t_emb, self.to_film)
         h = self.conv2(self.act(h))
-        return h
+        return h + x
 
 
 class Downsample3D(nn.Module):
     def __init__(self, channels: int):
         super().__init__()
-        self.conv = nn.Conv3d(channels, channels, kernel_size=3, stride=2, padding=1)
+        self.conv = nn.Conv3d(
+            channels, channels * 2, kernel_size=3, stride=2, padding=1
+        )
 
     def __call__(self, x: mx.array) -> mx.array:
         return self.conv(x)
@@ -152,23 +153,20 @@ class UpBlock3D(nn.Module):
     def __init__(
         self,
         in_channels: int,
-        skip_channels: int,
         out_channels: int,
         time_embed_dim: int | None = None,
     ):
         super().__init__()
         self.upsample3d = nn.Upsample(scale_factor=2, mode="nearest")
         self.up_conv = nn.Conv3d(in_channels, out_channels, kernel_size=1)
-        self.conv = ConvBlock3D(
-            out_channels + skip_channels, out_channels, time_embed_dim=time_embed_dim
-        )
+        self.conv = ConvResBlock3D(out_channels, time_embed_dim=time_embed_dim)
 
     def __call__(
         self, x: mx.array, skip: mx.array, t_emb: mx.array | None = None
     ) -> mx.array:
         x = self.upsample3d(x)
         x = self.up_conv(x)
-        x = mx.concatenate([x, skip], axis=-1)
+        x = (x + skip) * (2**-0.5)  # Normalize to prevent variance explosion
         return self.conv(x, t_emb)
 
 
@@ -183,37 +181,24 @@ class UNet3D(nn.Module):
         time_embed_dim = base_channels * 4
         self.time_embed = TimeEmbedding(time_embed_dim)
 
-        self.enc1 = ConvBlock3D(
-            in_channels, base_channels, time_embed_dim=time_embed_dim
-        )
-        self.down1 = Downsample3D(base_channels)
+        self.conv_in = nn.Conv3d(in_channels, base_channels, kernel_size=3, padding=1)
+        self.res1 = ConvResBlock3D(base_channels, time_embed_dim=time_embed_dim)
+        self.down1 = Downsample3D(base_channels)  # Channels double
 
-        self.enc2 = ConvBlock3D(
-            base_channels, base_channels * 2, time_embed_dim=time_embed_dim
-        )
+        self.res2 = ConvResBlock3D(base_channels * 2, time_embed_dim=time_embed_dim)
         self.down2 = Downsample3D(base_channels * 2)
 
-        self.enc3 = ConvBlock3D(
-            base_channels * 2, base_channels * 4, time_embed_dim=time_embed_dim
-        )
-
-        self.mid_conv1 = ConvBlock3D(
-            base_channels * 4, base_channels * 4, time_embed_dim=time_embed_dim
-        )
+        self.res3 = ConvResBlock3D(base_channels * 4, time_embed_dim=time_embed_dim)
         self.mid_attn = nn.MultiHeadAttention(base_channels * 4, num_heads=4)
-        self.mid_conv2 = ConvBlock3D(
-            base_channels * 4, base_channels * 4, time_embed_dim=time_embed_dim
-        )
+        self.mid_conv = ConvResBlock3D(base_channels * 4, time_embed_dim=time_embed_dim)
 
         self.up2 = UpBlock3D(
             base_channels * 4,
-            base_channels * 2,
             base_channels * 2,
             time_embed_dim=time_embed_dim,
         )
         self.up1 = UpBlock3D(
             base_channels * 2,
-            base_channels,
             base_channels,
             time_embed_dim=time_embed_dim,
         )
@@ -229,18 +214,17 @@ class UNet3D(nn.Module):
             t = t[:, 0]
 
         t_emb = self.time_embed(t)
+        x = self.conv_in(x)
 
-        x1 = self.enc1(x, t_emb)
-        x2 = self.enc2(self.down1(x1), t_emb)
-        x3 = self.enc3(self.down2(x2), t_emb)
+        x1 = self.res1(x, t_emb)
+        x2 = self.res2(self.down1(x1), t_emb)
+        x3 = self.res3(self.down2(x2), t_emb)
 
-        x3 = self.mid_conv1(x3, t_emb)
         b, s, h, w, c = x3.shape
-
         x3 = mx.reshape(x3, (b, s * h * w, c))
         x3 = self.mid_attn(x3, x3, x3)
         x3 = mx.reshape(x3, (b, s, h, w, c))
-        x3 = self.mid_conv2(x3, t_emb)
+        x3 = self.mid_conv(x3, t_emb)
 
         x = self.up2(x3, x2, t_emb)
         x = self.up1(x, x1, t_emb)
