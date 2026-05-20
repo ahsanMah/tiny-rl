@@ -91,9 +91,7 @@ def sample_euler(
     return samples
 
 
-def save_model(
-    model: UNet3D, save_dir: str | Path, *, config: dict
-) -> None:
+def save_model(model: UNet3D, save_dir: str | Path, *, config: dict) -> None:
     """Save model weights (`model.safetensors`) and constructor config (`config.json`).
 
     `config` must contain exactly the kwargs needed to re-instantiate `UNet3D`.
