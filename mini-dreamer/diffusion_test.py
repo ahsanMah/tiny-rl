@@ -4,13 +4,16 @@ import argparse
 import time
 from pathlib import Path
 
-import imageio.v2 as iio
 import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as optim
-import numpy as np
 
 from unet import UNet3D, print_param_table
+from video_data import (
+    load_video_dataset,
+    make_random_video_dataset,
+    save_clip_previews,
+)
 
 
 def make_final_frame_mask(x: mx.array) -> mx.array:
@@ -44,187 +47,6 @@ class FlowMatchingTrainer:
         self.optimizer.update(self.model, grads)
         mx.eval(loss, self.model.parameters(), self.optimizer.state)
         return float(loss)
-
-
-def require_valid_unet_shape(frames: int, height: int, width: int) -> None:
-    dims = {"frames": frames, "height": height, "width": width}
-    for name, value in dims.items():
-        if value < 4:
-            raise ValueError(f"{name} must be >= 4, got {value}")
-        if value % 4 != 0:
-            raise ValueError(f"{name} must be divisible by 4, got {value}")
-
-
-def make_random_video_dataset(
-    *,
-    num_videos: int,
-    frames: int,
-    height: int,
-    width: int,
-    channels: int,
-    seed: int = 0,
-) -> mx.array:
-    require_valid_unet_shape(frames, height, width)
-    mx.random.seed(seed)
-    return mx.random.normal((num_videos, frames, height, width, channels))
-
-
-def load_video_frames(
-    path: str | Path,
-    *,
-    target_fps: float = 8.0,
-    spatial_downsample: int = 2,
-    max_frames: int | None = None,
-) -> tuple[np.ndarray, dict[str, float | tuple[int, int] | int]]:
-    path = Path(path)
-    reader = iio.get_reader(path, format="ffmpeg")
-    meta = reader.get_meta_data()
-
-    if spatial_downsample <= 0:
-        raise ValueError(f"spatial_downsample must be > 0, got {spatial_downsample}")
-
-    source_fps = float(meta.get("fps", target_fps))
-    frame_step = max(int(round(source_fps / target_fps)), 1)
-    actual_fps = source_fps / frame_step
-
-    frames: list[np.ndarray] = []
-    for index, frame in enumerate(reader):
-        if index % frame_step != 0:
-            continue
-        frame = np.asarray(frame)
-        frame = frame[::spatial_downsample, ::spatial_downsample]
-        height = frame.shape[0] - (frame.shape[0] % 4)
-        width = frame.shape[1] - (frame.shape[1] % 4)
-        if height < 4 or width < 4:
-            raise ValueError(
-                f"Downsampled frame is too small for UNet: {frame.shape[:2]}"
-            )
-        frame = frame[:height, :width]
-        frame = frame.astype(np.float32) / 127.5 - 1.0
-        frames.append(frame)
-        if max_frames is not None and len(frames) >= max_frames:
-            break
-
-    reader.close()
-
-    if not frames:
-        raise ValueError(f"No frames loaded from {path}")
-
-    frame_array = np.stack(frames, axis=0)
-    source_size = meta.get("size")
-    if source_size is None:
-        source_size = (int(frame_array.shape[2]), int(frame_array.shape[1]))
-
-    info: dict[str, float | tuple[int, int] | int] = {
-        "source_fps": source_fps,
-        "actual_fps": actual_fps,
-        "frame_step": frame_step,
-        "source_size": tuple(source_size),
-        "processed_size": (int(frame_array.shape[2]), int(frame_array.shape[1])),
-        "spatial_downsample": spatial_downsample,
-        "num_frames": int(frame_array.shape[0]),
-    }
-    return frame_array, info
-
-
-def frames_to_clips(
-    frames: np.ndarray,
-    *,
-    clip_length: int,
-    clip_stride: int | None = None,
-    max_clips: int | None = None,
-) -> mx.array:
-    if frames.ndim != 4:
-        raise ValueError(f"Expected frames with shape (T, H, W, C), got {frames.shape}")
-    if frames.shape[0] < clip_length:
-        raise ValueError(
-            f"Need at least {clip_length} frames, but only loaded {frames.shape[0]}"
-        )
-
-    clip_stride = clip_length if clip_stride is None else clip_stride
-    require_valid_unet_shape(clip_length, int(frames.shape[1]), int(frames.shape[2]))
-
-    clips = []
-    for start in range(0, frames.shape[0] - clip_length + 1, clip_stride):
-        clips.append(frames[start : start + clip_length])
-        if max_clips is not None and len(clips) >= max_clips:
-            break
-
-    if not clips:
-        raise ValueError("No clips could be formed from the loaded video")
-
-    return mx.array(np.stack(clips, axis=0))
-
-
-def load_video_dataset(
-    path: str | Path,
-    *,
-    clip_length: int,
-    target_fps: float = 8.0,
-    spatial_downsample: int = 2,
-    clip_stride: int | None = None,
-    max_clips: int | None = None,
-) -> tuple[mx.array, dict[str, float | tuple[int, int] | int]]:
-    frames, info = load_video_frames(
-        path,
-        target_fps=target_fps,
-        spatial_downsample=spatial_downsample,
-    )
-    clips = frames_to_clips(
-        frames,
-        clip_length=clip_length,
-        clip_stride=clip_stride,
-        max_clips=max_clips,
-    )
-    info["num_clips"] = int(clips.shape[0])
-    info["clip_length"] = int(clips.shape[1])
-    return clips, info
-
-
-def to_uint8_video(x: np.ndarray) -> np.ndarray:
-    return np.clip((x + 1.0) * 127.5, 0.0, 255.0).astype(np.uint8)
-
-
-def save_clip_previews(
-    clips: mx.array,
-    output_dir: str | Path,
-    *,
-    max_clips: int = 4,
-    fps: float = 8.0,
-) -> None:
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    clips_np = np.asarray(clips)
-    preview_count = min(max_clips, int(clips_np.shape[0]))
-    clips_uint8 = to_uint8_video(clips_np[:preview_count])
-
-    num_clips, num_frames, height, width, channels = clips_uint8.shape
-    if channels not in (1, 3, 4):
-        raise ValueError(f"Unsupported channel count for preview: {channels}")
-
-    sheet = np.zeros((num_clips * height, num_frames * width, channels), dtype=np.uint8)
-    for clip_idx in range(num_clips):
-        for frame_idx in range(num_frames):
-            y0 = clip_idx * height
-            x0 = frame_idx * width
-            sheet[y0 : y0 + height, x0 : x0 + width] = clips_uint8[clip_idx, frame_idx]
-
-    if channels == 1:
-        sheet = sheet[..., 0]
-    iio.imwrite(output_dir / "clips_sheet.png", sheet)
-
-    frame_duration_ms = int(round(1000.0 / max(fps, 1e-6)))
-    for clip_idx in range(num_clips):
-        gif_frames = clips_uint8[clip_idx]
-        if channels == 1:
-            gif_frames = gif_frames[..., 0]
-        iio.mimsave(
-            output_dir / f"clip_{clip_idx:03d}.gif",
-            list(gif_frames),
-            duration=frame_duration_ms,
-            loop=0,
-        )
 
 
 def sample_batch(videos: mx.array, batch_size: int) -> mx.array:
