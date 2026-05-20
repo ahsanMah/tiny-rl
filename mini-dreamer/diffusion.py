@@ -9,7 +9,7 @@ import mlx.nn as nn
 import mlx.optimizers as optim
 
 from unet import UNet3D, print_param_table
-from video_data import (
+from video_utils import (
     load_video_dataset,
     make_random_video_dataset,
     save_clip_previews,
