@@ -32,27 +32,39 @@ class FlowMatchingTrainer:
         self.optimizer = optim.Adam(learning_rate=learning_rate)
         self.loss_and_grad = nn.value_and_grad(model, self.loss)
 
-    def loss(self, model: UNet3D, x1: mx.array) -> mx.array:
+    def loss(
+        self, model: UNet3D, x1: mx.array, actions: mx.array | None = None
+    ) -> mx.array:
         mask = make_final_frame_mask(x1)
         noise = mx.random.normal(x1.shape, dtype=x1.dtype) * mask
         t = mx.random.uniform(shape=(x1.shape[0],), low=0.0, high=1.0)
         t_view = mx.reshape(t, (x1.shape[0], 1, 1, 1, 1)) * mask
         xt = (1.0 - t_view) * noise + t_view * x1 + (1 - mask) * x1
         target_velocity = mask * (x1 - noise)
-        pred_velocity = model(xt, t)
+        pred_velocity = model(xt, t, context=actions)
         return mx.mean((pred_velocity[:, -1:] - target_velocity[:, -1:]) ** 2)
 
-    def train_step(self, batch: mx.array) -> float:
-        loss, grads = self.loss_and_grad(self.model, batch)
+    def train_step(self, batch: mx.array, actions: mx.array) -> float:
+        loss, grads = self.loss_and_grad(self.model, batch, actions)
         self.optimizer.update(self.model, grads)
         mx.eval(loss, self.model.parameters(), self.optimizer.state)
         return float(loss)
 
 
-def sample_batch(videos: mx.array, batch_size: int) -> mx.array:
+def sample_batch(
+    videos: mx.array,
+    batch_size: int,
+    *,
+    actions: mx.array | None = None,
+) -> mx.array | tuple[mx.array, mx.array]:
     if batch_size >= videos.shape[0]:
+        if actions is not None:
+            return videos[:batch_size], actions[:batch_size]
         return videos[:batch_size]
+
     indices = mx.random.randint(0, videos.shape[0], shape=(batch_size,))
+    if actions is not None:
+        return videos[indices], actions[indices]
     return videos[indices]
 
 
@@ -60,6 +72,7 @@ def sample_euler(
     model: UNet3D,
     *,
     conditioning_clips: mx.array,
+    actions: mx.array | None = None,
     num_steps: int = 32,
 ) -> mx.array:
     if num_steps <= 0:
@@ -74,7 +87,7 @@ def sample_euler(
     for step in range(num_steps):
         t = mx.full((batch_size,), step / num_steps, dtype=conditioning_clips.dtype)
         xt = mx.concatenate([context, x], axis=1)
-        v = model(xt, t)
+        v = model(xt, t, context=actions)
         x = x + dt * v[:, -1:]
 
     samples = mx.concatenate([context, x], axis=1)
@@ -84,7 +97,8 @@ def sample_euler(
 
 def train_on_dataset(
     videos: mx.array,
-    *,
+    actions: mx.array | None = None,
+    action_dim: int = 1,
     steps: int = 1_000,
     batch_size: int = 1,
     base_channels: int = 16,
@@ -95,10 +109,14 @@ def train_on_dataset(
     sample_steps: int = 32,
     sample_fps: float = 8.0,
 ):
+    if actions is None:
+        actions = mx.zeros((videos.shape[0], action_dim), dtype=mx.int8)
+
     model = UNet3D(
         in_channels=int(videos.shape[-1]),
         out_channels=int(videos.shape[-1]),
         base_channels=base_channels,
+        action_dim=action_dim,
     )
     trainer = FlowMatchingTrainer(model, learning_rate=learning_rate)
 
@@ -109,8 +127,8 @@ def train_on_dataset(
     losses: list[float] = []
 
     for step in range(1, steps + 1):
-        batch = sample_batch(videos, batch_size)
-        loss = trainer.train_step(batch)
+        batch, batch_actions = sample_batch(videos, batch_size, actions=actions)
+        loss = trainer.train_step(batch, batch_actions)
         losses.append(loss)
 
         if step == 1 or step % log_every == 0 or step == steps:
@@ -125,9 +143,11 @@ def train_on_dataset(
     if sample_dir is not None:
         sample_count = min(num_samples, int(videos.shape[0]))
         conditioning_clips = videos[:sample_count]
+        conditioning_actions = actions[:sample_count] if actions is not None else None
         samples = sample_euler(
             model,
             conditioning_clips=conditioning_clips,
+            actions=conditioning_actions,
             num_steps=sample_steps,
         )
         save_clip_previews(samples, sample_dir, max_clips=sample_count, fps=sample_fps)
@@ -176,7 +196,7 @@ def train_overfit_random_noise(
     )
 
 
-def train_overfit_video(
+def train_on_video(
     video_path: str | Path,
     *,
     steps: int = 1_000,
@@ -281,7 +301,7 @@ def main() -> None:
     args = build_argparser().parse_args()
 
     if args.video is not None:
-        train_overfit_video(
+        train_on_video(
             args.video,
             steps=args.steps,
             batch_size=args.batch_size,
@@ -305,7 +325,7 @@ def main() -> None:
     train_overfit_random_noise(
         steps=args.steps,
         batch_size=args.batch_size,
-        num_videos=args.num_videos,
+        num_videos=1,
         frames=args.frames,
         height=args.height,
         width=args.width,

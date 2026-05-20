@@ -101,6 +101,39 @@ class TimeEmbedding(nn.Module):
         return self.lin2(self.act(self.lin1(emb)))
 
 
+class ActionEmbedding(nn.Module):
+    """Embeds actions into a fixed-size vector.
+
+    Categorical actions (`num_actions` set) use an embedding lookup; continuous
+    actions (`action_dim` set) use a linear projection. Exactly one of the two
+    must be provided.
+    """
+
+    def __init__(
+        self,
+        embed_dim: int,
+        *,
+        num_actions: int | None = None,
+        action_dim: int | None = None,
+    ):
+        super().__init__()
+        if (num_actions is None) == (action_dim is None):
+            raise ValueError(
+                "Specify exactly one of num_actions (categorical) or action_dim (continuous)"
+            )
+
+        self.categorical = num_actions is not None
+        if self.categorical:
+            self.embed = nn.Embedding(num_actions, embed_dim)
+        else:
+            self.embed = nn.Linear(action_dim, embed_dim)
+
+    def __call__(self, actions: mx.array) -> mx.array:
+        if self.categorical:
+            return self.embed(actions)
+        return self.embed(actions.astype(mx.float32))
+
+
 class ConvResBlock3D(nn.Module):
     def __init__(
         self, in_channels: int, out_channels: int, time_embed_dim: int | None = None
@@ -208,10 +241,13 @@ class UNet3D(nn.Module):
         out_channels: int = 1,
         base_channels: int = 16,
         conv_block: nn.Module = ConvResBlock3D,
+        num_actions: int = 1,
+        action_dim: int | None = None,
     ):
         super().__init__()
         time_embed_dim = base_channels * 4
         self.time_embed = TimeEmbedding(time_embed_dim)
+        self.context_embed = ActionEmbedding(time_embed_dim, num_actions=num_actions)
 
         self.res1 = conv_block(
             in_channels, base_channels, time_embed_dim=time_embed_dim
@@ -262,19 +298,21 @@ class UNet3D(nn.Module):
         if context is None:
             context = mx.zeros((x.shape[0], t_emb.shape[-1]), dtype=x.dtype)
 
+        context = self.context_embed(context)
+
         x1 = self.res1(x, t_emb)
         x2 = self.res2(self.down1(x1), t_emb)
         x3 = self.res3(self.down2(x2), t_emb)
 
-        b, s, h, w, c = x3.shape
-        x3 = mx.reshape(x3, (b, s * h * w, c))
         # (b d) -> (b 1 d)
         context = mx.unflatten(context, 1, (1, -1))
-        x3 = self.self_attn(x3, x3)
-        x3 = mx.reshape(x3, (b, s, h, w, c))
-        x3 = self.mid_conv(x3, t_emb)
+        b, s, h, w, c = x3.shape
+        xmid = mx.reshape(x3, (b, s * h * w, c))
+        xmid = self.self_attn(xmid, xmid)
+        xmid = mx.reshape(xmid, (b, s, h, w, c))
+        xmid = self.mid_conv(xmid, t_emb)
 
-        x = self.up2(x3, x2, t_emb)
+        x = self.up2(xmid, x2, t_emb)
         x = self.up1(x, x1, t_emb)
 
         return self.out_conv(x)
