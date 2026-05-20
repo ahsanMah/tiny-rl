@@ -13,6 +13,11 @@ import numpy as np
 from unet import UNet3D, print_param_table
 
 
+def make_final_frame_mask(x: mx.array) -> mx.array:
+    frame_mask = (mx.arange(x.shape[1]) == (x.shape[1] - 1)).astype(x.dtype)
+    return mx.reshape(frame_mask, (1, x.shape[1], 1, 1, 1))
+
+
 class FlowMatchingTrainer:
     def __init__(
         self,
@@ -25,13 +30,14 @@ class FlowMatchingTrainer:
         self.loss_and_grad = nn.value_and_grad(model, self.loss)
 
     def loss(self, model: UNet3D, x1: mx.array) -> mx.array:
+        mask = make_final_frame_mask(x1)
         x0 = mx.random.normal(x1.shape, dtype=x1.dtype)
         t = mx.random.uniform(shape=(x1.shape[0],), low=0.0, high=1.0)
         t_view = mx.reshape(t, (x1.shape[0], 1, 1, 1, 1))
-        xt = (1.0 - t_view) * x0 + t_view * x1
-        target_velocity = x1 - x0
+        xt = (1.0 - mask) * x1 + mask * ((1.0 - t_view) * x0 + t_view * x1)
+        target_velocity = mask * (x1 - x0)
         pred_velocity = model(xt, t)
-        return mx.mean((pred_velocity - target_velocity) ** 2)
+        return mx.mean((pred_velocity[:, -1:] - target_velocity[:, -1:]) ** 2)
 
     def train_step(self, batch: mx.array) -> float:
         loss, grads = self.loss_and_grad(self.model, batch)
@@ -75,9 +81,7 @@ def load_video_frames(
     meta = reader.get_meta_data()
 
     if spatial_downsample <= 0:
-        raise ValueError(
-            f"spatial_downsample must be > 0, got {spatial_downsample}"
-        )
+        raise ValueError(f"spatial_downsample must be > 0, got {spatial_downsample}")
 
     source_fps = float(meta.get("fps", target_fps))
     frame_step = max(int(round(source_fps / target_fps)), 1)
@@ -233,23 +237,27 @@ def sample_batch(videos: mx.array, batch_size: int) -> mx.array:
 def sample_euler(
     model: UNet3D,
     *,
-    sample_shape: tuple[int, int, int, int, int],
+    conditioning_clips: mx.array,
     num_steps: int = 32,
 ) -> mx.array:
     if num_steps <= 0:
         raise ValueError(f"num_steps must be > 0, got {num_steps}")
 
-    x = mx.random.normal(sample_shape)
+    batch_size = int(conditioning_clips.shape[0])
+    context = conditioning_clips[:, :-1]
+    target = conditioning_clips[:, -1:]
+    x = mx.random.normal(target.shape, dtype=conditioning_clips.dtype)
     dt = 1.0 / num_steps
-    batch_size = sample_shape[0]
 
     for step in range(num_steps):
-        t = mx.full((batch_size,), step / num_steps)
-        v = model(x, t)
-        x = x + dt * v
+        t = mx.full((batch_size,), step / num_steps, dtype=conditioning_clips.dtype)
+        xt = mx.concatenate([context, x], axis=1)
+        v = model(xt, t)
+        x = x + dt * v[:, -1:]
 
-    mx.eval(x)
-    return x
+    samples = mx.concatenate([context, x], axis=1)
+    mx.eval(samples)
+    return samples
 
 
 def train_on_dataset(
@@ -293,17 +301,14 @@ def train_on_dataset(
             )
 
     if sample_dir is not None:
-        sample_shape = (
-            min(num_samples, int(videos.shape[0])),
-            int(videos.shape[1]),
-            int(videos.shape[2]),
-            int(videos.shape[3]),
-            int(videos.shape[4]),
+        sample_count = min(num_samples, int(videos.shape[0]))
+        conditioning_clips = videos[:sample_count]
+        samples = sample_euler(
+            model,
+            conditioning_clips=conditioning_clips,
+            num_steps=sample_steps,
         )
-        samples = sample_euler(model, sample_shape=sample_shape, num_steps=sample_steps)
-        save_clip_previews(
-            samples, sample_dir, max_clips=sample_shape[0], fps=sample_fps
-        )
+        save_clip_previews(samples, sample_dir, max_clips=sample_count, fps=sample_fps)
         print(f"saved samples to: {sample_dir}")
 
     return model, losses
@@ -432,7 +437,7 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--width", type=int, default=32)
     parser.add_argument("--channels", type=int, default=3)
     parser.add_argument("--base-channels", type=int, default=16)
-    parser.add_argument("--learning-rate", type=float, default=3e-4)
+    parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--log-every", type=int, default=50)
     parser.add_argument("--video-target-fps", type=float, default=8.0)
