@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import time
 from pathlib import Path
 
@@ -53,19 +54,14 @@ class FlowMatchingTrainer:
 
 def sample_batch(
     videos: mx.array,
+    actions: mx.array,
     batch_size: int,
-    *,
-    actions: mx.array | None = None,
-) -> mx.array | tuple[mx.array, mx.array]:
+) -> tuple[mx.array, mx.array]:
     if batch_size >= videos.shape[0]:
-        if actions is not None:
-            return videos[:batch_size], actions[:batch_size]
-        return videos[:batch_size]
+        return videos[:batch_size], actions[:batch_size]
 
     indices = mx.random.randint(0, videos.shape[0], shape=(batch_size,))
-    if actions is not None:
-        return videos[indices], actions[indices]
-    return videos[indices]
+    return (videos[indices], actions[indices])
 
 
 def sample_euler(
@@ -95,6 +91,96 @@ def sample_euler(
     return samples
 
 
+def save_model(
+    model: UNet3D, save_dir: str | Path, *, config: dict
+) -> None:
+    """Save model weights (`model.safetensors`) and constructor config (`config.json`).
+
+    `config` must contain exactly the kwargs needed to re-instantiate `UNet3D`.
+    """
+    save_dir = Path(save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+    model.save_weights(str(save_dir / "model.safetensors"))
+    (save_dir / "config.json").write_text(json.dumps(config, indent=2))
+
+
+def load_model(save_dir: str | Path) -> UNet3D:
+    """Load a `UNet3D` previously saved via `save_model`."""
+    save_dir = Path(save_dir)
+    config = json.loads((save_dir / "config.json").read_text())
+    model = UNet3D(**config)
+    model.load_weights(str(save_dir / "model.safetensors"))
+    return model
+
+
+def load_and_generate(
+    save_dir: str | Path,
+    *,
+    initial_clip: mx.array,
+    num_new_frames: int,
+    actions: mx.array | None = None,
+    num_steps: int = 32,
+) -> mx.array:
+    """Load a saved model and autoregressively generate a video."""
+    model = load_model(save_dir)
+    return generate_video(
+        model,
+        initial_clip=initial_clip,
+        num_new_frames=num_new_frames,
+        actions=actions,
+        num_steps=num_steps,
+    )
+
+
+def generate_video(
+    model: UNet3D,
+    *,
+    initial_clip: mx.array,
+    num_new_frames: int,
+    actions: mx.array | None = None,
+    num_steps: int = 32,
+) -> mx.array:
+    """Autoregressively extend `initial_clip` by `num_new_frames` new frames.
+
+    Args:
+        initial_clip: (B, L, H, W, C) seed frames.
+        num_new_frames: number of frames to generate after the seed.
+        actions: optional (B, L + num_new_frames) action stream. The window
+            of actions tracks the window of frames as we slide forward.
+        num_steps: Euler integration steps per generated frame.
+
+    Returns:
+        (B, L + num_new_frames, H, W, C) array of frames.
+    """
+    if num_new_frames <= 0:
+        raise ValueError(f"num_new_frames must be > 0, got {num_new_frames}")
+
+    clip_length = int(initial_clip.shape[1])
+    if actions is not None:
+        expected = clip_length + num_new_frames
+        if int(actions.shape[1]) != expected:
+            raise ValueError(
+                f"actions must have shape (B, {expected}), got {tuple(actions.shape)}"
+            )
+
+    frames = initial_clip
+    for step in range(num_new_frames):
+        window = frames[:, -clip_length:]
+        action_window = (
+            actions[:, step : step + clip_length] if actions is not None else None
+        )
+        sample = sample_euler(
+            model,
+            conditioning_clips=window,
+            actions=action_window,
+            num_steps=num_steps,
+        )
+        frames = mx.concatenate([frames, sample[:, -1:]], axis=1)
+
+    mx.eval(frames)
+    return frames
+
+
 def train_on_dataset(
     videos: mx.array,
     actions: mx.array | None = None,
@@ -105,29 +191,40 @@ def train_on_dataset(
     learning_rate: float = 1e-3,
     log_every: int = 50,
     sample_dir: str | Path | None = None,
-    num_samples: int = 4,
+    num_gen_samples: int = 4,
     sample_steps: int = 32,
     sample_fps: float = 8.0,
+    model: UNet3D | None = None,
 ):
+
     if actions is None:
         actions = mx.zeros((videos.shape[0], action_dim), dtype=mx.int8)
 
-    model = UNet3D(
-        in_channels=int(videos.shape[-1]),
-        out_channels=int(videos.shape[-1]),
-        base_channels=base_channels,
-        action_dim=action_dim,
-    )
+    if model is None:
+        model = UNet3D(
+            in_channels=int(videos.shape[-1]),
+            out_channels=int(videos.shape[-1]),
+            base_channels=base_channels,
+            action_dim=action_dim,
+        )
     trainer = FlowMatchingTrainer(model, learning_rate=learning_rate)
 
     print("dataset:", tuple(videos.shape))
     print_param_table(model)
 
+    sample_count = min(num_gen_samples, int(videos.shape[0]))
+    if sample_dir is not None:
+        val_conditioning_clips = videos[:sample_count]
+        val_conditioning_actions = actions[:sample_count]
+
+        videos = videos[sample_count:]
+        actions = actions[sample_count:]
+
     start = time.time()
     losses: list[float] = []
 
     for step in range(1, steps + 1):
-        batch, batch_actions = sample_batch(videos, batch_size, actions=actions)
+        batch, batch_actions = sample_batch(videos, actions, batch_size)
         loss = trainer.train_step(batch, batch_actions)
         losses.append(loss)
 
@@ -141,13 +238,10 @@ def train_on_dataset(
             )
 
     if sample_dir is not None:
-        sample_count = min(num_samples, int(videos.shape[0]))
-        conditioning_clips = videos[:sample_count]
-        conditioning_actions = actions[:sample_count] if actions is not None else None
         samples = sample_euler(
             model,
-            conditioning_clips=conditioning_clips,
-            actions=conditioning_actions,
+            conditioning_clips=val_conditioning_clips,
+            actions=val_conditioning_actions,
             num_steps=sample_steps,
         )
         save_clip_previews(samples, sample_dir, max_clips=sample_count, fps=sample_fps)
@@ -190,7 +284,7 @@ def train_overfit_random_noise(
         learning_rate=learning_rate,
         log_every=log_every,
         sample_dir=sample_dir,
-        num_samples=num_samples,
+        num_gen_samples=num_samples,
         sample_steps=sample_steps,
         sample_fps=sample_fps,
     )
@@ -260,10 +354,44 @@ def train_on_video(
         learning_rate=learning_rate,
         log_every=log_every,
         sample_dir=sample_dir,
-        num_samples=num_samples,
+        num_gen_samples=num_samples,
         sample_steps=sample_steps,
         sample_fps=float(info["actual_fps"]),
     )
+
+
+def generate_from_pretrained(
+    *,
+    load_dir: str | Path,
+    sample_dir: str | Path,
+    initial_clip: mx.array,
+    num_new_frames: int,
+    num_steps: int = 32,
+    sample_fps: float = 8.0,
+    seed: int = 0,
+) -> mx.array:
+    """Load a saved model and write a generated video preview to `sample_dir`.
+
+    Uses zero-action context for the generated frames.
+    """
+    model = load_model(load_dir)
+    print(f"loaded model from: {load_dir}")
+    print_param_table(model)
+
+    clip_length = int(initial_clip.shape[1])
+    batch_size = int(initial_clip.shape[0])
+    actions = mx.zeros((batch_size, clip_length + num_new_frames), dtype=mx.int32)
+
+    generated = generate_video(
+        model,
+        initial_clip=initial_clip,
+        num_new_frames=num_new_frames,
+        actions=actions,
+        num_steps=num_steps,
+    )
+    save_clip_previews(generated, sample_dir, max_clips=batch_size, fps=sample_fps)
+    print(f"saved generated video to: {sample_dir}")
+    return generated
 
 
 def build_argparser() -> argparse.ArgumentParser:
@@ -294,11 +422,65 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--sample-steps", type=int, default=32)
     parser.add_argument("--sample-fps", type=float, default=8.0)
     parser.add_argument("--full-resolution", action="store_true")
+    parser.add_argument(
+        "--load-dir",
+        type=str,
+        default=None,
+        help="If set, load a pretrained model from this directory and run generation "
+        "(skips training).",
+    )
+    parser.add_argument(
+        "--generate-new-frames",
+        type=int,
+        default=32,
+        help="Number of frames to autoregressively generate after the initial clip.",
+    )
+    parser.add_argument(
+        "--generate-num-steps",
+        type=int,
+        default=32,
+        help="Euler integration steps per generated frame.",
+    )
     return parser
 
 
 def main() -> None:
     args = build_argparser().parse_args()
+
+    if args.load_dir is not None:
+        if args.video is not None:
+            videos, info = load_video_dataset(
+                args.video,
+                clip_length=args.frames,
+                target_fps=args.video_target_fps,
+                spatial_downsample=1 if args.full_resolution else args.video_downsample,
+                clip_stride=args.clip_stride,
+                max_clips=args.max_clips,
+            )
+            initial_clip = videos[: args.num_samples]
+            generation_fps = float(info["actual_fps"])
+        else:
+            initial_clip = make_random_video_dataset(
+                num_videos=args.num_samples,
+                frames=args.frames,
+                height=args.height,
+                width=args.width,
+                channels=args.channels,
+                seed=args.seed,
+            )
+            generation_fps = args.sample_fps
+
+        sample_dir = args.sample_dir or str(Path(args.load_dir) / "generated")
+        generate_from_pretrained(
+            load_dir=args.load_dir,
+            sample_dir=sample_dir,
+            initial_clip=initial_clip,
+            num_new_frames=args.generate_new_frames,
+            num_steps=args.generate_num_steps,
+            sample_fps=generation_fps,
+            seed=args.seed,
+        )
+        return
 
     if args.video is not None:
         train_on_video(
