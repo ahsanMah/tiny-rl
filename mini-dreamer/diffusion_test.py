@@ -31,11 +31,11 @@ class FlowMatchingTrainer:
 
     def loss(self, model: UNet3D, x1: mx.array) -> mx.array:
         mask = make_final_frame_mask(x1)
-        x0 = mx.random.normal(x1.shape, dtype=x1.dtype)
+        noise = mx.random.normal(x1.shape, dtype=x1.dtype) * mask
         t = mx.random.uniform(shape=(x1.shape[0],), low=0.0, high=1.0)
-        t_view = mx.reshape(t, (x1.shape[0], 1, 1, 1, 1))
-        xt = (1.0 - mask) * x1 + mask * ((1.0 - t_view) * x0 + t_view * x1)
-        target_velocity = mask * (x1 - x0)
+        t_view = mx.reshape(t, (x1.shape[0], 1, 1, 1, 1)) * mask
+        xt = (1.0 - t_view) * noise + t_view * x1 + (1 - mask) * x1
+        target_velocity = mask * (x1 - noise)
         pred_velocity = model(xt, t)
         return mx.mean((pred_velocity[:, -1:] - target_velocity[:, -1:]) ** 2)
 
