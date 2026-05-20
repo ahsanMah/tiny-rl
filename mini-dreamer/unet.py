@@ -107,9 +107,11 @@ class ConvResBlock3D(nn.Module):
         out_channels: int = in_channels
         self.norm1 = nn.RMSNorm(in_channels)
         self.norm2 = nn.RMSNorm(out_channels)
+        zero_init = nn.init.constant(0.0)
 
         self.conv1 = nn.Conv3d(in_channels, out_channels, kernel_size=3, padding=1)
         self.conv2 = nn.Conv3d(out_channels, out_channels, kernel_size=3, padding=1)
+        self.conv2.weight = zero_init(self.conv2.weight)
         self.act = nn.SiLU()
 
         if time_embed_dim is not None:
@@ -170,27 +172,61 @@ class UpBlock3D(nn.Module):
         return self.conv(x, t_emb)
 
 
+class CrossAttention(nn.Module):
+    def __init__(self, dim: int, context_dim: int, num_heads: int = 4):
+        """Implemenets MultiQuery Attention"""
+        super().__init__()
+        self.num_heads = num_heads
+        self.scale = dim**-0.5
+
+        self.to_q = nn.Linear(dim, dim)
+        self.to_k = nn.Linear(dim, dim // num_heads)
+        self.to_v = nn.Linear(dim, dim // num_heads)
+        self.to_out = nn.Linear(dim, dim)
+
+    def __call__(self, x: mx.array, context: mx.array) -> mx.array:
+        num_heads = self.num_heads
+        q = self.to_q(x)
+        k = self.to_k(context)
+        v = self.to_v(context)
+        # multi query
+        # (b s d) -> (b s h d//h)
+        q = mx.unflatten(q, -1, (num_heads, -1))
+        k = mx.unflatten(k, -1, (1, -1))
+        v = mx.unflatten(v, -1, (1, -1))
+        # print(f"{q.shape =}, {k.shape =}, {v.shape =}")
+        out = mx.fast.scaled_dot_product_attention(q, k, v, scale=self.scale)
+        # (b s h d//h) -> (b s d)
+        out = mx.flatten(out, start_axis=-2)
+        out = self.to_out(out)
+        return out
+
+
 class UNet3D(nn.Module):
     def __init__(
         self,
         in_channels: int = 1,
         out_channels: int = 1,
         base_channels: int = 16,
+        conv_block: nn.Module = ConvResBlock3D,
     ):
         super().__init__()
         time_embed_dim = base_channels * 4
         self.time_embed = TimeEmbedding(time_embed_dim)
 
         self.conv_in = nn.Conv3d(in_channels, base_channels, kernel_size=3, padding=1)
-        self.res1 = ConvResBlock3D(base_channels, time_embed_dim=time_embed_dim)
+        self.res1 = conv_block(base_channels, time_embed_dim=time_embed_dim)
         self.down1 = Downsample3D(base_channels)  # Channels double
 
-        self.res2 = ConvResBlock3D(base_channels * 2, time_embed_dim=time_embed_dim)
+        self.res2 = conv_block(base_channels * 2, time_embed_dim=time_embed_dim)
         self.down2 = Downsample3D(base_channels * 2)
 
-        self.res3 = ConvResBlock3D(base_channels * 4, time_embed_dim=time_embed_dim)
-        self.mid_attn = nn.MultiHeadAttention(base_channels * 4, num_heads=4)
-        self.mid_conv = ConvResBlock3D(base_channels * 4, time_embed_dim=time_embed_dim)
+        self.res3 = conv_block(base_channels * 4, time_embed_dim=time_embed_dim)
+
+        self.self_attn = CrossAttention(
+            base_channels * 4, context_dim=time_embed_dim, num_heads=4
+        )
+        self.mid_conv = conv_block(base_channels * 4, time_embed_dim=time_embed_dim)
 
         self.up2 = UpBlock3D(
             base_channels * 4,
@@ -205,15 +241,21 @@ class UNet3D(nn.Module):
 
         self.out_conv = nn.Conv3d(base_channels, out_channels, kernel_size=1)
 
-    def __call__(self, x: mx.array, t: mx.array | None = None) -> mx.array:
-        if t is None:
-            t = mx.zeros((x.shape[0],), dtype=x.dtype)
-        elif t.ndim == 0:
+    def __call__(
+        self, x: mx.array, t: mx.array, context: mx.array | None = None
+    ) -> mx.array:
+
+        if t.ndim == 0:
             t = mx.broadcast_to(t, (x.shape[0],))
         elif t.ndim == 2 and t.shape[-1] == 1:
             t = t[:, 0]
 
         t_emb = self.time_embed(t)
+
+        # This will be the action context
+        if context is None:
+            context = mx.zeros((x.shape[0], t_emb.shape[-1]), dtype=x.dtype)
+
         x = self.conv_in(x)
 
         x1 = self.res1(x, t_emb)
@@ -222,7 +264,10 @@ class UNet3D(nn.Module):
 
         b, s, h, w, c = x3.shape
         x3 = mx.reshape(x3, (b, s * h * w, c))
-        x3 = self.mid_attn(x3, x3, x3)
+        # (b d) -> (b 1 d)
+        context = mx.unflatten(context, 1, (1, -1))
+        # print(f"{t_emb.shape =} --> {context.shape = }")
+        x3 = self.self_attn(x3, x3)
         x3 = mx.reshape(x3, (b, s, h, w, c))
         x3 = self.mid_conv(x3, t_emb)
 
