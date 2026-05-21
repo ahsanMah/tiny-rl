@@ -139,7 +139,13 @@ def generate_minigrid_video(
         actions=full_actions,
         num_steps=num_steps,
     )
-    save_clip_previews(generated, save_dir, max_clips=batch_size, fps=sample_fps)
+    save_clip_previews(
+        generated,
+        save_dir,
+        max_clips=batch_size,
+        fps=sample_fps,
+        actions=full_actions,
+    )
     print(f"saved generated video to: {save_dir}")
     return generated
 

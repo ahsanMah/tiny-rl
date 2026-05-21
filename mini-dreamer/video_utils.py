@@ -5,6 +5,7 @@ from pathlib import Path
 import imageio.v2 as iio
 import mlx.core as mx
 import numpy as np
+from PIL import Image, ImageDraw, ImageFont
 
 
 def require_valid_unet_shape(frames: int, height: int, width: int) -> None:
@@ -146,12 +147,37 @@ def to_uint8_video(x: np.ndarray) -> np.ndarray:
     return np.clip((x + 1.0) * 127.5, 0.0, 255.0).astype(np.uint8)
 
 
+def _load_overlay_font() -> ImageFont.ImageFont:
+    try:
+        return ImageFont.load_default(size=10)
+    except TypeError:
+        return ImageFont.load_default()
+
+
+def _annotate_action(frame: np.ndarray, action: int) -> np.ndarray:
+    if frame.ndim != 3 or frame.shape[-1] not in (3, 4):
+        return frame
+    mode = "RGB" if frame.shape[-1] == 3 else "RGBA"
+    img = Image.fromarray(frame, mode=mode)
+    draw = ImageDraw.Draw(img)
+    draw.text(
+        (1, 1),
+        f"action={int(action)}",
+        fill=(255, 255, 255),
+        stroke_width=1,
+        stroke_fill=(0, 0, 0),
+        font=_load_overlay_font(),
+    )
+    return np.asarray(img)
+
+
 def save_clip_previews(
     clips: mx.array,
     output_dir: str | Path,
     *,
     max_clips: int = 4,
     fps: float = 8.0,
+    actions: mx.array | np.ndarray | None = None,
 ) -> None:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -163,6 +189,22 @@ def save_clip_previews(
     num_clips, num_frames, height, width, channels = clips_uint8.shape
     if channels not in (1, 3, 4):
         raise ValueError(f"Unsupported channel count for preview: {channels}")
+
+    if actions is not None and channels in (3, 4):
+        actions_np = np.asarray(actions)[:preview_count]
+        if actions_np.shape[:2] != (num_clips, num_frames):
+            raise ValueError(
+                f"actions shape {tuple(actions_np.shape)} does not match clips "
+                f"({num_clips}, {num_frames})"
+            )
+        annotated = np.empty_like(clips_uint8)
+        for clip_idx in range(num_clips):
+            for frame_idx in range(num_frames):
+                annotated[clip_idx, frame_idx] = _annotate_action(
+                    clips_uint8[clip_idx, frame_idx],
+                    int(actions_np[clip_idx, frame_idx]),
+                )
+        clips_uint8 = annotated
 
     sheet = np.zeros((num_clips * height, num_frames * width, channels), dtype=np.uint8)
     for clip_idx in range(num_clips):
