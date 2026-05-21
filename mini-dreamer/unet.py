@@ -225,7 +225,9 @@ class CrossAttention(nn.Module):
         self.to_out.weight = zero_init(self.to_out.weight)
         self.to_out.bias = zero_init(self.to_out.bias)
 
-    def __call__(self, x: mx.array, context: mx.array) -> mx.array:
+    def __call__(
+        self, x: mx.array, context: mx.array, mask: str | None = None
+    ) -> mx.array:
         num_heads = self.num_heads
         q = self.to_q(self.norm(x))
         k = self.to_k(context)
@@ -234,7 +236,7 @@ class CrossAttention(nn.Module):
         q = mx.unflatten(q, -1, (num_heads, -1)).transpose(0, 2, 1, 3)
         k = mx.unflatten(k, -1, (1, -1)).transpose(0, 2, 1, 3)
         v = mx.unflatten(v, -1, (1, -1)).transpose(0, 2, 1, 3)
-        out = mx.fast.scaled_dot_product_attention(q, k, v, scale=self.scale)
+        out = mx.fast.scaled_dot_product_attention(q, k, v, scale=self.scale, mask=mask)
         # (B, H, T, D_head) -> (B, T, H*D_head)
         out = mx.flatten(out.transpose(0, 2, 1, 3), start_axis=-2)
         out = self.to_out(out)
@@ -270,7 +272,10 @@ class UNet3D(nn.Module):
             base_channels * 2, base_channels * 4, time_embed_dim=time_embed_dim
         )
 
-        self.self_attn = CrossAttention(
+        self.spatial_attn = CrossAttention(
+            base_channels * 4, context_dim=base_channels * 4, num_heads=4
+        )
+        self.temporal_attn = CrossAttention(
             base_channels * 4, context_dim=base_channels * 4, num_heads=4
         )
         self.cross_attn = CrossAttention(
@@ -308,16 +313,31 @@ class UNet3D(nn.Module):
         x3 = self.res3(self.down2(x2), t_emb)
 
         b, s, h, w, c = x3.shape
-        xmid = mx.reshape(x3, (b, s * h * w, c))
-        xmid = self.self_attn(xmid, xmid)
 
-        _temb = mx.repeat(
-            mx.unflatten(t_emb, 1, (1, -1)), axis=1, repeats=context.shape[1]
-        )
-        # context = mx.concat([context, _temb], axis=-1)
-        # print(f"{_temb.shape =}, {context.shape =}")
-        xmid = self.cross_attn(xmid, context=context)
-        xmid = mx.reshape(xmid, (b, s, h, w, c))
+        # spatial self-attn: each frame independently
+        xs = mx.reshape(x3, (b * s, h * w, c))
+        xs = self.spatial_attn(xs, xs)
+        xs = mx.reshape(xs, (b, s, h, w, c))
+
+        # temporal self-attn: each pixel attends over time
+        xt = xs.transpose(0, 2, 3, 1, 4)  # (B, H, W, S, C)
+        xt = mx.reshape(xt, (b * h * w, s, c))
+        xt = self.temporal_attn(xt, xt)
+        # xt = mx.reshape(xt, (b, h, w, s, c))
+        # xmid = xt.transpose(0, 3, 1, 2, 4)  # (B, S, H, W, C)
+
+        # # spatiotemporal cross-attention to actions
+        # xmid = xmid.reshape(b, s * h * w, c)
+        # xmid = self.cross_attn(xmid, context=context)
+        # xmid = mx.reshape(xmid, (b, s, h, w, c))
+        # context is (B, L, ctx_c); broadcast it across H*W
+
+        ctx = mx.repeat(context[:, None, None], h, axis=1)
+        ctx = mx.repeat(ctx, w, axis=2)
+        ctx = mx.reshape(ctx, (b * h * w, context.shape[1], -1))
+        xt = self.cross_attn(xt, context=ctx, mask="causal")
+        xt = mx.reshape(xt, (b, h, w, s, c))
+        xmid = mx.transpose(xt, (0, 3, 1, 2, 4))  # back to (B, S, H, W, C)
 
         xmid = self.mid_conv(xmid, t_emb)
 
