@@ -231,7 +231,7 @@ def train_cmd(
     model, _ = train_on_dataset(
         clips,
         actions=action_clips,
-        action_dim=num_actions,
+        num_env_actions=num_actions,
         base_channels=base_channels,
         batch_size=batch_size,
         steps=train_steps,

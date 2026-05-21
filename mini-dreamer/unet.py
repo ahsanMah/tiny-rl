@@ -151,11 +151,15 @@ class ConvResBlock3D(nn.Module):
 
         self.conv1 = nn.Conv3d(out_channels, out_channels, kernel_size=3, padding=1)
         self.conv2 = nn.Conv3d(out_channels, out_channels, kernel_size=3, padding=1)
-        self.conv2.weight = zero_init(self.conv2.weight)
         self.act = nn.SiLU()
 
         if time_embed_dim is not None:
             self.to_film = nn.Linear(time_embed_dim, out_channels * 2)
+            self.to_film.weight = zero_init(self.to_film.weight)
+            self.to_film.bias = zero_init(self.to_film.bias)
+
+        self.conv2.weight = zero_init(self.conv2.weight)
+        self.conv2.bias = zero_init(self.conv2.bias)
 
     def _apply_film(
         self, h: mx.array, t_emb: mx.array | None, proj: nn.Linear | None
@@ -209,29 +213,33 @@ class CrossAttention(nn.Module):
         """Implemenets MultiQuery Attention"""
         super().__init__()
         self.num_heads = num_heads
-        self.scale = dim**-0.5
+        self.scale = (dim // num_heads) ** -0.5
 
+        self.norm = nn.RMSNorm(dim)
         self.to_q = nn.Linear(dim, dim)
-        self.to_k = nn.Linear(dim, dim // num_heads)
-        self.to_v = nn.Linear(dim, dim // num_heads)
+        self.to_k = nn.Linear(context_dim, dim // num_heads)
+        self.to_v = nn.Linear(context_dim, dim // num_heads)
         self.to_out = nn.Linear(dim, dim)
+
+        zero_init = nn.init.constant(0.0)
+        self.to_out.weight = zero_init(self.to_out.weight)
+        self.to_out.bias = zero_init(self.to_out.bias)
 
     def __call__(self, x: mx.array, context: mx.array) -> mx.array:
         num_heads = self.num_heads
-        q = self.to_q(x)
+        q = self.to_q(self.norm(x))
         k = self.to_k(context)
         v = self.to_v(context)
-        # multi query
-        # (b s d) -> (b s h d//h)
-        q = mx.unflatten(q, -1, (num_heads, -1))
-        k = mx.unflatten(k, -1, (1, -1))
-        v = mx.unflatten(v, -1, (1, -1))
-        # print(f"{q.shape =}, {k.shape =}, {v.shape =}")
+        # MLX SDPA expects (B, N_heads, T_seq, D_head); rearrange from (B, T, D).
+        q = mx.unflatten(q, -1, (num_heads, -1)).transpose(0, 2, 1, 3)
+        k = mx.unflatten(k, -1, (1, -1)).transpose(0, 2, 1, 3)
+        v = mx.unflatten(v, -1, (1, -1)).transpose(0, 2, 1, 3)
         out = mx.fast.scaled_dot_product_attention(q, k, v, scale=self.scale)
-        # (b s h d//h) -> (b s d)
-        out = mx.flatten(out, start_axis=-2)
+        # (B, H, T, D_head) -> (B, T, H*D_head)
+        out = mx.flatten(out.transpose(0, 2, 1, 3), start_axis=-2)
         out = self.to_out(out)
-        return out
+
+        return out + x
 
 
 class UNet3D(nn.Module):
@@ -242,7 +250,6 @@ class UNet3D(nn.Module):
         base_channels: int = 16,
         conv_block: nn.Module = ConvResBlock3D,
         num_actions: int = 1,
-        action_dim: int | None = None,
     ):
         super().__init__()
         time_embed_dim = base_channels * 4
@@ -264,6 +271,9 @@ class UNet3D(nn.Module):
         )
 
         self.self_attn = CrossAttention(
+            base_channels * 4, context_dim=base_channels * 4, num_heads=4
+        )
+        self.cross_attn = CrossAttention(
             base_channels * 4, context_dim=time_embed_dim, num_heads=4
         )
         self.mid_conv = conv_block(
@@ -283,9 +293,7 @@ class UNet3D(nn.Module):
 
         self.out_conv = nn.Conv3d(base_channels, out_channels, kernel_size=1)
 
-    def __call__(
-        self, x: mx.array, t: mx.array, context: mx.array | None = None
-    ) -> mx.array:
+    def __call__(self, x: mx.array, t: mx.array, context: mx.array) -> mx.array:
 
         if t.ndim == 0:
             t = mx.broadcast_to(t, (x.shape[0],))
@@ -293,23 +301,24 @@ class UNet3D(nn.Module):
             t = t[:, 0]
 
         t_emb = self.time_embed(t)
-
-        # This will be the action context
-        if context is None:
-            context = mx.zeros((x.shape[0], t_emb.shape[-1]), dtype=x.dtype)
-
         context = self.context_embed(context)
 
         x1 = self.res1(x, t_emb)
         x2 = self.res2(self.down1(x1), t_emb)
         x3 = self.res3(self.down2(x2), t_emb)
 
-        # (b d) -> (b 1 d)
-        context = mx.unflatten(context, 1, (1, -1))
         b, s, h, w, c = x3.shape
         xmid = mx.reshape(x3, (b, s * h * w, c))
         xmid = self.self_attn(xmid, xmid)
+
+        _temb = mx.repeat(
+            mx.unflatten(t_emb, 1, (1, -1)), axis=1, repeats=context.shape[1]
+        )
+        # context = mx.concat([context, _temb], axis=-1)
+        # print(f"{_temb.shape =}, {context.shape =}")
+        xmid = self.cross_attn(xmid, context=context)
         xmid = mx.reshape(xmid, (b, s, h, w, c))
+
         xmid = self.mid_conv(xmid, t_emb)
 
         x = self.up2(xmid, x2, t_emb)
@@ -319,9 +328,12 @@ class UNet3D(nn.Module):
 
 
 if __name__ == "__main__":
-    model = UNet3D(in_channels=1, out_channels=2, base_channels=16)
+    model = UNet3D(in_channels=1, out_channels=2, base_channels=16, num_actions=3)
     print_param_table(model)
     x = mx.random.normal((1, 4, 32, 32, 1))
     t = mx.array([10])
-    y = model(x, t)
+    a = mx.ones((1, 4), dtype=mx.uint8)
+    print(f"Testing forward pass with input shape {x.shape}, time {t}, and action {a}")
+
+    y = model(x, t, a)
     print("input:", x.shape, "output:", y.shape)

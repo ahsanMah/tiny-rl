@@ -29,16 +29,16 @@ class FlowMatchingTrainer:
         *,
         learning_rate: float = 1e-3,
         weight_decay: float = 1e-4,
+        max_grad_norm: float = 2.0,
     ):
         self.model = model
         self.optimizer = optim.AdamW(
             learning_rate=learning_rate, weight_decay=weight_decay
         )
+        self.max_grad_norm = max_grad_norm
         self.loss_and_grad = nn.value_and_grad(model, self.loss)
 
-    def loss(
-        self, model: UNet3D, x1: mx.array, actions: mx.array | None = None
-    ) -> mx.array:
+    def loss(self, model: UNet3D, x1: mx.array, actions: mx.array) -> mx.array:
         mask = make_final_frame_mask(x1)
         noise = mx.random.normal(x1.shape, dtype=x1.dtype) * mask
         t = mx.random.uniform(shape=(x1.shape[0],), low=0.0, high=1.0)
@@ -50,7 +50,12 @@ class FlowMatchingTrainer:
 
     def train_step(self, batch: mx.array, actions: mx.array) -> float:
         loss, grads = self.loss_and_grad(self.model, batch, actions)
-        self.optimizer.update(self.model, grads)
+
+        clipped_grads, total_norm = optim.clip_grad_norm(
+            grads, max_norm=self.max_grad_norm
+        )
+        self.optimizer.update(self.model, clipped_grads)
+
         mx.eval(loss, self.model.parameters(), self.optimizer.state)
         return float(loss)
 
@@ -185,7 +190,7 @@ def generate_video(
 def train_on_dataset(
     videos: mx.array,
     actions: mx.array | None = None,
-    action_dim: int = 1,
+    num_env_actions: int = 1,
     steps: int = 1_000,
     batch_size: int = 1,
     base_channels: int = 16,
@@ -199,14 +204,14 @@ def train_on_dataset(
 ):
 
     if actions is None:
-        actions = mx.zeros((videos.shape[0], action_dim), dtype=mx.int8)
+        actions = mx.zeros((videos.shape[0], num_env_actions), dtype=mx.int8)
 
     if model is None:
         model = UNet3D(
             in_channels=int(videos.shape[-1]),
             out_channels=int(videos.shape[-1]),
             base_channels=base_channels,
-            action_dim=action_dim,
+            num_actions=num_env_actions,
         )
     trainer = FlowMatchingTrainer(model, learning_rate=learning_rate)
 
