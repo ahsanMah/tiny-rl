@@ -28,9 +28,12 @@ class FlowMatchingTrainer:
         model: UNet3D,
         *,
         learning_rate: float = 1e-3,
+        weight_decay: float = 1e-4,
     ):
         self.model = model
-        self.optimizer = optim.Adam(learning_rate=learning_rate)
+        self.optimizer = optim.AdamW(
+            learning_rate=learning_rate, weight_decay=weight_decay
+        )
         self.loss_and_grad = nn.value_and_grad(model, self.loss)
 
     def loss(

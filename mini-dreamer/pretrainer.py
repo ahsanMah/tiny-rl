@@ -38,7 +38,7 @@ def rollout_minigrid_frames(
     actions: list[int] = []
 
     for _ in range(num_steps):
-        action = env.action_space.sample() % 3
+        action = env.action_space.sample()
         actions.append(action)
         obs, _, terminated, truncated, _ = env.step(action)
 
@@ -151,7 +151,7 @@ def cli() -> None:
 
 def _env_options(func):
     func = click.option("--env-id", default="MiniGrid-Empty-8x8-v0")(func)
-    func = click.option("--num-recording-steps", default=32, type=int)(func)
+    func = click.option("--rollout-steps", default=32, type=int)(func)
     func = click.option("--tile-size", default=8, type=int)(func)
     func = click.option("--seed", default=0, type=int)(func)
     func = click.option("--clip-length", default=4, type=int)(func)
@@ -171,13 +171,14 @@ def _env_options(func):
 @click.option("--base-channels", default=16, type=int)
 @click.option("--train-steps", default=10_000, type=int)
 @click.option("--batch-size", default=8, type=int)
+@click.option("--learning-rate", default=3e-4, type=float)
 @click.option("--log-every", default=100, type=int)
 @click.option("--preview-dir", default=None)
 @click.option("--preview-clips", default=4, type=int)
 @click.option("--preview-fps", default=2.0, type=float)
 def train_cmd(
     env_id: str,
-    num_recording_steps: int,
+    rollout_steps: int,
     tile_size: int,
     seed: int,
     clip_length: int,
@@ -188,6 +189,7 @@ def train_cmd(
     base_channels: int,
     train_steps: int,
     batch_size: int,
+    learning_rate: float,
     log_every: int,
     preview_dir: str | None,
     preview_clips: int,
@@ -197,7 +199,7 @@ def train_cmd(
     env = gym.make(env_id)
     clips, action_clips = make_minigrid_dataset(
         env=env,
-        num_steps=num_recording_steps,
+        num_steps=rollout_steps,
         tile_size=tile_size,
         seed=seed,
         clip_length=clip_length,
@@ -209,9 +211,7 @@ def train_cmd(
     print(f"action clips shape: {tuple(action_clips.shape)}")
 
     if preview_dir is not None:
-        save_clip_previews(
-            clips, preview_dir, max_clips=preview_clips, fps=preview_fps
-        )
+        save_clip_previews(clips, preview_dir, max_clips=preview_clips, fps=preview_fps)
         print(f"saved previews to: {preview_dir}")
 
     save_path = Path(save_dir)
@@ -233,6 +233,7 @@ def train_cmd(
         sample_dir=str(save_path),
         log_every=log_every,
         model=initial_model,
+        learning_rate=learning_rate,
     )
 
     save_model(
@@ -266,7 +267,6 @@ def train_cmd(
 @click.option("--preview-fps", default=2.0, type=float)
 def generate_cmd(
     env_id: str,
-    num_recording_steps: int,
     tile_size: int,
     seed: int,
     clip_length: int,
@@ -278,12 +278,13 @@ def generate_cmd(
     generate_num_steps: int,
     num_samples: int,
     preview_fps: float,
+    **_ignored,
 ) -> None:
     """Load a pretrained model and autoregressively generate a video."""
     env = gym.make(env_id)
     clips, action_clips = make_minigrid_dataset(
         env=env,
-        num_steps=num_recording_steps,
+        num_steps=num_samples * clip_length,
         tile_size=tile_size,
         seed=seed,
         clip_length=clip_length,
@@ -297,7 +298,11 @@ def generate_cmd(
     model = load_model(load_dir)
     print(f"loaded model from: {load_dir}")
 
-    out_dir = Path(save_dir) if save_dir is not None else Path(load_dir) / "generated"
+    out_dir = (
+        Path(save_dir)
+        if save_dir is not None
+        else Path(load_dir) / f"generated-{generate_new_frames}s"
+    )
     sample_count = min(num_samples, int(clips.shape[0]))
     generate_minigrid_video(
         model,
