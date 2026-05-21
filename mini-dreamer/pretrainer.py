@@ -249,7 +249,7 @@ def train_cmd(
             "in_channels": int(clips.shape[-1]),
             "out_channels": int(clips.shape[-1]),
             "base_channels": base_channels,
-            "action_dim": num_actions,
+            "num_actions": num_actions,
         },
     )
     print(f"saved model to: {save_path}")
