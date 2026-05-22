@@ -76,25 +76,30 @@ def sample_euler(
     model: UNet3D,
     *,
     conditioning_clips: mx.array,
-    actions: mx.array | None = None,
+    actions: mx.array,
     num_steps: int = 32,
 ) -> mx.array:
     if num_steps <= 0:
         raise ValueError(f"num_steps must be > 0, got {num_steps}")
 
     batch_size = int(conditioning_clips.shape[0])
-    context = conditioning_clips[:, :-1]
-    target = conditioning_clips[:, -1:]
-    x = mx.random.normal(target.shape, dtype=conditioning_clips.dtype)
+    x_shape = (
+        batch_size,
+        1,
+        int(conditioning_clips.shape[2]),
+        int(conditioning_clips.shape[3]),
+        int(conditioning_clips.shape[4]),
+    )
+    x = mx.random.normal(x_shape, dtype=conditioning_clips.dtype)
     dt = 1.0 / num_steps
 
     for step in range(num_steps):
         t = mx.full((batch_size,), step / num_steps, dtype=conditioning_clips.dtype)
-        xt = mx.concatenate([context, x], axis=1)
+        xt = mx.concatenate([conditioning_clips, x], axis=1)
         v = model(xt, t, context=actions)
         x = x + dt * v[:, -1:]
 
-    samples = mx.concatenate([context, x], axis=1)
+    samples = mx.concatenate([conditioning_clips, x], axis=1)
     mx.eval(samples)
     return samples
 
@@ -119,31 +124,12 @@ def load_model(save_dir: str | Path) -> UNet3D:
     return model
 
 
-def load_and_generate(
-    save_dir: str | Path,
-    *,
-    initial_clip: mx.array,
-    num_new_frames: int,
-    actions: mx.array | None = None,
-    num_steps: int = 32,
-) -> mx.array:
-    """Load a saved model and autoregressively generate a video."""
-    model = load_model(save_dir)
-    return generate_video(
-        model,
-        initial_clip=initial_clip,
-        num_new_frames=num_new_frames,
-        actions=actions,
-        num_steps=num_steps,
-    )
-
-
 def generate_video(
     model: UNet3D,
     *,
     initial_clip: mx.array,
     num_new_frames: int,
-    actions: mx.array | None = None,
+    actions: mx.array,
     num_steps: int = 32,
 ) -> mx.array:
     """Autoregressively extend `initial_clip` by `num_new_frames` new frames.
@@ -151,8 +137,9 @@ def generate_video(
     Args:
         initial_clip: (B, L, H, W, C) seed frames.
         num_new_frames: number of frames to generate after the seed.
-        actions: optional (B, L + num_new_frames) action stream. The window
-            of actions tracks the window of frames as we slide forward.
+        actions: optional (B, L + num_new_frames) action stream. Each Euler
+            call receives an (L - 1)-frame conditioning window and an L-action
+            window aligned to the generated clip.
         num_steps: Euler integration steps per generated frame.
 
     Returns:
@@ -162,19 +149,25 @@ def generate_video(
         raise ValueError(f"num_new_frames must be > 0, got {num_new_frames}")
 
     clip_length = int(initial_clip.shape[1])
-    if actions is not None:
-        expected = clip_length + num_new_frames
-        if int(actions.shape[1]) != expected:
-            raise ValueError(
-                f"actions must have shape (B, {expected}), got {tuple(actions.shape)}"
-            )
+    expected = clip_length + num_new_frames
+    if int(actions.shape[1]) != expected:
+        raise ValueError(
+            f"actions must have shape (B, {expected}), got {tuple(actions.shape)}"
+        )
+
+    if clip_length < 2:
+        raise ValueError(
+            f"initial_clip must contain at least 2 frames, got {clip_length}"
+        )
 
     frames = initial_clip
+    max_context_size = model.max_context_size
     for step in range(num_new_frames):
-        window = frames[:, -clip_length:]
-        action_window = (
-            actions[:, step : step + clip_length] if actions is not None else None
+        window = frames[:, -max_context_size:]
+        print(
+            f"generating frame {step + 1}/{num_new_frames} with conditioning window shape {window.shape}..."
         )
+        action_window = actions[:, step + 1 : step + 1 + clip_length]
         sample = sample_euler(
             model,
             conditioning_clips=window,
@@ -246,7 +239,7 @@ def train_on_dataset(
     if sample_dir is not None:
         samples = sample_euler(
             model,
-            conditioning_clips=val_conditioning_clips,
+            conditioning_clips=val_conditioning_clips[:, :-1],
             actions=val_conditioning_actions,
             num_steps=sample_steps,
         )

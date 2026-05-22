@@ -8,15 +8,6 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 
-def require_valid_unet_shape(frames: int, height: int, width: int) -> None:
-    dims = {"frames": frames, "height": height, "width": width}
-    for name, value in dims.items():
-        if value < 4:
-            raise ValueError(f"{name} must be >= 4, got {value}")
-        if value % 4 != 0:
-            raise ValueError(f"{name} must be divisible by 4, got {value}")
-
-
 def make_random_video_dataset(
     *,
     num_videos: int,
@@ -26,7 +17,6 @@ def make_random_video_dataset(
     channels: int,
     seed: int = 0,
 ) -> mx.array:
-    require_valid_unet_shape(frames, height, width)
     mx.random.seed(seed)
     return mx.random.normal((num_videos, frames, height, width, channels))
 
@@ -104,7 +94,6 @@ def frames_to_clips(
         )
 
     clip_stride = clip_length if clip_stride is None else clip_stride
-    require_valid_unet_shape(clip_length, int(frames.shape[1]), int(frames.shape[2]))
 
     clips = []
     for start in range(0, frames.shape[0] - clip_length + 1, clip_stride):

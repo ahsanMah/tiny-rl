@@ -293,7 +293,7 @@ def generate_cmd(
         num_steps=num_samples * clip_length,
         tile_size=tile_size,
         seed=seed,
-        clip_length=clip_length,
+        clip_length=clip_length - 1,  # only grab context clips
         clip_stride=clip_stride,
         max_clips=max_clips,
     )

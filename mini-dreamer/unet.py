@@ -252,9 +252,11 @@ class UNet3D(nn.Module):
         base_channels: int = 16,
         conv_block: nn.Module = ConvResBlock3D,
         num_actions: int = 1,
+        max_context_size: int = 3,
     ):
         super().__init__()
         time_embed_dim = base_channels * 4
+        self.max_context_size = max_context_size
         self.time_embed = TimeEmbedding(time_embed_dim)
         self.context_embed = ActionEmbedding(time_embed_dim, num_actions=num_actions)
 
