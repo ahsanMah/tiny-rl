@@ -8,6 +8,7 @@ from pathlib import Path
 import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as optim
+from mlx.utils import tree_map
 
 from unet import UNet3D, print_param_table
 from video_utils import (
@@ -22,6 +23,30 @@ def make_final_frame_mask(x: mx.array) -> mx.array:
     return mx.reshape(frame_mask, (1, x.shape[1], 1, 1, 1))
 
 
+def infer_model_config(model: UNet3D) -> dict[str, int]:
+    return {
+        "in_channels": int(model.res1.shortcut.weight.shape[-1]),
+        "out_channels": int(model.out_conv.weight.shape[0]),
+        "base_channels": int(model.out_conv.weight.shape[-1]),
+        "num_actions": int(model.context_embed.embed.weight.shape[0]),
+        "max_context_size": int(model.max_context_size),
+    }
+
+
+def clone_model(model: UNet3D) -> UNet3D:
+    clone = UNet3D(**infer_model_config(model))
+    clone.update(tree_map(lambda x: x * 1.0, model.parameters()))
+    return clone
+
+
+def ema_update(ema_model: UNet3D, model: UNet3D, decay: float) -> None:
+    ema_params = ema_model.parameters()
+    model_params = model.parameters()
+    ema_model.update(
+        tree_map(lambda ema, current: decay * ema + (1.0 - decay) * current, ema_params, model_params)
+    )
+
+
 class FlowMatchingTrainer:
     def __init__(
         self,
@@ -30,8 +55,11 @@ class FlowMatchingTrainer:
         learning_rate: float = 1e-3,
         weight_decay: float = 1e-4,
         max_grad_norm: float = 2.0,
+        ema_decay: float = 0.999,
     ):
         self.model = model
+        self.ema_model = clone_model(model)
+        self.ema_decay = ema_decay
         self.optimizer = optim.AdamW(
             learning_rate=learning_rate, weight_decay=weight_decay
         )
@@ -78,8 +106,14 @@ class FlowMatchingTrainer:
             grads, max_norm=self.max_grad_norm
         )
         self.optimizer.update(self.model, clipped_grads)
+        ema_update(self.ema_model, self.model, self.ema_decay)
 
-        mx.eval(loss, self.model.parameters(), self.optimizer.state)
+        mx.eval(
+            loss,
+            self.model.parameters(),
+            self.ema_model.parameters(),
+            self.optimizer.state,
+        )
         return float(loss)
 
 
@@ -275,16 +309,16 @@ def train_on_dataset(
                 val_batch, val_batch_actions, val_timesteps
             )
             val_report = " ".join(
-                f"val_t={t:.2f}:={val_losses[t]:.4f}" for t in val_timesteps
+                f"val_t={t:.2f}:{val_losses[t]:.6f}" for t in val_timesteps
             )
             print(
-                f"step={step:5d} loss={loss:.4f} avg={avg_loss:.4f} "
+                f"step={step:5d} loss={loss:.6f} avg={avg_loss:.6f} "
                 f"steps/s={steps_per_sec:.2f} {val_report}"
             )
 
     if sample_dir is not None:
         samples = sample_euler(
-            model,
+            trainer.ema_model,
             conditioning_clips=val_conditioning_clips[:, :-1],
             actions=val_conditioning_actions,
             num_steps=sample_steps,
@@ -292,7 +326,7 @@ def train_on_dataset(
         save_clip_previews(samples, sample_dir, max_clips=sample_count, fps=sample_fps)
         print(f"saved samples to: {sample_dir}")
 
-    return model, losses
+    return trainer.ema_model, losses
 
 
 def train_overfit_random_noise(

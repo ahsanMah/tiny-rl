@@ -9,7 +9,13 @@ import mlx.core as mx
 import numpy as np
 from minigrid.wrappers import RGBImgObsWrapper
 
-from diffusion import generate_video, load_model, save_model, train_on_dataset
+from diffusion import (
+    generate_video,
+    infer_model_config,
+    load_model,
+    save_model,
+    train_on_dataset,
+)
 from unet import UNet3D
 from video_utils import frames_to_clips, save_clip_previews
 
@@ -252,16 +258,7 @@ def train_cmd(
         learning_rate=learning_rate,
     )
 
-    save_model(
-        model,
-        save_path,
-        config={
-            "in_channels": int(clips.shape[-1]),
-            "out_channels": int(clips.shape[-1]),
-            "base_channels": base_channels,
-            "num_actions": num_actions,
-        },
-    )
+    save_model(model, save_path, config=infer_model_config(model))
     print(f"saved model to: {save_path}")
 
 
