@@ -411,7 +411,12 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--log-every", type=int, default=50)
     parser.add_argument("--video-target-fps", type=float, default=8.0)
     parser.add_argument("--video-downsample", type=int, default=2)
-    parser.add_argument("--clip-stride", type=int, default=None)
+    parser.add_argument(
+        "--clip-stride",
+        type=int,
+        default=None,
+        help="Stride between clips; defaults to 1 for a rolling window.",
+    )
     parser.add_argument("--max-clips", type=int, default=None)
     parser.add_argument("--preview-dir", type=str, default=None)
     parser.add_argument("--preview-clips", type=int, default=4)

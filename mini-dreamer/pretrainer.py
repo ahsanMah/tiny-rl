@@ -70,7 +70,9 @@ def actions_to_clips(
             f"Need at least {clip_length} actions, but only have {actions.shape[0]}"
         )
 
-    clip_stride = clip_length if clip_stride is None else clip_stride
+    clip_stride = 1 if clip_stride is None else clip_stride
+    if clip_stride <= 0:
+        raise ValueError(f"clip_stride must be > 0, got {clip_stride}")
     clips: list[np.ndarray] = []
     for start in range(0, actions.shape[0] - clip_length + 1, clip_stride):
         clips.append(actions[start : start + clip_length])
@@ -164,7 +166,12 @@ def _env_options(func):
     func = click.option("--tile-size", default=8, type=int)(func)
     func = click.option("--seed", default=0, type=int)(func)
     func = click.option("--clip-length", default=4, type=int)(func)
-    func = click.option("--clip-stride", default=None, type=int)(func)
+    func = click.option(
+        "--clip-stride",
+        default=None,
+        type=int,
+        help="Stride between clips; defaults to 1 for a rolling window.",
+    )(func)
     func = click.option("--max-clips", default=None, type=int)(func)
     return func
 

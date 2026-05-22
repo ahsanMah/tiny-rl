@@ -93,7 +93,9 @@ def frames_to_clips(
             f"Need at least {clip_length} frames, but only loaded {frames.shape[0]}"
         )
 
-    clip_stride = clip_length if clip_stride is None else clip_stride
+    clip_stride = 1 if clip_stride is None else clip_stride
+    if clip_stride <= 0:
+        raise ValueError(f"clip_stride must be > 0, got {clip_stride}")
 
     clips = []
     for start in range(0, frames.shape[0] - clip_length + 1, clip_stride):
