@@ -167,7 +167,6 @@ def generate_video(
             f"generating frame {step + 1}/{num_new_frames} with conditioning window shape {window.shape}..."
         )
         action_window = actions[:, -max_context_size - 1 :]
-        print(f"{action_window = }")
         sample = sample_euler(
             model,
             conditioning_clips=window,
@@ -199,6 +198,19 @@ def train_on_dataset(
     if actions is None:
         actions = mx.zeros((videos.shape[0], num_env_actions), dtype=mx.int8)
 
+    dataset_size = int(videos.shape[0])
+    if dataset_size < 2:
+        raise ValueError(f"Need at least 2 clips to make a train/val split, got {dataset_size}")
+
+    val_size = max(1, int(round(dataset_size * 0.05)))
+    val_size = min(val_size, dataset_size - 1)
+    train_size = dataset_size - val_size
+
+    train_videos = videos[:train_size]
+    train_actions = actions[:train_size]
+    val_videos = videos[train_size:]
+    val_actions = actions[train_size:]
+
     if model is None:
         model = UNet3D(
             in_channels=int(videos.shape[-1]),
@@ -209,21 +221,20 @@ def train_on_dataset(
     trainer = FlowMatchingTrainer(model, learning_rate=learning_rate)
 
     print("dataset:", tuple(videos.shape))
+    print("train split:", tuple(train_videos.shape))
+    print("val split:", tuple(val_videos.shape))
     print_param_table(model)
 
-    sample_count = min(num_gen_samples, int(videos.shape[0]))
+    sample_count = min(num_gen_samples, int(val_videos.shape[0]))
     if sample_dir is not None:
-        val_conditioning_clips = videos[:sample_count]
-        val_conditioning_actions = actions[:sample_count]
-
-        videos = videos[sample_count:]
-        actions = actions[sample_count:]
+        val_conditioning_clips = val_videos[:sample_count]
+        val_conditioning_actions = val_actions[:sample_count]
 
     start = time.time()
     losses: list[float] = []
 
     for step in range(1, steps + 1):
-        batch, batch_actions = sample_batch(videos, actions, batch_size)
+        batch, batch_actions = sample_batch(train_videos, train_actions, batch_size)
         loss = trainer.train_step(batch, batch_actions)
         losses.append(loss)
 
