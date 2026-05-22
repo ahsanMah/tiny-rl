@@ -38,15 +38,38 @@ class FlowMatchingTrainer:
         self.max_grad_norm = max_grad_norm
         self.loss_and_grad = nn.value_and_grad(model, self.loss)
 
-    def loss(self, model: UNet3D, x1: mx.array, actions: mx.array) -> mx.array:
+    def _loss_at_t(
+        self,
+        model: UNet3D,
+        x1: mx.array,
+        actions: mx.array,
+        t: mx.array,
+    ) -> mx.array:
         mask = make_final_frame_mask(x1)
         noise = mx.random.normal(x1.shape, dtype=x1.dtype) * mask
-        t = mx.random.uniform(shape=(x1.shape[0],), low=0.0, high=1.0)
         t_view = mx.reshape(t, (x1.shape[0], 1, 1, 1, 1)) * mask
         xt = (1.0 - t_view) * noise + t_view * x1 + (1 - mask) * x1
         target_velocity = mask * (x1 - noise)
         pred_velocity = model(xt, t, context=actions)
         return mx.mean((pred_velocity[:, -1:] - target_velocity[:, -1:]) ** 2)
+
+    def loss(self, model: UNet3D, x1: mx.array, actions: mx.array) -> mx.array:
+        t = mx.random.uniform(shape=(x1.shape[0],), low=0.0, high=1.0)
+        return self._loss_at_t(model, x1, actions, t)
+
+    def eval_loss_by_timestep(
+        self,
+        batch: mx.array,
+        actions: mx.array,
+        timesteps: tuple[float, ...],
+    ) -> dict[float, float]:
+        metrics: dict[float, float] = {}
+        for timestep in timesteps:
+            t = mx.full((batch.shape[0],), timestep, dtype=batch.dtype)
+            loss = self._loss_at_t(self.model, batch, actions, t)
+            mx.eval(loss)
+            metrics[timestep] = float(loss)
+        return metrics
 
     def train_step(self, batch: mx.array, actions: mx.array) -> float:
         loss, grads = self.loss_and_grad(self.model, batch, actions)
@@ -232,6 +255,7 @@ def train_on_dataset(
 
     start = time.time()
     losses: list[float] = []
+    val_timesteps = (0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0)
 
     for step in range(1, steps + 1):
         batch, batch_actions = sample_batch(train_videos, train_actions, batch_size)
@@ -242,9 +266,18 @@ def train_on_dataset(
             elapsed = time.time() - start
             avg_loss = sum(losses[-log_every:]) / min(log_every, len(losses))
             steps_per_sec = step / max(elapsed, 1e-8)
+            val_batch, val_batch_actions = sample_batch(
+                val_videos, val_actions, min(batch_size, int(val_videos.shape[0]))
+            )
+            val_losses = trainer.eval_loss_by_timestep(
+                val_batch, val_batch_actions, val_timesteps
+            )
+            val_report = " ".join(
+                f"val_t={t:.2f}:{val_losses[t]:.6f}" for t in val_timesteps
+            )
             print(
                 f"step={step:5d} loss={loss:.6f} avg={avg_loss:.6f} "
-                f"steps/s={steps_per_sec:.2f}"
+                f"steps/s={steps_per_sec:.2f} {val_report}"
             )
 
     if sample_dir is not None:
