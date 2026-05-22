@@ -92,7 +92,6 @@ def sample_euler(
     )
     x = mx.random.normal(x_shape, dtype=conditioning_clips.dtype)
     dt = 1.0 / num_steps
-
     for step in range(num_steps):
         t = mx.full((batch_size,), step / num_steps, dtype=conditioning_clips.dtype)
         xt = mx.concatenate([conditioning_clips, x], axis=1)
@@ -167,7 +166,8 @@ def generate_video(
         print(
             f"generating frame {step + 1}/{num_new_frames} with conditioning window shape {window.shape}..."
         )
-        action_window = actions[:, step + 1 : step + 1 + clip_length]
+        action_window = actions[:, -max_context_size - 1 :]
+        print(f"{action_window = }")
         sample = sample_euler(
             model,
             conditioning_clips=window,

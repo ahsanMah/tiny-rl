@@ -20,7 +20,7 @@ def rollout_minigrid_frames(
     num_steps: int = 256,
     tile_size: int = 8,
     seed: int = 0,
-    highlight: bool = True,
+    max_action_idx: int = -1,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Roll out random actions in a MiniGrid env and capture tile-rendered RGB frames.
 
@@ -36,9 +36,10 @@ def rollout_minigrid_frames(
 
     frames: list[np.ndarray] = []
     actions: list[int] = []
+    max_action_idx = env.action_space.n if max_action_idx == -1 else max_action_idx
 
     for _ in range(num_steps):
-        action = env.action_space.sample()
+        action = env.action_space.sample() % max_action_idx
         actions.append(action)
         obs, _, terminated, truncated, _ = env.step(action)
 
@@ -88,12 +89,14 @@ def make_minigrid_dataset(
     clip_length: int = 4,
     clip_stride: int | None = None,
     max_clips: int | None = None,
+    max_action_idx: int = -1,
 ) -> tuple[mx.array, mx.array]:
     frames, actions = rollout_minigrid_frames(
         env=env,
         num_steps=num_steps,
         tile_size=tile_size,
         seed=seed,
+        max_action_idx=max_action_idx,
     )
     frame_clips = frames_to_clips(
         frames,
@@ -296,11 +299,12 @@ def generate_cmd(
         clip_length=clip_length - 1,  # only grab context clips
         clip_stride=clip_stride,
         max_clips=max_clips,
+        max_action_idx=3,
     )
     print(f"env: {env_id}")
     print(f"clips shape: {tuple(clips.shape)}")
 
-    num_actions = int(env.action_space.n)
+    num_actions = 3  # int(env.action_space.n)
     model = load_model(load_dir)
     print(f"loaded model from: {load_dir}")
 
@@ -312,7 +316,7 @@ def generate_cmd(
     sample_count = min(num_samples, int(clips.shape[0]))
     generate_minigrid_video(
         model,
-        initial_clip=clips[:sample_count],
+        initial_clip=clips[:sample_count:, : model.max_context_size + 1],
         initial_actions=action_clips[:sample_count],
         num_actions=num_actions,
         num_new_frames=generate_new_frames,
