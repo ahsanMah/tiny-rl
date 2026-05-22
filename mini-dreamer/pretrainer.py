@@ -318,7 +318,7 @@ def generate_cmd(
     out_dir = (
         Path(save_dir)
         if save_dir is not None
-        else Path(load_dir) / f"generated-{generate_new_frames}s"
+        else Path(load_dir) / f"generated-{generate_new_frames}f-{generate_num_steps}s"
     )
     sample_count = min(num_samples, int(clips.shape[0]))
     generate_minigrid_video(

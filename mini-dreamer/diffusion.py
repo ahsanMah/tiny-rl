@@ -223,7 +223,9 @@ def train_on_dataset(
 
     dataset_size = int(videos.shape[0])
     if dataset_size < 2:
-        raise ValueError(f"Need at least 2 clips to make a train/val split, got {dataset_size}")
+        raise ValueError(
+            f"Need at least 2 clips to make a train/val split, got {dataset_size}"
+        )
 
     val_size = max(1, int(round(dataset_size * 0.05)))
     val_size = min(val_size, dataset_size - 1)
@@ -273,10 +275,10 @@ def train_on_dataset(
                 val_batch, val_batch_actions, val_timesteps
             )
             val_report = " ".join(
-                f"val_t={t:.2f}:{val_losses[t]:.6f}" for t in val_timesteps
+                f"val_t={t:.2f}:={val_losses[t]:.4f}" for t in val_timesteps
             )
             print(
-                f"step={step:5d} loss={loss:.6f} avg={avg_loss:.6f} "
+                f"step={step:5d} loss={loss:.4f} avg={avg_loss:.4f} "
                 f"steps/s={steps_per_sec:.2f} {val_report}"
             )
 
