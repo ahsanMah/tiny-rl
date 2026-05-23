@@ -93,7 +93,7 @@ def make_minigrid_dataset(
     *,
     num_steps: int = 256,
     tile_size: int = 8,
-    seed: int = 0,
+    seed: int = 42,
     clip_length: int = 4,
     clip_stride: int | None = None,
     max_clips: int | None = None,

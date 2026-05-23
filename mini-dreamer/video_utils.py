@@ -153,7 +153,7 @@ def _annotate_action(frame: np.ndarray, action: int) -> np.ndarray:
     draw = ImageDraw.Draw(img)
     draw.text(
         (1, 1),
-        f"action={int(action)}",
+        f"a={int(action)}",
         fill=(255, 255, 255),
         stroke_width=1,
         stroke_fill=(0, 0, 0),

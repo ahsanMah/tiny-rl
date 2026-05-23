@@ -43,7 +43,11 @@ def ema_update(ema_model: UNet3D, model: UNet3D, decay: float) -> None:
     ema_params = ema_model.parameters()
     model_params = model.parameters()
     ema_model.update(
-        tree_map(lambda ema, current: decay * ema + (1.0 - decay) * current, ema_params, model_params)
+        tree_map(
+            lambda ema, current: decay * ema + (1.0 - decay) * current,
+            ema_params,
+            model_params,
+        )
     )
 
 
@@ -303,7 +307,7 @@ def train_on_dataset(
             avg_loss = sum(losses[-log_every:]) / min(log_every, len(losses))
             steps_per_sec = step / max(elapsed, 1e-8)
             val_batch, val_batch_actions = sample_batch(
-                val_videos, val_actions, min(batch_size, int(val_videos.shape[0]))
+                val_videos, val_actions, min(batch_size * 4, int(val_videos.shape[0]))
             )
             val_losses = trainer.eval_loss_by_timestep(
                 val_batch, val_batch_actions, val_timesteps
