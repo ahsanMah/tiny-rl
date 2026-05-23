@@ -4,13 +4,15 @@ import argparse
 import json
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import Literal, Tuple
 
 import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as optim
 from mlx.utils import tree_map
+from numpy import dtype
 
+from logger_utils import RLLogger
 from unet import UNet3D, print_param_table
 from video_utils import (
     load_video_dataset,
@@ -18,8 +20,7 @@ from video_utils import (
     save_clip_previews,
 )
 
-if TYPE_CHECKING:
-    from logger_utils import RLLogger
+NoiseDistribution = Literal["uniform", "logitnorm"]
 
 
 def make_final_frame_mask(x: mx.array) -> mx.array:
@@ -55,6 +56,27 @@ def ema_update(ema_model: UNet3D, model: UNet3D, decay: float) -> None:
     )
 
 
+def sample_t_logit_normal(
+    shape: tuple[int, ...], mu: float = 0.0, s: float = 1.0, eps: float = 1e-6
+):
+    # logit(t) ~ N(mu, s^2)  =>  t = sigmoid(N(...))
+    z = mu + s * mx.random.normal(shape)
+    t = mx.sigmoid(z)  # t in (0, 1)
+    return mx.clip(t, eps, 1.0 - eps)  # avoid exact 0/1
+
+
+def sample_noise(
+    x: mx.array,
+    noise_distribution: NoiseDistribution,
+    mu: float = 0.0,
+    s: float = 1.0,
+):
+    if noise_distribution == "logitnorm":
+        return sample_t_logit_normal(x.shape, mu, s).astype(x.dtype)
+
+    return mx.random.normal(x.shape, dtype=x.dtype)
+
+
 class FlowMatchingTrainer:
     def __init__(
         self,
@@ -64,6 +86,9 @@ class FlowMatchingTrainer:
         weight_decay: float = 1e-4,
         max_grad_norm: float = 2.0,
         ema_decay: float = 0.999,
+        sampling_distribution: NoiseDistribution = "logitnorm",
+        logit_norm_mu: float = 0.0,
+        logit_norm_scale: float = 1.0,
     ):
         self.model = model
         self.ema_model = clone_model(model)
@@ -74,6 +99,12 @@ class FlowMatchingTrainer:
         self.max_grad_norm = max_grad_norm
         self.loss_and_grad = nn.value_and_grad(model, self.loss)
 
+        self.sampling_fn = lambda x: sample_noise(
+            x, sampling_distribution, logit_norm_mu, logit_norm_scale
+        )
+        self.logit_norm_mu = logit_norm_mu
+        self.logit_norm_scale = logit_norm_scale
+
     def _loss_at_t(
         self,
         model: UNet3D,
@@ -82,7 +113,7 @@ class FlowMatchingTrainer:
         t: mx.array,
     ) -> mx.array:
         mask = make_final_frame_mask(x1)
-        noise = mx.random.normal(x1.shape, dtype=x1.dtype) * mask
+        noise = self.sampling_fn(x1) * mask
         t_view = mx.reshape(t, (x1.shape[0], 1, 1, 1, 1)) * mask
         xt = (1.0 - t_view) * noise + t_view * x1 + (1 - mask) * x1
         target_velocity = mask * (x1 - noise)
@@ -318,11 +349,11 @@ def train_on_dataset(
                 val_batch, val_batch_actions, val_timesteps
             )
             avg_val_loss = sum(val_losses.values()) / len(val_losses)
-            val_report = f"avg_val_t={avg_val_loss:.4}"
+            val_report = f"avg_val_t={avg_val_loss:.4f}"
 
             print(
-                f"step={step:5d} loss={loss:.4f} avg={avg_loss:.4f} "
-                f"steps/s={steps_per_sec:.2f} {val_report}"
+                f"step={step:5d} steps/s={steps_per_sec:.2f} "
+                f"loss={loss:.4f} avg={avg_loss:.4f} {val_report}"
             )
             if train_logger is not None:
                 train_logger.log_train_metrics(
