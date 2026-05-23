@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import tomllib
 from pathlib import Path
+from typing import Any
 
 import click
 import gymnasium as gym
 import minigrid  # noqa: F401  # registers MiniGrid envs in gymnasium
 import mlx.core as mx
 import numpy as np
+from click.core import ParameterSource
 from minigrid.wrappers import RGBImgObsWrapper
 
 from diffusion import (
@@ -167,6 +170,139 @@ def cli() -> None:
     """MiniGrid world-model pretraining and generation."""
 
 
+CONFIG_SCHEMA: dict[str, set[str]] = {
+    "env": {
+        "env_id",
+        "rollout_steps",
+        "tile_size",
+        "seed",
+        "clip_length",
+        "clip_stride",
+        "max_clips",
+    },
+    "train": {
+        "save_dir",
+        "load_dir",
+        "base_channels",
+        "train_steps",
+        "batch_size",
+        "learning_rate",
+        "log_every",
+    },
+    "preview": {"preview_dir", "preview_clips", "preview_fps"},
+    "generate": {
+        "load_dir",
+        "save_dir",
+        "generate_new_frames",
+        "generate_num_steps",
+        "num_samples",
+    },
+}
+TRAIN_CONFIG_OPTIONS = {
+    "env_id": "env",
+    "rollout_steps": "env",
+    "tile_size": "env",
+    "seed": "env",
+    "clip_length": "env",
+    "clip_stride": "env",
+    "max_clips": "env",
+    "save_dir": "train",
+    "load_dir": "train",
+    "base_channels": "train",
+    "train_steps": "train",
+    "batch_size": "train",
+    "learning_rate": "train",
+    "log_every": "train",
+    "preview_dir": "preview",
+    "preview_clips": "preview",
+    "preview_fps": "preview",
+}
+GENERATE_CONFIG_OPTIONS = {
+    "env_id": "env",
+    "rollout_steps": "env",
+    "tile_size": "env",
+    "seed": "env",
+    "clip_length": "env",
+    "clip_stride": "env",
+    "max_clips": "env",
+    "load_dir": "generate",
+    "save_dir": "generate",
+    "generate_new_frames": "generate",
+    "generate_num_steps": "generate",
+    "num_samples": "generate",
+    "preview_fps": "preview",
+}
+
+
+def _load_experiment_config(config_path: Path | None) -> dict[str, dict[str, Any]]:
+    if config_path is None:
+        return {}
+
+    with config_path.open("rb") as f:
+        config = tomllib.load(f)
+
+    unknown_sections = set(config) - set(CONFIG_SCHEMA)
+    if unknown_sections:
+        section_list = ", ".join(sorted(unknown_sections))
+        raise click.ClickException(f"Unknown config sections: {section_list}")
+
+    for section, values in config.items():
+        if not isinstance(values, dict):
+            raise click.ClickException(
+                f"Config section [{section}] must be a table, got {type(values).__name__}."
+            )
+        unknown_options = set(values) - CONFIG_SCHEMA[section]
+        if unknown_options:
+            option_list = ", ".join(sorted(unknown_options))
+            raise click.ClickException(
+                f"Unknown options in config section [{section}]: {option_list}"
+            )
+
+    return config
+
+
+def _resolve_command_options(
+    ctx: click.Context,
+    *,
+    config_path: Path | None,
+    option_sections: dict[str, str],
+) -> dict[str, Any]:
+    resolved = dict(ctx.params)
+    config = _load_experiment_config(config_path)
+    option_lookup = {
+        param.name: param
+        for param in ctx.command.params
+        if isinstance(param, click.Option) and param.name is not None
+    }
+
+    for option_name, section in option_sections.items():
+        if ctx.get_parameter_source(option_name) is not ParameterSource.DEFAULT:
+            continue
+        if option_name not in config.get(section, {}):
+            continue
+        raw_value = config[section][option_name]
+        try:
+            resolved[option_name] = option_lookup[option_name].type_cast_value(
+                ctx, raw_value
+            )
+        except click.ClickException as exc:
+            raise click.ClickException(
+                f"Invalid value for [{section}].{option_name}: {raw_value!r}"
+            ) from exc
+
+    return resolved
+
+
+def _config_option(func):
+    return click.option(
+        "--config",
+        "config_path",
+        type=click.Path(exists=True, dir_okay=False, path_type=Path),
+        default=None,
+        help="Path to an experiment config TOML file.",
+    )(func)
+
+
 def _env_options(func):
     func = click.option("--env-id", default="MiniGrid-Empty-8x8-v0")(func)
     func = click.option("--rollout-steps", default=32, type=int)(func)
@@ -184,6 +320,7 @@ def _env_options(func):
 
 
 @cli.command(name="train")
+@_config_option
 @_env_options
 @click.option("--save-dir", default="logs/minigrid-v1")
 @click.option(
@@ -199,7 +336,10 @@ def _env_options(func):
 @click.option("--preview-dir", default=None)
 @click.option("--preview-clips", default=4, type=int)
 @click.option("--preview-fps", default=2.0, type=float)
+@click.pass_context
 def train_cmd(
+    ctx: click.Context,
+    config_path: Path | None,
     env_id: str,
     rollout_steps: int,
     tile_size: int,
@@ -219,6 +359,27 @@ def train_cmd(
     preview_fps: float,
 ) -> None:
     """Train the diffusion world model on MiniGrid rollouts."""
+    resolved = _resolve_command_options(
+        ctx, config_path=config_path, option_sections=TRAIN_CONFIG_OPTIONS
+    )
+    env_id = resolved["env_id"]
+    rollout_steps = resolved["rollout_steps"]
+    tile_size = resolved["tile_size"]
+    seed = resolved["seed"]
+    clip_length = resolved["clip_length"]
+    clip_stride = resolved["clip_stride"]
+    max_clips = resolved["max_clips"]
+    save_dir = resolved["save_dir"]
+    load_dir = resolved["load_dir"]
+    base_channels = resolved["base_channels"]
+    train_steps = resolved["train_steps"]
+    batch_size = resolved["batch_size"]
+    learning_rate = resolved["learning_rate"]
+    log_every = resolved["log_every"]
+    preview_dir = resolved["preview_dir"]
+    preview_clips = resolved["preview_clips"]
+    preview_fps = resolved["preview_fps"]
+
     env = gym.make(env_id)
     clips, action_clips = make_minigrid_dataset(
         env=env,
@@ -269,10 +430,11 @@ def train_cmd(
 
 
 @cli.command(name="generate")
+@_config_option
 @_env_options
 @click.option(
     "--load-dir",
-    required=True,
+    default=None,
     help="Directory containing the saved model to load.",
 )
 @click.option(
@@ -284,14 +446,17 @@ def train_cmd(
 @click.option("--generate-num-steps", default=32, type=int)
 @click.option("--num-samples", default=1, type=int)
 @click.option("--preview-fps", default=2.0, type=float)
+@click.pass_context
 def generate_cmd(
+    ctx: click.Context,
+    config_path: Path | None,
     env_id: str,
     tile_size: int,
     seed: int,
     clip_length: int,
     clip_stride: int | None,
     max_clips: int | None,
-    load_dir: str,
+    load_dir: str | None,
     save_dir: str | None,
     generate_new_frames: int,
     generate_num_steps: int,
@@ -300,6 +465,25 @@ def generate_cmd(
     **_ignored,
 ) -> None:
     """Load a pretrained model and autoregressively generate a video."""
+    resolved = _resolve_command_options(
+        ctx, config_path=config_path, option_sections=GENERATE_CONFIG_OPTIONS
+    )
+    env_id = resolved["env_id"]
+    tile_size = resolved["tile_size"]
+    seed = resolved["seed"]
+    clip_length = resolved["clip_length"]
+    clip_stride = resolved["clip_stride"]
+    max_clips = resolved["max_clips"]
+    load_dir = resolved["load_dir"]
+    save_dir = resolved["save_dir"]
+    generate_new_frames = resolved["generate_new_frames"]
+    generate_num_steps = resolved["generate_num_steps"]
+    num_samples = resolved["num_samples"]
+    preview_fps = resolved["preview_fps"]
+
+    if load_dir is None:
+        raise click.UsageError("Missing option '--load-dir'.")
+
     env = gym.make(env_id)
     clips, action_clips = make_minigrid_dataset(
         env=env,
