@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import time
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -28,7 +29,7 @@ def _iter_param_tree(tree: object, prefix: str = ""):
         return
 
 
-def format_param_table(model: nn.Module, *, sort: bool = True) -> str:
+def format_param_table(model: nn.Module, *, sort: bool = False) -> str:
     rows = []
     for name, param in _iter_param_tree(model.parameters()):
         shape = tuple(param.shape)
@@ -355,8 +356,7 @@ class UNet3D(nn.Module):
 
         b, s, h, w, c = x3.shape
         xmid = x3.reshape(b, s * h * w, c)
-        transformer_context = mx.concatenate([t_emb[:, None, :], context], axis=1)
-        xmid = self.mid_transformer(xmid, context=transformer_context)
+        xmid = self.mid_transformer(xmid, context=context)
         xmid = mx.reshape(xmid, (b, s, h, w, c))
 
         xmid = self.mid_conv(xmid, time_context)
@@ -376,4 +376,14 @@ if __name__ == "__main__":
     print(f"Testing forward pass with input shape {x.shape}, time {t}, and action {a}")
 
     y = model(x, t, a)
+    mx.eval(y)
     print("input:", x.shape, "output:", y.shape)
+
+    # quick timing (includes compute sync with mx.eval)
+    num_runs = 10
+    start = time.perf_counter()
+    for _ in range(num_runs):
+        y = model(x, t, a)
+        mx.eval(y)
+    elapsed = time.perf_counter() - start
+    print(f"avg forward time over {num_runs} runs: {elapsed * 1000 / num_runs:.2f} ms")
