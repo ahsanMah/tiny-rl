@@ -2,8 +2,8 @@ import os
 import time
 from typing import Any, Dict
 
-import cv2
 import gymnasium as gym
+import imageio.v3 as iio
 import numpy as np
 from gymnasium.wrappers import RecordEpisodeStatistics, RecordVideo
 from loguru import logger
@@ -68,19 +68,9 @@ class RLLogger:
             A numpy array of shape (num_frames, height, width, channels) with pixel values in [0, 255].
         """
 
-        cap = cv2.VideoCapture(video_path)
-        frames = []
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            # Convert BGR (OpenCV format) to RGB (TensorBoard format)
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            frames.append(frame_rgb)
-        cap.release()
-        video = np.array(frames)
+        frames = np.asarray(list(iio.imiter(video_path)), dtype=np.uint8)
         # Convert to (batch, num_frames, channels, height, width)
-        video = np.transpose(video, (0, 3, 1, 2))[None, ...]
+        video = np.transpose(frames, (0, 3, 1, 2))[None, ...]
         return video
 
     def log_video(self, global_step: int, video_exp_folder: str, num_episodes: int):
