@@ -37,6 +37,13 @@ class RLLogger:
         for key, value in metrics.items():
             self.writer.add_scalar(f"Train/{key}", value, global_step)
 
+    def log_validation_steps(self, global_step: int, metrics: Dict[float, Any]):
+        """Logs validation losses keyed by diffusion timestep."""
+        for timestep, value in metrics.items():
+            self.writer.add_scalar(
+                f"Validation/Loss/t={float(timestep):.2f}", value, global_step
+            )
+
     def log_speed(self, global_step: int, steps_done: int, start_time: float):
         """
         Calculates and logs the Steps Per Second (SPS).

@@ -16,6 +16,7 @@ from diffusion import (
     save_model,
     train_on_dataset,
 )
+from logger_utils import RLLogger
 from unet import UNet3D
 from video_utils import frames_to_clips, save_clip_previews
 
@@ -238,28 +239,33 @@ def train_cmd(
 
     save_path = Path(save_dir)
     num_actions = int(env.action_space.n)
+    train_logger = RLLogger(log_dir=str(save_path.parent), exp_name=save_path.name)
 
     initial_model = None
     if load_dir is not None:
         initial_model = load_model(load_dir)
         print(f"resuming training from: {load_dir}")
 
-    model, _ = train_on_dataset(
-        clips,
-        actions=action_clips,
-        num_env_actions=num_actions,
-        base_channels=base_channels,
-        batch_size=batch_size,
-        steps=train_steps,
-        sample_fps=preview_fps,
-        sample_dir=str(save_path),
-        log_every=log_every,
-        model=initial_model,
-        learning_rate=learning_rate,
-    )
+    try:
+        model, _ = train_on_dataset(
+            clips,
+            actions=action_clips,
+            num_env_actions=num_actions,
+            base_channels=base_channels,
+            batch_size=batch_size,
+            steps=train_steps,
+            sample_fps=preview_fps,
+            sample_dir=str(save_path),
+            log_every=log_every,
+            model=initial_model,
+            learning_rate=learning_rate,
+            train_logger=train_logger,
+        )
 
-    save_model(model, save_path, config=infer_model_config(model))
-    print(f"saved model to: {save_path}")
+        save_model(model, save_path, config=infer_model_config(model))
+        print(f"saved model to: {save_path}")
+    finally:
+        train_logger.close()
 
 
 @cli.command(name="generate")

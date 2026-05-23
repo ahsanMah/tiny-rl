@@ -4,6 +4,7 @@ import argparse
 import json
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -16,6 +17,9 @@ from video_utils import (
     make_random_video_dataset,
     save_clip_previews,
 )
+
+if TYPE_CHECKING:
+    from logger_utils import RLLogger
 
 
 def make_final_frame_mask(x: mx.array) -> mx.array:
@@ -254,6 +258,7 @@ def train_on_dataset(
     sample_steps: int = 32,
     sample_fps: float = 8.0,
     model: UNet3D | None = None,
+    train_logger: RLLogger | None = None,
 ):
 
     if actions is None:
@@ -319,6 +324,16 @@ def train_on_dataset(
                 f"step={step:5d} loss={loss:.6f} avg={avg_loss:.6f} "
                 f"steps/s={steps_per_sec:.2f} {val_report}"
             )
+            if train_logger is not None:
+                train_logger.log_train_metrics(
+                    step,
+                    {
+                        "loss": loss,
+                        "avg_loss": avg_loss,
+                        "steps_per_second": steps_per_sec,
+                    },
+                )
+                train_logger.log_validation_steps(step, val_losses)
 
     if sample_dir is not None:
         samples = sample_euler(
