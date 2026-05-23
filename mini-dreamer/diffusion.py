@@ -317,11 +317,11 @@ def train_on_dataset(
             val_losses = trainer.eval_loss_by_timestep(
                 val_batch, val_batch_actions, val_timesteps
             )
-            val_report = " ".join(
-                f"val_t={t:.2f}:{val_losses[t]:.6f}" for t in val_timesteps
-            )
+            avg_val_loss = sum(val_losses.values()) / len(val_losses)
+            val_report = f"avg_val_t={avg_val_loss:.4}"
+
             print(
-                f"step={step:5d} loss={loss:.6f} avg={avg_loss:.6f} "
+                f"step={step:5d} loss={loss:.4f} avg={avg_loss:.4f} "
                 f"steps/s={steps_per_sec:.2f} {val_report}"
             )
             if train_logger is not None:

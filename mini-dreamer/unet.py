@@ -370,10 +370,10 @@ class UNet3D(nn.Module):
 if __name__ == "__main__":
     model = UNet3D(in_channels=1, out_channels=2, base_channels=16, num_actions=3)
     print_param_table(model)
-    x = mx.random.normal((1, 4, 32, 32, 1))
-    t = mx.array([10])
-    a = mx.ones((1, 4), dtype=mx.uint8)
-    print(f"Testing forward pass with input shape {x.shape}, time {t}, and action {a}")
+    x = mx.random.normal((8, 4, 32, 32, 1))
+    t = mx.ones((8, 1))
+    a = mx.ones((8, 4), dtype=mx.uint8)
+    print(f"Testing forward pass with input shape {x.shape}")
 
     y = model(x, t, a)
     mx.eval(y)

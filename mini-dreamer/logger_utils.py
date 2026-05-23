@@ -20,7 +20,7 @@ class RLLogger:
             exp_name: Name of the experiment/algorithm
         """
         # Append a timestamp so multiple runs of the same experiment don't overwrite each other
-        self.run_name = f"{exp_name}_{int(time.time())}"
+        self.run_name = f"{exp_name}/{int(time.time())}"
         self.writer = SummaryWriter(os.path.join(log_dir, self.run_name))
         print(f"Logging to {self.writer.logdir}")
 
