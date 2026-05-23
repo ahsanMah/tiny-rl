@@ -1,0 +1,183 @@
+import os
+import time
+from typing import Any, Dict
+
+import cv2
+import gymnasium as gym
+import numpy as np
+from gymnasium.wrappers import RecordEpisodeStatistics, RecordVideo
+from loguru import logger
+from tensorboardX import SummaryWriter
+
+
+class RLLogger:
+    def __init__(self, log_dir: str, exp_name: str):
+        """
+        Initializes the TensorBoard SummaryWriter.
+
+        Args:
+            log_dir: Base directory for logs (e.g., 'runs')
+            exp_name: Name of the experiment/algorithm
+        """
+        # Append a timestamp so multiple runs of the same experiment don't overwrite each other
+        self.run_name = f"{exp_name}_{int(time.time())}"
+        self.writer = SummaryWriter(os.path.join(log_dir, self.run_name))
+        print(f"Logging to {self.writer.logdir}")
+
+    def log_episode(self, global_step: int, reward: float, length: int):
+        """Logs episode-level metrics (how well the agent is doing)."""
+        self.writer.add_scalar("Rollout/Episode_Reward", reward, global_step)
+        self.writer.add_scalar("Rollout/Episode_Length", length, global_step)
+
+    def log_train_metrics(self, global_step: int, metrics: Dict[str, Any]):
+        """
+        Logs a dictionary of training metrics (losses, entropy, lr, etc.).
+        Metrics will automatically be grouped under the 'Train/' prefix in TensorBoard.
+        """
+        for key, value in metrics.items():
+            self.writer.add_scalar(f"Train/{key}", value, global_step)
+
+    def log_speed(self, global_step: int, steps_done: int, start_time: float):
+        """
+        Calculates and logs the Steps Per Second (SPS).
+
+        Args:
+            global_step: Current total environment steps
+            steps_done: How many steps have been taken since start_time
+            start_time: Wall-clock time when training started
+        """
+        elapsed_time = time.time() - start_time
+        if elapsed_time > 0:
+            sps = int(steps_done / elapsed_time)
+            self.writer.add_scalar("Time/SPS", sps, global_step)
+
+    def _load_video(self, video_path: str):
+        """
+        Loads a video file and converts it to a format suitable for TensorBoard.
+
+        Args:
+            video_path: Path to the video file (e.g., .mp4)
+        Returns:
+            A numpy array of shape (num_frames, height, width, channels) with pixel values in [0, 255].
+        """
+
+        cap = cv2.VideoCapture(video_path)
+        frames = []
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            # Convert BGR (OpenCV format) to RGB (TensorBoard format)
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            frames.append(frame_rgb)
+        cap.release()
+        video = np.array(frames)
+        # Convert to (batch, num_frames, channels, height, width)
+        video = np.transpose(video, (0, 3, 1, 2))[None, ...]
+        return video
+
+    def log_video(self, global_step: int, video_exp_folder: str, num_episodes: int):
+        """
+        Logs a video to TensorBoard.
+
+        Args:
+            video_path: Path to the video file (e.g., .mp4) to log
+            global_step: Current total environment steps
+        """
+        for ep in range(num_episodes):
+            video_path = VideoLogger.get_video_filename(
+                video_exp_folder, global_step, ep
+            )
+            if not os.path.exists(video_path):
+                logger.warning(
+                    f"Video file {video_path} does not exist and cannot be logged."
+                )
+                continue
+            video = self._load_video(video_path)
+            self.writer.add_video(f"Evaluation/episode-{ep}", video, global_step)
+
+    def close(self):
+        """Closes the TensorBoard writer to ensure all data is flushed to disk."""
+        self.writer.close()
+
+
+class VideoLogger:
+    @staticmethod
+    def get_video_filename(exp_folder: str, global_step: int, episode_num: int):
+        """Constructs the expected video file path for a given episode number."""
+        return os.path.join(
+            exp_folder, f"step-{global_step:05d}-episode-{episode_num}.mp4"
+        )
+
+    def __init__(
+        self,
+        env_name: str,
+        exp_folder: str,
+        num_eval_episodes: int = 4,
+    ):
+
+        # Configuration
+        self.env_name = env_name
+        self.num_eval_episodes = 4
+        self.exp_folder = exp_folder
+
+    def record_evaluation(self, policy, global_step: int = 0):
+
+        # Create environment with recording capabilities
+        env = gym.make(
+            self.env_name, render_mode="rgb_array"
+        )  # rgb_array needed for video recording
+
+        # Add video recording for every episode
+        env = RecordVideo(
+            env,
+            video_folder=self.exp_folder,  # Folder to save videos
+            name_prefix=f"step-{global_step:05d}",  # Prefix for video filenames
+            episode_trigger=lambda x: True,  # Record every episode
+        )
+
+        # Add episode statistics tracking
+        env = RecordEpisodeStatistics(env, buffer_length=self.num_eval_episodes)
+
+        logger.info(f"Starting evaluation for {self.num_eval_episodes} episodes...")
+        logger.info(f"Videos will be saved to: {self.exp_folder}/")
+
+        for episode_num in range(self.num_eval_episodes):
+            obs, info = env.reset()
+            episode_reward = 0
+            step_count = 0
+
+            episode_over = False
+            while not episode_over:
+                # Replace this with your trained agent's policy
+                action = policy.get_action(obs, sample=False)
+
+                obs, reward, terminated, truncated, info = env.step(action)
+                episode_reward += reward
+                step_count += 1
+
+                episode_over = terminated or truncated
+
+            print(
+                f"Episode {episode_num + 1}: {step_count} steps, reward = {episode_reward}"
+            )
+
+        # Print summary statistics
+        logger.info("\nEvaluation Summary:")
+        logger.info(f"Episode durations: {list(env.time_queue)}")
+        logger.info(f"Episode rewards: {list(env.return_queue)}")
+        logger.info(f"Episode lengths: {list(env.length_queue)}")
+
+        # Calculate some useful metrics
+        avg_reward = np.mean(env.return_queue)
+        avg_length = np.mean(env.length_queue)
+        std_reward = np.std(env.return_queue)
+
+        logger.info(f"Average reward: {avg_reward:.2f} ± {std_reward:.2f}")
+        logger.info(f"Average episode length: {avg_length:.1f} steps")
+        logger.info(
+            f"Success rate: {sum(1 for r in env.return_queue if r > 0) / len(env.return_queue):.1%}"
+        )
+
+        # Forces videoes to be saved
+        env.close()
