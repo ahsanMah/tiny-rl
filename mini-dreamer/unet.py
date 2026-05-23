@@ -244,6 +244,46 @@ class CrossAttention(nn.Module):
         return out + x
 
 
+class FeedForward(nn.Module):
+    def __init__(self, dim: int, mult: int = 4):
+        super().__init__()
+        hidden_dim = dim * mult
+        self.norm = nn.RMSNorm(dim)
+        self.in_proj = nn.Linear(dim, hidden_dim)
+        self.act = nn.SiLU()
+        self.out_proj = nn.Linear(hidden_dim, dim)
+
+        zero_init = nn.init.constant(0.0)
+        self.out_proj.weight = zero_init(self.out_proj.weight)
+        self.out_proj.bias = zero_init(self.out_proj.bias)
+
+    def __call__(self, x: mx.array) -> mx.array:
+        h = self.out_proj(self.act(self.in_proj(self.norm(x))))
+        return h + x
+
+
+class TransformerBlock(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        context_dim: int,
+        num_heads: int = 4,
+        ff_mult: int = 4,
+    ):
+        super().__init__()
+        self.self_attn = CrossAttention(dim, context_dim=dim, num_heads=num_heads)
+        self.cross_attn = CrossAttention(
+            dim, context_dim=context_dim, num_heads=num_heads
+        )
+        self.ff = FeedForward(dim, mult=ff_mult)
+
+    def __call__(self, x: mx.array, context: mx.array | None = None) -> mx.array:
+        x = self.self_attn(x, context=x)
+        if context is not None:
+            x = self.cross_attn(x, context=context)
+        return self.ff(x)
+
+
 class UNet3D(nn.Module):
     def __init__(
         self,
@@ -274,14 +314,11 @@ class UNet3D(nn.Module):
             base_channels * 2, base_channels * 4, time_embed_dim=time_embed_dim
         )
 
-        self.spatial_attn = CrossAttention(
-            base_channels * 4, context_dim=base_channels * 4, num_heads=4
-        )
-        self.temporal_attn = CrossAttention(
-            base_channels * 4, context_dim=base_channels * 4, num_heads=4
-        )
-        self.cross_attn = CrossAttention(
-            base_channels * 4, context_dim=time_embed_dim, num_heads=4
+        self.mid_transformer = TransformerBlock(
+            base_channels * 4,
+            context_dim=time_embed_dim,
+            num_heads=4,
+            ff_mult=4,
         )
         self.mid_conv = conv_block(
             base_channels * 4, base_channels * 4, time_embed_dim=time_embed_dim
@@ -309,42 +346,23 @@ class UNet3D(nn.Module):
 
         t_emb = self.time_embed(t)
         context = self.context_embed(context)
+        action_emb = context[:, -1, :]
+        time_context = (t_emb + action_emb) * 0.5
 
         x1 = self.res1(x, t_emb)
-        x2 = self.res2(self.down1(x1), t_emb)
-        x3 = self.res3(self.down2(x2), t_emb)
+        x2 = self.res2(self.down1(x1), time_context)
+        x3 = self.res3(self.down2(x2), time_context)
 
         b, s, h, w, c = x3.shape
+        xmid = x3.reshape(b, s * h * w, c)
+        transformer_context = mx.concatenate([t_emb[:, None, :], context], axis=1)
+        xmid = self.mid_transformer(xmid, context=transformer_context)
+        xmid = mx.reshape(xmid, (b, s, h, w, c))
 
-        # spatial self-attn: each frame independently
-        xs = mx.reshape(x3, (b * s, h * w, c))
-        xs = self.spatial_attn(xs, xs)
-        xs = mx.reshape(xs, (b, s, h, w, c))
+        xmid = self.mid_conv(xmid, time_context)
 
-        # temporal self-attn: each pixel attends over time
-        xt = xs.transpose(0, 2, 3, 1, 4)  # (B, H, W, S, C)
-        xt = mx.reshape(xt, (b * h * w, s, c))
-        xt = self.temporal_attn(xt, xt)
-        # xt = mx.reshape(xt, (b, h, w, s, c))
-        # xmid = xt.transpose(0, 3, 1, 2, 4)  # (B, S, H, W, C)
-
-        # # spatiotemporal cross-attention to actions
-        # xmid = xmid.reshape(b, s * h * w, c)
-        # xmid = self.cross_attn(xmid, context=context)
-        # xmid = mx.reshape(xmid, (b, s, h, w, c))
-        # context is (B, L, ctx_c); broadcast it across H*W
-
-        ctx = mx.repeat(context[:, None, None], h, axis=1)
-        ctx = mx.repeat(ctx, w, axis=2)
-        ctx = mx.reshape(ctx, (b * h * w, context.shape[1], -1))
-        xt = self.cross_attn(xt, context=ctx, mask="causal")
-        xt = mx.reshape(xt, (b, h, w, s, c))
-        xmid = mx.transpose(xt, (0, 3, 1, 2, 4))  # back to (B, S, H, W, C)
-
-        xmid = self.mid_conv(xmid, t_emb)
-
-        x = self.up2(xmid, x2, t_emb)
-        x = self.up1(x, x1, t_emb)
+        x = self.up2(xmid, x2, time_context)
+        x = self.up1(x, x1, time_context)
 
         return self.out_conv(x)
 
