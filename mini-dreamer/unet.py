@@ -291,7 +291,6 @@ class UNet3D(nn.Module):
         in_channels: int = 1,
         out_channels: int = 1,
         base_channels: int = 16,
-        conv_block: nn.Module = ConvResBlock3D,
         num_actions: int = 1,
         max_context_size: int = 3,
         num_transformer_blocks: int = 2,
@@ -301,6 +300,7 @@ class UNet3D(nn.Module):
         self.max_context_size = max_context_size
         self.time_embed = TimeEmbedding(time_embed_dim)
         self.context_embed = ActionEmbedding(time_embed_dim, num_actions=num_actions)
+        conv_block: nn.Module = ConvResBlock3D
 
         self.res1 = conv_block(
             in_channels, base_channels, time_embed_dim=time_embed_dim
