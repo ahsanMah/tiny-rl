@@ -278,7 +278,7 @@ class TransformerBlock(nn.Module):
         )
         self.ff = FeedForward(dim, mult=ff_mult)
 
-    def __call__(self, x: mx.array, context: mx.array | None = None) -> mx.array:
+    def __call__(self, x: mx.array, context: mx.array) -> mx.array:
         x = self.self_attn(x, context=x)
         if context is not None:
             x = self.cross_attn(x, context=context)
@@ -294,6 +294,7 @@ class UNet3D(nn.Module):
         conv_block: nn.Module = ConvResBlock3D,
         num_actions: int = 1,
         max_context_size: int = 3,
+        num_transformer_blocks: int = 2,
     ):
         super().__init__()
         time_embed_dim = base_channels * 4
@@ -315,12 +316,16 @@ class UNet3D(nn.Module):
             base_channels * 2, base_channels * 4, time_embed_dim=time_embed_dim
         )
 
-        self.mid_transformer = TransformerBlock(
-            base_channels * 4,
-            context_dim=time_embed_dim,
-            num_heads=4,
-            ff_mult=4,
-        )
+        self.mid_transformer_blocks = [
+            TransformerBlock(
+                base_channels * 4,
+                context_dim=time_embed_dim,
+                num_heads=4,
+                ff_mult=4,
+            )
+            for _ in range(num_transformer_blocks)
+        ]
+
         self.mid_conv = conv_block(
             base_channels * 4, base_channels * 4, time_embed_dim=time_embed_dim
         )
@@ -356,7 +361,8 @@ class UNet3D(nn.Module):
 
         b, s, h, w, c = x3.shape
         xmid = x3.reshape(b, s * h * w, c)
-        xmid = self.mid_transformer(xmid, context=context)
+        for block in self.mid_transformer_blocks:
+            xmid = block(xmid, context=context)
         xmid = mx.reshape(xmid, (b, s, h, w, c))
 
         xmid = self.mid_conv(xmid, time_context)
@@ -380,7 +386,7 @@ if __name__ == "__main__":
     print("input:", x.shape, "output:", y.shape)
 
     # quick timing (includes compute sync with mx.eval)
-    num_runs = 10
+    num_runs = 20
     start = time.perf_counter()
     for _ in range(num_runs):
         y = model(x, t, a)
