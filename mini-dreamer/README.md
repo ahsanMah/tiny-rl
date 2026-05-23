@@ -16,8 +16,9 @@ uv run python pretrainer.py train --config experiments/minigrid.toml --train-ste
 Config sections:
 
 - `[env]`
+- `[dataset]`
+- `[model]`
 - `[train]`
-- `[preview]`
 - `[generate]`
 
 See `experiments/minigrid.toml` for a minimal example.

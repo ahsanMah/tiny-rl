@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tomllib
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,8 @@ from click.core import ParameterSource
 from minigrid.wrappers import RGBImgObsWrapper
 
 from diffusion import (
+    ModelConfig,
+    TrainConfig,
     generate_video,
     infer_model_config,
     load_model,
@@ -170,26 +173,55 @@ def cli() -> None:
     """MiniGrid world-model pretraining and generation."""
 
 
+@dataclass(frozen=True)
+class EnvConfig:
+    env_id: str
+
+
+@dataclass(frozen=True)
+class DatasetConfig:
+    rollout_steps: int
+    tile_size: int
+    seed: int
+    clip_length: int
+    clip_stride: int | None
+    max_clips: int | None
+    preview_dir: str | None
+    preview_clips: int
+    preview_fps: float
+
+
+@dataclass(frozen=True)
+class GenerateConfig:
+    load_dir: str | None
+    save_dir: str | None
+    generate_new_frames: int
+    generate_num_steps: int
+    num_samples: int
+
+
 CONFIG_SCHEMA: dict[str, set[str]] = {
-    "env": {
-        "env_id",
+    "env": {"env_id"},
+    "dataset": {
         "rollout_steps",
         "tile_size",
         "seed",
         "clip_length",
         "clip_stride",
         "max_clips",
+        "preview_dir",
+        "preview_clips",
+        "preview_fps",
     },
+    "model": {"base_channels"},
     "train": {
         "save_dir",
         "load_dir",
-        "base_channels",
         "train_steps",
         "batch_size",
         "learning_rate",
         "log_every",
     },
-    "preview": {"preview_dir", "preview_clips", "preview_fps"},
     "generate": {
         "load_dir",
         "save_dir",
@@ -200,37 +232,36 @@ CONFIG_SCHEMA: dict[str, set[str]] = {
 }
 TRAIN_CONFIG_OPTIONS = {
     "env_id": "env",
-    "rollout_steps": "env",
-    "tile_size": "env",
-    "seed": "env",
-    "clip_length": "env",
-    "clip_stride": "env",
-    "max_clips": "env",
+    "rollout_steps": "dataset",
+    "tile_size": "dataset",
+    "seed": "dataset",
+    "clip_length": "dataset",
+    "clip_stride": "dataset",
+    "max_clips": "dataset",
+    "preview_dir": "dataset",
+    "preview_clips": "dataset",
+    "preview_fps": "dataset",
+    "base_channels": "model",
     "save_dir": "train",
     "load_dir": "train",
-    "base_channels": "train",
     "train_steps": "train",
     "batch_size": "train",
     "learning_rate": "train",
     "log_every": "train",
-    "preview_dir": "preview",
-    "preview_clips": "preview",
-    "preview_fps": "preview",
 }
 GENERATE_CONFIG_OPTIONS = {
     "env_id": "env",
-    "rollout_steps": "env",
-    "tile_size": "env",
-    "seed": "env",
-    "clip_length": "env",
-    "clip_stride": "env",
-    "max_clips": "env",
+    "tile_size": "dataset",
+    "seed": "dataset",
+    "clip_length": "dataset",
+    "clip_stride": "dataset",
+    "max_clips": "dataset",
+    "preview_fps": "dataset",
     "load_dir": "generate",
     "save_dir": "generate",
     "generate_new_frames": "generate",
     "generate_num_steps": "generate",
     "num_samples": "generate",
-    "preview_fps": "preview",
 }
 
 
@@ -293,6 +324,61 @@ def _resolve_command_options(
     return resolved
 
 
+def _build_dataset_config(resolved: dict[str, Any]) -> DatasetConfig:
+    return DatasetConfig(
+        rollout_steps=resolved["rollout_steps"],
+        tile_size=resolved["tile_size"],
+        seed=resolved["seed"],
+        clip_length=resolved["clip_length"],
+        clip_stride=resolved["clip_stride"],
+        max_clips=resolved["max_clips"],
+        preview_dir=resolved["preview_dir"],
+        preview_clips=resolved["preview_clips"],
+        preview_fps=resolved["preview_fps"],
+    )
+
+
+def _build_train_configs(
+    resolved: dict[str, Any],
+) -> tuple[EnvConfig, DatasetConfig, ModelConfig, TrainConfig]:
+    dataset_config = _build_dataset_config(resolved)
+    return (
+        EnvConfig(env_id=resolved["env_id"]),
+        dataset_config,
+        ModelConfig(base_channels=resolved["base_channels"]),
+        TrainConfig(
+            steps=resolved["train_steps"],
+            batch_size=resolved["batch_size"],
+            learning_rate=resolved["learning_rate"],
+            log_every=resolved["log_every"],
+            sample_dir=resolved["save_dir"],
+            sample_fps=dataset_config.preview_fps,
+        ),
+    )
+
+
+def _build_generate_configs(
+    resolved: dict[str, Any],
+) -> tuple[EnvConfig, DatasetConfig, GenerateConfig]:
+    dataset_values = {
+        "rollout_steps": 32,
+        "preview_dir": None,
+        "preview_clips": 4,
+        **resolved,
+    }
+    return (
+        EnvConfig(env_id=resolved["env_id"]),
+        _build_dataset_config(dataset_values),
+        GenerateConfig(
+            load_dir=resolved["load_dir"],
+            save_dir=resolved["save_dir"],
+            generate_new_frames=resolved["generate_new_frames"],
+            generate_num_steps=resolved["generate_num_steps"],
+            num_samples=resolved["num_samples"],
+        ),
+    )
+
+
 def _config_option(func):
     return click.option(
         "--config",
@@ -303,9 +389,8 @@ def _config_option(func):
     )(func)
 
 
-def _env_options(func):
+def _dataset_options(func):
     func = click.option("--env-id", default="MiniGrid-Empty-8x8-v0")(func)
-    func = click.option("--rollout-steps", default=32, type=int)(func)
     func = click.option("--tile-size", default=8, type=int)(func)
     func = click.option("--seed", default=0, type=int)(func)
     func = click.option("--clip-length", default=4, type=int)(func)
@@ -319,9 +404,15 @@ def _env_options(func):
     return func
 
 
+def _train_dataset_options(func):
+    func = _dataset_options(func)
+    func = click.option("--rollout-steps", default=32, type=int)(func)
+    return func
+
+
 @cli.command(name="train")
 @_config_option
-@_env_options
+@_train_dataset_options
 @click.option("--save-dir", default="logs/minigrid-v1")
 @click.option(
     "--load-dir",
@@ -362,41 +453,34 @@ def train_cmd(
     resolved = _resolve_command_options(
         ctx, config_path=config_path, option_sections=TRAIN_CONFIG_OPTIONS
     )
-    env_id = resolved["env_id"]
-    rollout_steps = resolved["rollout_steps"]
-    tile_size = resolved["tile_size"]
-    seed = resolved["seed"]
-    clip_length = resolved["clip_length"]
-    clip_stride = resolved["clip_stride"]
-    max_clips = resolved["max_clips"]
+    env_config, dataset_config, model_config, train_config = _build_train_configs(
+        resolved
+    )
     save_dir = resolved["save_dir"]
     load_dir = resolved["load_dir"]
-    base_channels = resolved["base_channels"]
-    train_steps = resolved["train_steps"]
-    batch_size = resolved["batch_size"]
-    learning_rate = resolved["learning_rate"]
-    log_every = resolved["log_every"]
-    preview_dir = resolved["preview_dir"]
-    preview_clips = resolved["preview_clips"]
-    preview_fps = resolved["preview_fps"]
 
-    env = gym.make(env_id)
+    env = gym.make(env_config.env_id)
     clips, action_clips = make_minigrid_dataset(
         env=env,
-        num_steps=rollout_steps,
-        tile_size=tile_size,
-        seed=seed,
-        clip_length=clip_length,
-        clip_stride=clip_stride,
-        max_clips=max_clips,
+        num_steps=dataset_config.rollout_steps,
+        tile_size=dataset_config.tile_size,
+        seed=dataset_config.seed,
+        clip_length=dataset_config.clip_length,
+        clip_stride=dataset_config.clip_stride,
+        max_clips=dataset_config.max_clips,
     )
-    print(f"env: {env_id}")
+    print(f"env: {env_config.env_id}")
     print(f"clips shape: {tuple(clips.shape)}")
     print(f"action clips shape: {tuple(action_clips.shape)}")
 
-    if preview_dir is not None:
-        save_clip_previews(clips, preview_dir, max_clips=preview_clips, fps=preview_fps)
-        print(f"saved previews to: {preview_dir}")
+    if dataset_config.preview_dir is not None:
+        save_clip_previews(
+            clips,
+            dataset_config.preview_dir,
+            max_clips=dataset_config.preview_clips,
+            fps=dataset_config.preview_fps,
+        )
+        print(f"saved previews to: {dataset_config.preview_dir}")
 
     save_path = Path(save_dir)
     num_actions = int(env.action_space.n)
@@ -412,14 +496,9 @@ def train_cmd(
             clips,
             actions=action_clips,
             num_env_actions=num_actions,
-            base_channels=base_channels,
-            batch_size=batch_size,
-            steps=train_steps,
-            sample_fps=preview_fps,
-            sample_dir=str(save_path),
-            log_every=log_every,
+            model_config=model_config,
+            train_config=train_config,
             model=initial_model,
-            learning_rate=learning_rate,
             train_logger=train_logger,
         )
 
@@ -431,7 +510,7 @@ def train_cmd(
 
 @cli.command(name="generate")
 @_config_option
-@_env_options
+@_dataset_options
 @click.option(
     "--load-dir",
     default=None,
@@ -468,56 +547,46 @@ def generate_cmd(
     resolved = _resolve_command_options(
         ctx, config_path=config_path, option_sections=GENERATE_CONFIG_OPTIONS
     )
-    env_id = resolved["env_id"]
-    tile_size = resolved["tile_size"]
-    seed = resolved["seed"]
-    clip_length = resolved["clip_length"]
-    clip_stride = resolved["clip_stride"]
-    max_clips = resolved["max_clips"]
-    load_dir = resolved["load_dir"]
-    save_dir = resolved["save_dir"]
-    generate_new_frames = resolved["generate_new_frames"]
-    generate_num_steps = resolved["generate_num_steps"]
-    num_samples = resolved["num_samples"]
-    preview_fps = resolved["preview_fps"]
+    env_config, dataset_config, generate_config = _build_generate_configs(resolved)
 
-    if load_dir is None:
+    if generate_config.load_dir is None:
         raise click.UsageError("Missing option '--load-dir'.")
 
-    env = gym.make(env_id)
+    env = gym.make(env_config.env_id)
     clips, action_clips = make_minigrid_dataset(
         env=env,
-        num_steps=num_samples * clip_length,
-        tile_size=tile_size,
-        seed=seed,
-        clip_length=clip_length - 1,  # only grab context clips
-        clip_stride=clip_stride,
-        max_clips=max_clips,
+        num_steps=generate_config.num_samples * dataset_config.clip_length,
+        tile_size=dataset_config.tile_size,
+        seed=dataset_config.seed,
+        clip_length=dataset_config.clip_length - 1,  # only grab context clips
+        clip_stride=dataset_config.clip_stride,
+        max_clips=dataset_config.max_clips,
         max_action_idx=3,
     )
-    print(f"env: {env_id}")
+    print(f"env: {env_config.env_id}")
     print(f"clips shape: {tuple(clips.shape)}")
 
     num_actions = 3  # int(env.action_space.n)
-    model = load_model(load_dir)
-    print(f"loaded model from: {load_dir}")
+    model = load_model(generate_config.load_dir)
+    print(f"loaded model from: {generate_config.load_dir}")
 
     out_dir = (
-        Path(save_dir)
-        if save_dir is not None
-        else Path(load_dir) / f"generated-{generate_new_frames}f-{generate_num_steps}s"
+        Path(generate_config.save_dir)
+        if generate_config.save_dir is not None
+        else Path(generate_config.load_dir)
+        / f"generated-{generate_config.generate_new_frames}f-{generate_config.generate_num_steps}s"
     )
-    sample_count = min(num_samples, int(clips.shape[0]))
+    sample_count = min(generate_config.num_samples, int(clips.shape[0]))
     generate_minigrid_video(
         model,
         initial_clip=clips[:sample_count:, : model.max_context_size + 1],
         initial_actions=action_clips[:sample_count],
         num_actions=num_actions,
-        num_new_frames=generate_new_frames,
-        num_steps=generate_num_steps,
-        sample_fps=preview_fps,
+        num_new_frames=generate_config.generate_new_frames,
+        num_steps=generate_config.generate_num_steps,
+        sample_fps=dataset_config.preview_fps,
         save_dir=out_dir,
-        seed=seed + 1,
+        seed=dataset_config.seed + 1,
     )
 
 

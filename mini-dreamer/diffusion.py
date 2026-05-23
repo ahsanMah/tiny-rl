@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Tuple
 
@@ -21,6 +22,23 @@ from video_utils import (
 )
 
 NoiseDistribution = Literal["uniform", "logitnorm"]
+
+
+@dataclass(frozen=True)
+class ModelConfig:
+    base_channels: int = 16
+
+
+@dataclass(frozen=True)
+class TrainConfig:
+    steps: int = 1_000
+    batch_size: int = 1
+    learning_rate: float = 1e-3
+    log_every: int = 50
+    sample_dir: str | Path | None = None
+    num_gen_samples: int = 4
+    sample_steps: int = 32
+    sample_fps: float = 8.0
 
 
 def make_final_frame_mask(x: mx.array) -> mx.array:
@@ -279,18 +297,13 @@ def train_on_dataset(
     videos: mx.array,
     actions: mx.array | None = None,
     num_env_actions: int = 1,
-    steps: int = 1_000,
-    batch_size: int = 1,
-    base_channels: int = 16,
-    learning_rate: float = 1e-3,
-    log_every: int = 50,
-    sample_dir: str | Path | None = None,
-    num_gen_samples: int = 4,
-    sample_steps: int = 32,
-    sample_fps: float = 8.0,
+    model_config: ModelConfig | None = None,
+    train_config: TrainConfig | None = None,
     model: UNet3D | None = None,
     train_logger: RLLogger | None = None,
 ):
+    model_config = ModelConfig() if model_config is None else model_config
+    train_config = TrainConfig() if train_config is None else train_config
 
     if actions is None:
         actions = mx.zeros((videos.shape[0], num_env_actions), dtype=mx.int8)
@@ -314,18 +327,18 @@ def train_on_dataset(
         model = UNet3D(
             in_channels=int(videos.shape[-1]),
             out_channels=int(videos.shape[-1]),
-            base_channels=base_channels,
+            base_channels=model_config.base_channels,
             num_actions=num_env_actions,
         )
-    trainer = FlowMatchingTrainer(model, learning_rate=learning_rate)
+    trainer = FlowMatchingTrainer(model, learning_rate=train_config.learning_rate)
 
     print("dataset:", tuple(videos.shape))
     print("train split:", tuple(train_videos.shape))
     print("val split:", tuple(val_videos.shape))
     print_param_table(model)
 
-    sample_count = min(num_gen_samples, int(val_videos.shape[0]))
-    if sample_dir is not None:
+    sample_count = min(train_config.num_gen_samples, int(val_videos.shape[0]))
+    if train_config.sample_dir is not None:
         val_conditioning_clips = val_videos[:sample_count]
         val_conditioning_actions = val_actions[:sample_count]
 
@@ -333,17 +346,27 @@ def train_on_dataset(
     losses: list[float] = []
     val_timesteps = (0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0)
 
-    for step in range(1, steps + 1):
-        batch, batch_actions = sample_batch(train_videos, train_actions, batch_size)
+    for step in range(1, train_config.steps + 1):
+        batch, batch_actions = sample_batch(
+            train_videos, train_actions, train_config.batch_size
+        )
         loss = trainer.train_step(batch, batch_actions)
         losses.append(loss)
 
-        if step == 1 or step % log_every == 0 or step == steps:
+        if (
+            step == 1
+            or step % train_config.log_every == 0
+            or step == train_config.steps
+        ):
             elapsed = time.time() - start
-            avg_loss = sum(losses[-log_every:]) / min(log_every, len(losses))
+            avg_loss = sum(losses[-train_config.log_every :]) / min(
+                train_config.log_every, len(losses)
+            )
             steps_per_sec = step / max(elapsed, 1e-8)
             val_batch, val_batch_actions = sample_batch(
-                val_videos, val_actions, min(batch_size * 4, int(val_videos.shape[0]))
+                val_videos,
+                val_actions,
+                min(train_config.batch_size * 4, int(val_videos.shape[0])),
             )
             val_losses = trainer.eval_loss_by_timestep(
                 val_batch, val_batch_actions, val_timesteps
@@ -366,15 +389,20 @@ def train_on_dataset(
                 )
                 train_logger.log_validation_steps(step, val_losses)
 
-    if sample_dir is not None:
+    if train_config.sample_dir is not None:
         samples = sample_euler(
             trainer.ema_model,
             conditioning_clips=val_conditioning_clips[:, :-1],
             actions=val_conditioning_actions,
-            num_steps=sample_steps,
+            num_steps=train_config.sample_steps,
         )
-        save_clip_previews(samples, sample_dir, max_clips=sample_count, fps=sample_fps)
-        print(f"saved samples to: {sample_dir}")
+        save_clip_previews(
+            samples,
+            train_config.sample_dir,
+            max_clips=sample_count,
+            fps=train_config.sample_fps,
+        )
+        print(f"saved samples to: {train_config.sample_dir}")
 
     return trainer.ema_model, losses
 
@@ -407,15 +435,17 @@ def train_overfit_random_noise(
     )
     return train_on_dataset(
         videos,
-        steps=steps,
-        batch_size=batch_size,
-        base_channels=base_channels,
-        learning_rate=learning_rate,
-        log_every=log_every,
-        sample_dir=sample_dir,
-        num_gen_samples=num_samples,
-        sample_steps=sample_steps,
-        sample_fps=sample_fps,
+        model_config=ModelConfig(base_channels=base_channels),
+        train_config=TrainConfig(
+            steps=steps,
+            batch_size=batch_size,
+            learning_rate=learning_rate,
+            log_every=log_every,
+            sample_dir=sample_dir,
+            num_gen_samples=num_samples,
+            sample_steps=sample_steps,
+            sample_fps=sample_fps,
+        ),
     )
 
 
@@ -477,15 +507,17 @@ def train_on_video(
 
     return train_on_dataset(
         videos,
-        steps=steps,
-        batch_size=batch_size,
-        base_channels=base_channels,
-        learning_rate=learning_rate,
-        log_every=log_every,
-        sample_dir=sample_dir,
-        num_gen_samples=num_samples,
-        sample_steps=sample_steps,
-        sample_fps=float(info["actual_fps"]),
+        model_config=ModelConfig(base_channels=base_channels),
+        train_config=TrainConfig(
+            steps=steps,
+            batch_size=batch_size,
+            learning_rate=learning_rate,
+            log_every=log_every,
+            sample_dir=sample_dir,
+            num_gen_samples=num_samples,
+            sample_steps=sample_steps,
+            sample_fps=float(info["actual_fps"]),
+        ),
     )
 
 

@@ -1,24 +1,26 @@
 [env]
 env_id = "MiniGrid-Empty-8x8-v0"
+
+[dataset]
 rollout_steps = 32
 tile_size = 8
 seed = 0
 clip_length = 4
 clip_stride = 1
 max_clips = 128
+preview_dir = "logs/minigrid-v1/previews"
+preview_clips = 4
+preview_fps = 2.0
+
+[model]
+base_channels = 16
 
 [train]
 save_dir = "logs/minigrid-v1"
-base_channels = 16
 train_steps = 10000
 batch_size = 8
 learning_rate = 3e-4
 log_every = 100
-
-[preview]
-preview_dir = "logs/minigrid-v1/previews"
-preview_clips = 4
-preview_fps = 2.0
 
 [generate]
 load_dir = "logs/minigrid-v1"
