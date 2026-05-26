@@ -4,29 +4,35 @@ from typing import Iterable
 
 import gymnasium as gym
 import mlx.core as mx
+import mlx.nn as nn
+import mlx.optimizers as optim
 import numpy as np
 
 np.set_printoptions(precision=3, suppress=True)
 
 
-class TinyLinearNet:
+class TinyLinearNet(nn.Module):
     def __init__(self, input_dim=4, hidden_dim=32, output_dim=2):
-        self.W1 = mx.random.normal((input_dim, hidden_dim)) * 0.1
-        self.b1 = mx.zeros(hidden_dim)
-        self.W2 = mx.random.normal((hidden_dim, output_dim)) * 0.1
-        self.b2 = mx.zeros(output_dim)
+        super().__init__()
+        self.fc1 = nn.Linear(input_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, output_dim)
 
     @property
     def params(self) -> list:
-        return [self.W1, self.b1, self.W2, self.b2]
+        return [
+            self.fc1.weight,
+            self.fc1.bias,
+            self.fc2.weight,
+            self.fc2.bias,
+        ]
 
     def update(self, params):
-        self.W1, self.b1, self.W2, self.b2 = params
+        self.fc1.weight, self.fc1.bias, self.fc2.weight, self.fc2.bias = params
 
     def __call__(self, x):
         """x: (4,) -> logits: (2,)"""
-        x = mx.maximum(x @ self.W1 + self.b1, 0)  # ReLU
-        return x @ self.W2 + self.b2  # Raw logits
+        x = nn.relu(self.fc1(x))
+        return self.fc2(x)  # Raw logits
 
 
 class EMA:
@@ -48,37 +54,51 @@ class EMA:
         return self.net(*args, **kwargs)
 
 
-class GaussianDistribution:
-    def __init__(self, net):
-        self.net = net
-
-    @property
-    def std(self):
-        # assume diag covariance of 1 - should be learnable in future
-        return 1
+class SquashedGaussianDistribution:
+    def __init__(self, state_dim, action_dim, range_limit):
+        self.dim = action_dim  # Dimension of the gaussian
+        self.net = TinyLinearNet(input_dim=obs_space, output_dim=self.dim * 2)
+        self.range_limit = range_limit
 
     def log_prob_action(self, action, observation):
-        # N x action_dim
-        mu = self.net(observation)
-        var = self.std**2
+        # N x action_dim * 2
+        params = self.net(observation)
+        mu, log_std = params[:, : self.dim], params[:, self.dim :]
+        std = mx.exp(log_std)
+        var = std**2
 
-        # logprob(Normal(action, mu=diag, cov=1))
+        # Normal(. | mu, cov=diag(var)))
+        U = mx.random.normal(shape=action.shape) * std + mu
 
-        log_std = math.log(self.std)
+        # logprob(Normal(mu, cov=diag(var)))
         normalization_constant = -0.5 * math.log(2 * math.pi)
-        log_prob = -((action - mu) ** 2) / (2 * var) - log_std + normalization_constant
+        log_prob = -((U - mu) ** 2) / (2 * var) - log_std + normalization_constant
 
         # Sum over independent Gaussians
         log_prob = log_prob.sum(axis=1)
-        return log_prob
 
-    def entropy(self, observation, action):
-        return 1
+        # taken from Appendix C of SAC paper
+        # To make sense of this, think about U = tanhh^-1(action)
+        # and action comes by transforming U via mu and std
+        # So in expectation your log prob *does* connect U and action via mu and std
+        # eps for stability
+        eps = 1e-8
+        tanh_correction = mx.sum(mx.log(1 - mx.tanh(U) ** 2 + eps), axis=1)
+
+        # logprob(tanh(Normal(action, mu, cov=diag(var))))
+        return log_prob - tanh_correction
+
+    def entropy_estimate(self, action, observation):
+        """This only works in expectation i.e sample multiple actions and average"""
+        return -self.log_prob_action(action, observation)
 
     def sample(self, observation):
-        mu = self.net(observation)
+        params = self.net(observation)
+        mu, log_std = params[:, : self.dim], params[:, self.dim :]
+        std = mx.exp(log_std)
         z = mx.random.normal(shape=mu.shape)
-        return z * self.std + mu
+        a = mx.tanh(z * std + mu)
+        return a * self.range_limit
 
     def get_action(self, observation, sample=True):
         """Sample action for training, deterministic action for evaluation."""
@@ -94,6 +114,7 @@ class GaussianDistribution:
         return
 
     def __call__(self, observation):
+        observation = mx.asarray(observation, dtype=mx.float32)
         return self.get_action(observation, sample=True)
 
 
@@ -108,13 +129,7 @@ class Buffer:
         return len(self.history)
 
     def append(self, batch):
-        state = mx.asarray(batch[0], dtype=mx.float32)
-        action = mx.asarray(batch[1], dtype=mx.float32)
-        reward = mx.array([batch[2]], dtype=mx.float32)
-        next_state = mx.asarray(batch[3], dtype=mx.float32)
-        terminated = mx.asarray([batch[4]], dtype=mx.bool_)
-
-        batch = (state, action, reward, next_state, terminated)
+        batch = tuple(map(mx.asarray, batch))
         if len(self.history) < self.max_size:
             self.history.append(batch)
             return
@@ -131,11 +146,9 @@ class Buffer:
             batch = [self.history[b] for b in range(start, stop, step)]
             batched_dimensions: list[tuple[mx.array]] = list(zip(*batch))
 
-            return list(map(lambda x: mx.contiguous(mx.stack(x)), batched_dimensions))
+            return list(map(lambda x: mx.contiguous(mx.concat(x)), batched_dimensions))
 
         return self.history[index]
-
-    # def __slice__
 
     def _format_value(self, value) -> str:
         if isinstance(value, Iterable):
@@ -167,8 +180,17 @@ def rollout(env: gym.Env, policy, buffer, num_iters):
     return
 
 
-def q_update_step(q_fn, double_q_fn_ema, policy, buffer, gamma, alpha):
+def q_loss_fn(
+    q_params,
+    q_fn: TinyLinearNet,
+    double_q_fn_ema: tuple[EMA, EMA],
+    policy: SquashedGaussianDistribution,
+    buffer: list[mx.array],
+    gamma: float,
+    alpha: float,
+):
     """Q estimates future return for action-value pairs"""
+    q_fn.update(q_params)
 
     state, action, reward, next_state, is_next_state_terminal = buffer
     q1_ema, q2_ema = double_q_fn_ema
@@ -185,7 +207,7 @@ def q_update_step(q_fn, double_q_fn_ema, policy, buffer, gamma, alpha):
     zero_if_terminal = 1 - is_next_state_terminal
 
     target = reward + zero_if_terminal * gamma * (
-        bellman_backup - alpha * policy.entropy(next_action, next_state)
+        bellman_backup - alpha * policy.entropy_estimate(next_action, next_state)
     )
 
     loss = mx.mean((pred - target) ** 2)
@@ -195,6 +217,25 @@ def q_update_step(q_fn, double_q_fn_ema, policy, buffer, gamma, alpha):
     return loss
 
 
+q_grad_fn = mx.value_and_grad(q_loss_fn)
+
+
+def q_update_step(
+    q_fn: TinyLinearNet,
+    optimizer: optim.Optimizer,
+    double_q_fn_ema: tuple[EMA, EMA],
+    policy: SquashedGaussianDistribution,
+    buffer: list[mx.array],
+    gamma: float,
+    alpha: float,
+):
+    params = q_fn.params
+    q_loss, q_grads = q_grad_fn(params, double_q_fn_ema, policy, buffer, gamma, alpha)
+
+    clipped_grads, total_norm = optim.clip_grad_norm(q_grads, max_norm=2.0)
+    optimizer.update(params, q_grads)
+
+
 def policy_update_step(policy, state, double_q_fn_ema, alpha):
     """Policy always wants to maximize rewards / returns"""
     q1, q2 = double_q_fn_ema
@@ -202,7 +243,7 @@ def policy_update_step(policy, state, double_q_fn_ema, alpha):
 
     state_action_pair = mx.concatenate([state, action], axis=1)
     q_estimate = mx.minimum(q1(state_action_pair), q2(state_action_pair))
-    soft_return_estimate = q_estimate + alpha * policy.entropy(action, state)
+    soft_return_estimate = q_estimate + alpha * policy.entropy_estimate(action, state)
     loss = mx.mean(-soft_return_estimate)
 
     # optimize (implcitly gradient ascent)
@@ -210,27 +251,52 @@ def policy_update_step(policy, state, double_q_fn_ema, alpha):
     return loss
 
 
+def global_norm(weights: list[mx.array]) -> float:
+    l = 0.0
+    for p in weights:
+        l += mx.linalg.norm(p).item()
+    return l / len(weights)
+
+
 gamma = 0.975
 alpha = 0.2
 buffer = Buffer(max_size=5)
-env = gym.make("Pendulum-v1", max_episode_steps=200)
-obs_space = env.observation_space.shape[0]
-action_space = env.action_space.shape[0]
-policy = GaussianDistribution(
-    net=TinyLinearNet(input_dim=obs_space, output_dim=action_space)
+env = gym.make_vec("Pendulum-v1", max_episode_steps=200)
+obs_space = env.single_observation_space.shape[0]
+action_dim = env.single_action_space.shape[0]
+action_space_limit = env.single_action_space.high
+
+print(f"{obs_space = } - {action_dim = }")
+policy = SquashedGaussianDistribution(
+    state_dim=obs_space, action_dim=action_dim, range_limit=action_space_limit
 )
 
-q1 = TinyLinearNet(input_dim=obs_space + action_space, output_dim=1)
-q2 = TinyLinearNet(input_dim=obs_space + action_space, output_dim=1)
+q1 = TinyLinearNet(input_dim=obs_space + action_dim, output_dim=1)
+q2 = TinyLinearNet(input_dim=obs_space + action_dim, output_dim=1)
 q1_ema = EMA(q1, decay=0.999)
 q2_ema = EMA(q2, decay=0.999)
+
+q1_optimizer = optim.AdamW(learning_rate=1e-3)
+q2_optimizer = optim.AdamW(learning_rate=1e-3)
 
 rollout(env, policy, buffer, 10)
 
 batch = buffer[0:2]
 states = batch[0]
+
 policy_loss = policy_update_step(policy, states, (q1_ema, q2_ema), alpha)
-q_loss = q_update_step(
-    q1, (q1_ema, q2_ema), policy=policy, buffer=batch, gamma=gamma, alpha=alpha
+
+
+q1_loss, q1_grad = q_grad_fn(
+    q1.params,
+    q1,
+    (q1_ema, q2_ema),
+    policy=policy,
+    buffer=batch,
+    gamma=gamma,
+    alpha=alpha,
 )
-print(f"{q_loss = } - {policy_loss = }")
+
+print(f"{q1_loss = } - {global_norm(q1_grad) = :.3f}")
+
+print(f"{policy_loss = }")
