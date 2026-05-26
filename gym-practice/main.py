@@ -48,6 +48,38 @@ def _to_option_name(param_name: str) -> str:
     return f"--{param_name.replace('_', '-')}"
 
 
+def _build_env_info_table(env_name: str) -> Table:
+    env_table = Table(title="Gymnasium Environment", show_lines=True)
+    env_table.add_column("Field", style="magenta", no_wrap=True)
+    env_table.add_column("Value", style="green")
+
+    env = None
+    try:
+        import gymnasium as gym
+
+        env = gym.make(env_name)
+        spec = env.spec
+        env_table.add_row("id", getattr(spec, "id", env_name))
+        env_table.add_row("entry_point", str(getattr(spec, "entry_point", "n/a")))
+        env_table.add_row(
+            "max_episode_steps", str(getattr(spec, "max_episode_steps", "n/a"))
+        )
+        env_table.add_row(
+            "reward_threshold", str(getattr(spec, "reward_threshold", "n/a"))
+        )
+        env_table.add_row("observation_space", str(env.observation_space))
+        env_table.add_row("action_space", str(env.action_space))
+    except Exception as exc:
+        env_table.add_row("id", env_name)
+        env_table.add_row("status", "unable to inspect")
+        env_table.add_row("error", f"{type(exc).__name__}: {exc}")
+    finally:
+        if env is not None:
+            env.close()
+
+    return env_table
+
+
 @click.command()
 @click.option(
     "--algorithm",
@@ -312,13 +344,25 @@ def main(
     for name, value in display_kwargs.items():
         table.add_row(name, str(value))
 
-    console.print(
+    env_name_for_run = str(display_kwargs.get("env_name", env_name))
+    env_table = _build_env_info_table(env_name_for_run)
+
+    display_grid = Table.grid(expand=True)
+    display_grid.add_column(ratio=1)
+    display_grid.add_column(ratio=1)
+    display_grid.add_row(
         Panel(
             table,
             title="[bold red]Starting RL Training Run[/bold red]",
             border_style="red",
-        )
+        ),
+        Panel(
+            env_table,
+            title="[bold blue]Gymnasium Environment[/bold blue]",
+            border_style="blue",
+        ),
     )
+    console.print(display_grid)
 
     algo_module.run(**algo_kwargs)
 
