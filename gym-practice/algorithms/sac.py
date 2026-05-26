@@ -1,5 +1,7 @@
 import copy
 import math
+import os
+import sys
 from typing import Iterable
 
 import gymnasium as gym
@@ -8,7 +10,9 @@ import mlx.nn as nn
 import mlx.optimizers as optim
 import mlx.utils as mlx_utils
 import numpy as np
-from jax._src.config import eager_constant_folding
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from logger_utils import VideoLogger
 
 np.set_printoptions(precision=3, suppress=True)
 
@@ -56,6 +60,10 @@ class SquashedGaussianDistribution(nn.Module):
         self.range_limit = range_limit
 
     def log_prob_action(self, action, observation):
+
+        if not isinstance(observation, mx.array):
+            observation = mx.array(observation)
+
         # N x action_dim * 2
         params = self.net(observation)
         mu, log_std = params[:, : self.dim], params[:, self.dim :]
@@ -85,7 +93,7 @@ class SquashedGaussianDistribution(nn.Module):
 
     def entropy_estimate(self, action, observation):
         """This only works in expectation i.e sample multiple actions and average"""
-        # Note: entropy is -E[log_prob(action)]. When computing soft target, 
+        # Note: entropy is -E[log_prob(action)]. When computing soft target,
         # we add alpha * H = alpha * (-log_prob), which is same as -alpha * log_prob
         return -self.log_prob_action(action, observation)
 
@@ -98,8 +106,9 @@ class SquashedGaussianDistribution(nn.Module):
         a = mx.tanh(U)
         return a * self.range_limit
 
-    def get_action(self, observation, sample=True):
+    def get_action(self, observation, sample=False):
         """Sample action for training, deterministic action for evaluation."""
+        observation = mx.asarray(observation, dtype=mx.float32)
         if sample:
             return self.sample(observation)
 
@@ -108,7 +117,6 @@ class SquashedGaussianDistribution(nn.Module):
         return mu
 
     def __call__(self, observation):
-        observation = mx.asarray(observation, dtype=mx.float32)
         return self.get_action(observation, sample=True)
 
 
@@ -179,14 +187,21 @@ class Buffer:
         return f"{header}\n" + "\n".join(rows)
 
 
-def rollout(env: gym.Env, policy, buffer, num_iters):
+def rollout(env: gym.Env, policy, buffer, num_iters, global_step, start_step=5000):
     state, _ = env.reset()
+    entropy = 0.0
     for _ in range(num_iters):
-        action = policy(state)
+        # Grab random actions in the beginning for improved exploration
+        action = (
+            policy(state) if global_step >= start_step else env.action_space.sample()
+        )
         observation, reward, terminated, truncated, _ = env.step(action)
         buffer.append((state, action, reward, observation, terminated))
         state = observation
-    return
+
+        entropy += policy.entropy_estimate(action, state).sum()
+
+    return float(entropy) / num_iters
 
 
 def q_loss_fn(
@@ -205,7 +220,7 @@ def q_loss_fn(
     pred = q_fn(state_action_pair)
 
     # grab fresh action from policy
-    next_action = policy.get_action(next_state)
+    next_action = policy(next_state)
     next_state_action_pair = mx.concatenate([next_state, next_action], axis=1)
     bellman_backup = mx.minimum(
         q1_ema(next_state_action_pair), q2_ema(next_state_action_pair)
@@ -247,7 +262,7 @@ def policy_loss_fn(
 ):
     """Policy always wants to maximize rewards / returns"""
     q1, q2 = double_q_fn_ema
-    action = policy.get_action(state)
+    action = policy(state)
 
     state_action_pair = mx.concatenate([state, action], axis=1)
     q_estimate = mx.minimum(q1(state_action_pair), q2(state_action_pair))
@@ -271,73 +286,93 @@ def policy_update_step(
     return float(loss), total_grad_norm
 
 
-gamma = 0.975
-alpha = 0.2
-num_epochs = 20
-num_updates_per_epoch = 50
-batch_size = 64
-num_rollouts_per_epoch = 256
+def run(
+    gamma=0.975,
+    alpha=0.2,
+    num_epochs=20,
+    num_updates_per_epoch=1000,
+    batch_size=256,
+    num_rollouts_per_epoch=1000,
+    env_name="Pendulum-v1",
+    record_eval_videos=False,
+):
+    env = gym.make_vec(env_name, num_envs=4, max_episode_steps=200)
+    obs_space = env.single_observation_space.shape[0]
+    action_dim = env.single_action_space.shape[0]
+    action_space_limit = env.single_action_space.high
+    print(f"{obs_space = } - {action_dim = }")
 
-buffer = Buffer(max_size=2048)
-env = gym.make_vec("Pendulum-v1", num_envs=4, max_episode_steps=200)
-obs_space = env.single_observation_space.shape[0]
-action_dim = env.single_action_space.shape[0]
-action_space_limit = env.single_action_space.high
+    eval_log_dir = "eval_logs/sac/"
+    eval_video_logger = VideoLogger(
+        env_name=env_name, exp_folder=f"{eval_log_dir}/test"
+    )
 
-print(f"{obs_space = } - {action_dim = }")
-policy = SquashedGaussianDistribution(
-    state_dim=obs_space, action_dim=action_dim, range_limit=action_space_limit
-)
+    buffer = Buffer(max_size=100_000)
+    policy = SquashedGaussianDistribution(
+        state_dim=obs_space, action_dim=action_dim, range_limit=action_space_limit
+    )
 
+    # First evaluation pass
+    global_step = 0
 
-q1 = TinyLinearNet(input_dim=obs_space + action_dim, output_dim=1)
-q2 = TinyLinearNet(input_dim=obs_space + action_dim, output_dim=1)
-q1_ema = EMA(q1, decay=0.999)
-q2_ema = EMA(q2, decay=0.999)
+    q1 = TinyLinearNet(input_dim=obs_space + action_dim, output_dim=1)
+    q2 = TinyLinearNet(input_dim=obs_space + action_dim, output_dim=1)
+    q1_ema = EMA(q1, decay=0.999)
+    q2_ema = EMA(q2, decay=0.999)
 
-policy_optimizer = optim.AdamW(learning_rate=1e-3)
-q1_optimizer = optim.AdamW(learning_rate=1e-3)
-q2_optimizer = optim.AdamW(learning_rate=1e-3)
+    policy_optimizer = optim.AdamW(learning_rate=1e-3)
+    q1_optimizer = optim.AdamW(learning_rate=1e-3)
+    q2_optimizer = optim.AdamW(learning_rate=1e-3)
 
-for i in range(num_epochs):
-    rollout(env, policy, buffer, num_rollouts_per_epoch)
+    for i in range(num_epochs):
+        entropy = rollout(env, policy, buffer, num_rollouts_per_epoch, global_step)
 
-    for i in range(num_updates_per_epoch):
-        sample_indices = mx.random.randint(0, buffer.size, shape=(batch_size,))
-        batched_buffer = buffer[sample_indices]
+        for j in range(num_updates_per_epoch):
+            global_step += 1
 
-        q1_loss, q1_grad_norm = q_update_step(
-            q1,
-            q1_optimizer,
-            (q1_ema, q2_ema),
-            policy=policy,
-            buffer=batched_buffer,
-            gamma=gamma,
-            alpha=alpha,
+            sample_indices = mx.random.randint(0, buffer.size, shape=(batch_size,))
+            batched_buffer = buffer[sample_indices]
+
+            q1_loss, q1_grad_norm = q_update_step(
+                q1,
+                q1_optimizer,
+                (q1_ema, q2_ema),
+                policy=policy,
+                buffer=batched_buffer,
+                gamma=gamma,
+                alpha=alpha,
+            )
+            q2_loss, q2_grad_norm = q_update_step(
+                q2,
+                q2_optimizer,
+                (q1_ema, q2_ema),
+                policy=policy,
+                buffer=batched_buffer,
+                gamma=gamma,
+                alpha=alpha,
+            )
+
+            # update EMAs
+            q1_ema.update(q1.parameters())
+            q2_ema.update(q2.parameters())
+
+            states = batched_buffer[0]
+            policy_loss, policy_grad_norm = policy_update_step(
+                policy,
+                policy_optimizer,
+                states,
+                (q1_ema, q2_ema),
+                alpha=alpha,
+            )
+
+        print(
+            f"step {global_step}: {entropy = :<5.3f} - {policy_loss = :<5.3f} - {q1_loss = :<5.3f} - {q2_loss = :<5.3f} "
         )
-        q2_loss, q2_grad_norm = q_update_step(
-            q2,
-            q2_optimizer,
-            (q1_ema, q2_ema),
-            policy=policy,
-            buffer=batched_buffer,
-            gamma=gamma,
-            alpha=alpha,
-        )
+        if (i + 1) % 5 == 0:
+            eval_video_logger.record_evaluation(policy, global_step)
+            print(
+                f"{policy_grad_norm = :.3f} {q1_grad_norm = :.3f} - {q2_grad_norm = :.3f}"
+            )
 
-        # update EMAs
-        q1_ema.update(q1.parameters())
-        q2_ema.update(q2.parameters())
 
-        states = batched_buffer[0]
-        policy_loss, policy_grad_norm = policy_update_step(
-            policy,
-            policy_optimizer,
-            states,
-            (q1_ema, q2_ema),
-            alpha=alpha,
-        )
-
-    print(f"{policy_loss = :<5.3f} - {q1_loss = :<5.3f} - {q2_loss = :<5.3f} ")
-    print("we need to evalute a rollout pls")
-    # print(f"{policy_grad_norm = :.3f} {q1_grad_norm = :.3f} - {q2_grad_norm = :.3f}")
+run()
