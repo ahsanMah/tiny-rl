@@ -6,6 +6,7 @@ import gymnasium as gym
 import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as optim
+import mlx.utils as mlx_utils
 import numpy as np
 
 np.set_printoptions(precision=3, suppress=True)
@@ -17,18 +18,6 @@ class TinyLinearNet(nn.Module):
         self.fc1 = nn.Linear(input_dim, hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, output_dim)
 
-    @property
-    def params(self) -> list:
-        return [
-            self.fc1.weight,
-            self.fc1.bias,
-            self.fc2.weight,
-            self.fc2.bias,
-        ]
-
-    def update(self, params):
-        self.fc1.weight, self.fc1.bias, self.fc2.weight, self.fc2.bias = params
-
     def __call__(self, x):
         """x: (4,) -> logits: (2,)"""
         x = nn.relu(self.fc1(x))
@@ -36,25 +25,30 @@ class TinyLinearNet(nn.Module):
 
 
 class EMA:
-    def __init__(self, net: TinyLinearNet, decay=0.999):
+    def __init__(self, net: nn.Module, decay=0.999):
         self.decay = decay
         self.net = copy.deepcopy(net)
-        self._params = net.params
 
     def update(self, params):
-        for p, q in zip(self._params, params):
-            p = p * self.decay + (1 - self.decay) * q
-        self.net.update(self._params)
+        params = mlx_utils.tree_flatten(params, destination={})
+
+        pdict: dict[str, mx.array] = {}
+        mlx_utils.tree_flatten(self.net.parameters(), destination=pdict)
+
+        for pname, pval in pdict.items():
+            pdict[pname] = pval * self.decay + (1 - self.decay) * params[pname]
+
+        self.net.update(mlx_utils.tree_unflatten(pdict))
 
     @property
-    def params(self):
-        return self._params
+    def parameters(self):
+        return self.net.parameters()
 
     def __call__(self, *args, **kwargs):
         return self.net(*args, **kwargs)
 
 
-class SquashedGaussianDistribution:
+class SquashedGaussianDistribution(nn.Module):
     def __init__(self, state_dim, action_dim, range_limit):
         self.dim = action_dim  # Dimension of the gaussian
         self.net = TinyLinearNet(input_dim=obs_space, output_dim=self.dim * 2)
@@ -108,10 +102,6 @@ class SquashedGaussianDistribution:
         # No sampling, the mu is deterministic given a state
         mu = self.net(observation)
         return mu
-
-    def update(self, params):
-        self.net.update(params)
-        return
 
     def __call__(self, observation):
         observation = mx.asarray(observation, dtype=mx.float32)
@@ -181,8 +171,7 @@ def rollout(env: gym.Env, policy, buffer, num_iters):
 
 
 def q_loss_fn(
-    q_params,
-    q_fn: TinyLinearNet,
+    q_fn: nn.Module,
     double_q_fn_ema: tuple[EMA, EMA],
     policy: SquashedGaussianDistribution,
     buffer: list[mx.array],
@@ -190,7 +179,6 @@ def q_loss_fn(
     alpha: float,
 ):
     """Q estimates future return for action-value pairs"""
-    q_fn.update(q_params)
 
     state, action, reward, next_state, is_next_state_terminal = buffer
     q1_ema, q2_ema = double_q_fn_ema
@@ -211,9 +199,7 @@ def q_loss_fn(
     )
 
     loss = mx.mean((pred - target) ** 2)
-
-    # optimize via gradient descent
-
+    mx.eval(loss)
     return loss
 
 
@@ -221,22 +207,26 @@ q_grad_fn = mx.value_and_grad(q_loss_fn)
 
 
 def q_update_step(
-    q_fn: TinyLinearNet,
+    q_fn: nn.Module,
     optimizer: optim.Optimizer,
     double_q_fn_ema: tuple[EMA, EMA],
     policy: SquashedGaussianDistribution,
     buffer: list[mx.array],
     gamma: float,
     alpha: float,
+) -> tuple[float, float]:
+    q_loss, q_grads = q_grad_fn(q_fn, double_q_fn_ema, policy, buffer, gamma, alpha)
+    clipped_grads, total_grad_norm = optim.clip_grad_norm(q_grads, max_norm=2.0)
+    optimizer.update(q_fn, clipped_grads)
+    return float(q_loss), total_grad_norm
+
+
+def policy_loss_fn(
+    policy: SquashedGaussianDistribution,
+    state: mx.array,
+    double_q_fn_ema: tuple[EMA, EMA],
+    alpha: float,
 ):
-    params = q_fn.params
-    q_loss, q_grads = q_grad_fn(params, double_q_fn_ema, policy, buffer, gamma, alpha)
-
-    clipped_grads, total_norm = optim.clip_grad_norm(q_grads, max_norm=2.0)
-    optimizer.update(params, q_grads)
-
-
-def policy_update_step(policy, state, double_q_fn_ema, alpha):
     """Policy always wants to maximize rewards / returns"""
     q1, q2 = double_q_fn_ema
     action = policy.get_action(state)
@@ -245,17 +235,21 @@ def policy_update_step(policy, state, double_q_fn_ema, alpha):
     q_estimate = mx.minimum(q1(state_action_pair), q2(state_action_pair))
     soft_return_estimate = q_estimate + alpha * policy.entropy_estimate(action, state)
     loss = mx.mean(-soft_return_estimate)
-
-    # optimize (implcitly gradient ascent)
-
     return loss
 
 
-def global_norm(weights: list[mx.array]) -> float:
-    l = 0.0
-    for p in weights:
-        l += mx.linalg.norm(p).item()
-    return l / len(weights)
+def policy_update_step(
+    policy: SquashedGaussianDistribution,
+    optimizer: optim.Optimizer,
+    state: mx.array,
+    double_q_fn_ema: tuple[EMA, EMA],
+    alpha: float,
+) -> tuple[float, float]:
+    policy_grad_fn = mx.value_and_grad(policy_loss_fn)
+    loss, grads = policy_grad_fn(policy, state, double_q_fn_ema, alpha)
+    clipped_grads, total_grad_norm = optim.clip_grad_norm(grads, max_norm=2.0)
+    optimizer.update(policy, clipped_grads)
+    return float(loss), total_grad_norm
 
 
 gamma = 0.975
@@ -276,6 +270,7 @@ q2 = TinyLinearNet(input_dim=obs_space + action_dim, output_dim=1)
 q1_ema = EMA(q1, decay=0.999)
 q2_ema = EMA(q2, decay=0.999)
 
+policy_optimizer = optim.AdamW(learning_rate=1e-3)
 q1_optimizer = optim.AdamW(learning_rate=1e-3)
 q2_optimizer = optim.AdamW(learning_rate=1e-3)
 
@@ -284,12 +279,18 @@ rollout(env, policy, buffer, 10)
 batch = buffer[0:2]
 states = batch[0]
 
-policy_loss = policy_update_step(policy, states, (q1_ema, q2_ema), alpha)
-
-
-q1_loss, q1_grad = q_grad_fn(
-    q1.params,
+q1_loss, q1_grad_norm = q_update_step(
     q1,
+    q1_optimizer,
+    (q1_ema, q2_ema),
+    policy=policy,
+    buffer=batch,
+    gamma=gamma,
+    alpha=alpha,
+)
+q2_loss, q2_grad_norm = q_update_step(
+    q2,
+    q2_optimizer,
     (q1_ema, q2_ema),
     policy=policy,
     buffer=batch,
@@ -297,6 +298,22 @@ q1_loss, q1_grad = q_grad_fn(
     alpha=alpha,
 )
 
-print(f"{q1_loss = } - {global_norm(q1_grad) = :.3f}")
+# update EMAs
+q1_ema.update(q1.parameters())
+q2_ema.update(q2.parameters())
 
-print(f"{policy_loss = }")
+
+policy_loss, policy_grad_norm = policy_update_step(
+    policy,
+    policy_optimizer,
+    states,
+    (q1_ema, q2_ema),
+    alpha=alpha,
+)
+
+
+print(
+    f"{q1_loss = :.3f} - {q1_grad_norm = :.3f} - {q2_loss = :.3f} - {q2_grad_norm = :.3f}"
+)
+
+print(f"{policy_loss = :.3f} - {policy_grad_norm = :.3f}")
