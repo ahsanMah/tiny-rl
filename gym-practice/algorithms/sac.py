@@ -52,7 +52,7 @@ class EMA:
 class SquashedGaussianDistribution(nn.Module):
     def __init__(self, state_dim, action_dim, range_limit):
         self.dim = action_dim  # Dimension of the gaussian
-        self.net = TinyLinearNet(input_dim=obs_space, output_dim=self.dim * 2)
+        self.net = TinyLinearNet(input_dim=state_dim, output_dim=self.dim * 2)
         self.range_limit = range_limit
 
     def log_prob_action(self, action, observation):
@@ -85,6 +85,8 @@ class SquashedGaussianDistribution(nn.Module):
 
     def entropy_estimate(self, action, observation):
         """This only works in expectation i.e sample multiple actions and average"""
+        # Note: entropy is -E[log_prob(action)]. When computing soft target, 
+        # we add alpha * H = alpha * (-log_prob), which is same as -alpha * log_prob
         return -self.log_prob_action(action, observation)
 
     def sample(self, observation):
@@ -92,7 +94,8 @@ class SquashedGaussianDistribution(nn.Module):
         mu, log_std = params[:, : self.dim], params[:, self.dim :]
         std = mx.exp(log_std)
         z = mx.random.normal(shape=mu.shape)
-        a = mx.tanh(z * std + mu)
+        U = z * std + mu
+        a = mx.tanh(U)
         return a * self.range_limit
 
     def get_action(self, observation, sample=True):
@@ -210,7 +213,7 @@ def q_loss_fn(
     zero_if_terminal = 1 - is_next_state_terminal
 
     target = reward + zero_if_terminal * gamma * (
-        bellman_backup - alpha * policy.entropy_estimate(next_action, next_state)
+        bellman_backup + alpha * policy.entropy_estimate(next_action, next_state)
     )
 
     loss = mx.mean((pred - target) ** 2)
@@ -248,8 +251,9 @@ def policy_loss_fn(
 
     state_action_pair = mx.concatenate([state, action], axis=1)
     q_estimate = mx.minimum(q1(state_action_pair), q2(state_action_pair))
+    # Soft return estimate to maximize is Q(s,a) + alpha * H
     soft_return_estimate = q_estimate + alpha * policy.entropy_estimate(action, state)
-    loss = mx.mean(-soft_return_estimate)
+    loss = -mx.mean(soft_return_estimate)
     return loss
 
 
@@ -269,10 +273,10 @@ def policy_update_step(
 
 gamma = 0.975
 alpha = 0.2
-num_epochs = 10
+num_epochs = 20
 num_updates_per_epoch = 50
 batch_size = 64
-num_rollouts_per_epoch = 128
+num_rollouts_per_epoch = 256
 
 buffer = Buffer(max_size=2048)
 env = gym.make_vec("Pendulum-v1", num_envs=4, max_episode_steps=200)
@@ -335,4 +339,5 @@ for i in range(num_epochs):
         )
 
     print(f"{policy_loss = :<5.3f} - {q1_loss = :<5.3f} - {q2_loss = :<5.3f} ")
+    print("we need to evalute a rollout pls")
     # print(f"{policy_grad_norm = :.3f} {q1_grad_norm = :.3f} - {q2_grad_norm = :.3f}")
