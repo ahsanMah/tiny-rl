@@ -8,6 +8,7 @@ import mlx.nn as nn
 import mlx.optimizers as optim
 import mlx.utils as mlx_utils
 import numpy as np
+from jax._src.config import eager_constant_folding
 
 np.set_printoptions(precision=3, suppress=True)
 
@@ -118,27 +119,44 @@ class Buffer:
     def size(self):
         return len(self.history)
 
-    def append(self, batch):
-        batch = tuple(map(mx.asarray, batch))
+    def _append(self, event):
+        event = tuple(map(self._convert_to_mlx, event))
         if len(self.history) < self.max_size:
-            self.history.append(batch)
+            self.history.append(event)
             return
 
         # We evict in LIFO manner
-        self.history[self.pointer] = batch
+        self.history[self.pointer] = event
         self.pointer = (self.pointer + 1) % self.max_size
 
-    def __getitem__(self, index) -> list[mx.array]:
+    def _convert_to_mlx(self, x):
+        x = mx.asarray(x)
+        if x.ndim <= 1:
+            x = x.reshape(1, -1)
+        return x
+
+    def append(self, batch):
+        # batch = tuple(map(self._convert_to_mlx, batch))
+        num_samples = len(batch[0])
+        for i in range(num_samples):
+            event = tuple(e[i] for e in batch)
+            self._append(event)
+
+    def __getitem__(self, index) -> list[mx.array] | mx.array:
+        if isinstance(index, int):
+            index = [index]
+        elif isinstance(index, Iterable):
+            index = index.tolist()
+
         if isinstance(index, slice):
             # Resolve 'None' values and negative indices to absolute values
             start, stop, step = index.indices(self.size)
-
             batch = [self.history[b] for b in range(start, stop, step)]
-            batched_dimensions: list[tuple[mx.array]] = list(zip(*batch))
+        elif isinstance(index, Iterable):
+            batch = [self.history[i] for i in index]
 
-            return list(map(lambda x: mx.contiguous(mx.concat(x)), batched_dimensions))
-
-        return self.history[index]
+        batched_dimensions: list[tuple[mx.array]] = list(zip(*batch))
+        return list(map(lambda x: mx.contiguous(mx.concat(x)), batched_dimensions))
 
     def _format_value(self, value) -> str:
         if isinstance(value, Iterable):
@@ -160,13 +178,11 @@ class Buffer:
 
 def rollout(env: gym.Env, policy, buffer, num_iters):
     state, _ = env.reset()
-
     for _ in range(num_iters):
         action = policy(state)
         observation, reward, terminated, truncated, _ = env.step(action)
         buffer.append((state, action, reward, observation, terminated))
         state = observation
-
     return
 
 
@@ -182,7 +198,6 @@ def q_loss_fn(
 
     state, action, reward, next_state, is_next_state_terminal = buffer
     q1_ema, q2_ema = double_q_fn_ema
-
     state_action_pair = mx.concatenate([state, action], axis=1)
     pred = q_fn(state_action_pair)
 
@@ -254,8 +269,13 @@ def policy_update_step(
 
 gamma = 0.975
 alpha = 0.2
-buffer = Buffer(max_size=5)
-env = gym.make_vec("Pendulum-v1", max_episode_steps=200)
+num_epochs = 10
+num_updates_per_epoch = 50
+batch_size = 64
+num_rollouts_per_epoch = 128
+
+buffer = Buffer(max_size=2048)
+env = gym.make_vec("Pendulum-v1", num_envs=4, max_episode_steps=200)
 obs_space = env.single_observation_space.shape[0]
 action_dim = env.single_action_space.shape[0]
 action_space_limit = env.single_action_space.high
@@ -264,6 +284,7 @@ print(f"{obs_space = } - {action_dim = }")
 policy = SquashedGaussianDistribution(
     state_dim=obs_space, action_dim=action_dim, range_limit=action_space_limit
 )
+
 
 q1 = TinyLinearNet(input_dim=obs_space + action_dim, output_dim=1)
 q2 = TinyLinearNet(input_dim=obs_space + action_dim, output_dim=1)
@@ -274,46 +295,44 @@ policy_optimizer = optim.AdamW(learning_rate=1e-3)
 q1_optimizer = optim.AdamW(learning_rate=1e-3)
 q2_optimizer = optim.AdamW(learning_rate=1e-3)
 
-rollout(env, policy, buffer, 10)
+for i in range(num_epochs):
+    rollout(env, policy, buffer, num_rollouts_per_epoch)
 
-batch = buffer[0:2]
-states = batch[0]
+    for i in range(num_updates_per_epoch):
+        sample_indices = mx.random.randint(0, buffer.size, shape=(batch_size,))
+        batched_buffer = buffer[sample_indices]
 
-q1_loss, q1_grad_norm = q_update_step(
-    q1,
-    q1_optimizer,
-    (q1_ema, q2_ema),
-    policy=policy,
-    buffer=batch,
-    gamma=gamma,
-    alpha=alpha,
-)
-q2_loss, q2_grad_norm = q_update_step(
-    q2,
-    q2_optimizer,
-    (q1_ema, q2_ema),
-    policy=policy,
-    buffer=batch,
-    gamma=gamma,
-    alpha=alpha,
-)
+        q1_loss, q1_grad_norm = q_update_step(
+            q1,
+            q1_optimizer,
+            (q1_ema, q2_ema),
+            policy=policy,
+            buffer=batched_buffer,
+            gamma=gamma,
+            alpha=alpha,
+        )
+        q2_loss, q2_grad_norm = q_update_step(
+            q2,
+            q2_optimizer,
+            (q1_ema, q2_ema),
+            policy=policy,
+            buffer=batched_buffer,
+            gamma=gamma,
+            alpha=alpha,
+        )
 
-# update EMAs
-q1_ema.update(q1.parameters())
-q2_ema.update(q2.parameters())
+        # update EMAs
+        q1_ema.update(q1.parameters())
+        q2_ema.update(q2.parameters())
 
+        states = batched_buffer[0]
+        policy_loss, policy_grad_norm = policy_update_step(
+            policy,
+            policy_optimizer,
+            states,
+            (q1_ema, q2_ema),
+            alpha=alpha,
+        )
 
-policy_loss, policy_grad_norm = policy_update_step(
-    policy,
-    policy_optimizer,
-    states,
-    (q1_ema, q2_ema),
-    alpha=alpha,
-)
-
-
-print(
-    f"{q1_loss = :.3f} - {q1_grad_norm = :.3f} - {q2_loss = :.3f} - {q2_grad_norm = :.3f}"
-)
-
-print(f"{policy_loss = :.3f} - {policy_grad_norm = :.3f}")
+    print(f"{policy_loss = :<5.3f} - {q1_loss = :<5.3f} - {q2_loss = :<5.3f} ")
+    # print(f"{policy_grad_norm = :.3f} {q1_grad_norm = :.3f} - {q2_grad_norm = :.3f}")
