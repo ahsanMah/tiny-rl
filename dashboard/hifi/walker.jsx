@@ -339,7 +339,7 @@ function WalkerPlayer({
   return (
     <div className="col" style={{ width: '100%', gap: 8 }}>
       {/* Canvas player */}
-      <div className="player" style={{ aspectRatio: '16/9', borderRadius: 4, maxHeight: 296 }}>
+      <div className="player" style={{ aspectRatio: '16/9', borderRadius: 4, maxHeight: 'clamp(260px, calc(21vw + 140px), 520px)' }}>
         <canvas
           ref={canvasRef}
           style={{ width: '100%', height: '100%' }}
@@ -360,7 +360,7 @@ function WalkerPlayer({
         <div className="ph">
           <span>frame {frame.toLocaleString()} / {rollout.length.toLocaleString()}</span>
           <span style={{ display: 'flex', gap: 12 }}>
-            <span>overlay: {overlay}</span>
+            {/* <span>overlay: {overlay}</span> */}
             <span>{playing ? '▶ playing' : '∥ paused'} · {speed.toFixed(2)}×</span>
           </span>
         </div>
@@ -409,12 +409,6 @@ function WalkerPlayer({
           <option value="4">4×</option>
         </select>
 
-        <select className="dropdown" value={overlay} onChange={(e) => setOverlay(e.target.value)}
-                style={{ font: '500 11.5px var(--ui)' }}>
-          <option value="none">overlay: none</option>
-          <option value="saliency">overlay: saliency</option>
-          <option value="trajectory">overlay: trajectory</option>
-        </select>
       </div>
     </div>
   );

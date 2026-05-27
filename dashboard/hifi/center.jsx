@@ -2,10 +2,35 @@
 
 const { useMemo: useM, useState: useSt } = React;
 
-// ── Top breadcrumb / actions bar ─────────────────────────────────────
-function TopBar({ run, ckpt, pinnedCount, diffBaselineName, onChangeBaseline, allRuns }) {
+// ── Icon primitives (inline SVG — no library needed) ─────────────────
+function IconSun({ size = 15, strokeWidth = 1.8 }) {
   return (
-    <div className="row border-b" style={{ padding: '8px 16px', gap: 10, height: 44, flex: '0 0 auto', minWidth: 0 }}>
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none"
+         stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="4"/>
+      <line x1="12" y1="2"  x2="12" y2="6"/>
+      <line x1="12" y1="18" x2="12" y2="22"/>
+      <line x1="2"  y1="12" x2="6"  y2="12"/>
+      <line x1="18" y1="12" x2="22" y2="12"/>
+      <line x1="4.93"  y1="4.93"  x2="7.76"  y2="7.76"/>
+      <line x1="16.24" y1="16.24" x2="19.07" y2="19.07"/>
+      <line x1="4.93"  y1="19.07" x2="7.76"  y2="16.24"/>
+      <line x1="16.24" y1="7.76"  x2="19.07" y2="4.93"/>
+    </svg>
+  );
+}
+function IconMoon({ size = 15, strokeWidth = 1.8 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none"
+         stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round">
+      <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+    </svg>
+  );
+}
+// ── Top breadcrumb / actions bar ─────────────────────────────────────
+function TopBar({ run, ckpt, pinnedCount, diffBaselineName, onChangeBaseline, allRuns, pinnedRuns, darkMode, onToggleDark }) {
+  return (
+    <div className="row border-b" style={{ padding: '8px 16px', gap: 10, height: 68, flex: '0 0 auto', minWidth: 0 }}>
       <div className="doc-title" style={{ flex: '1 1 auto', minWidth: 0 }}>
         <span className="crumb">
           <span style={{ color: 'var(--ink)' }} className="strong">tracker</span>
@@ -17,21 +42,26 @@ function TopBar({ run, ckpt, pinnedCount, diffBaselineName, onChangeBaseline, al
           <span className="num" style={{ color: 'var(--ink-2)' }}>{D.fmtStep(ckpt.step)}</span>
         </span>
       </div>
-      <span className="tag" style={{ flex: '0 0 auto' }}>⊕ {pinnedCount} pinned</span>
-      <select
+            <select
         className="dropdown"
         value={diffBaselineName || ''}
         onChange={(e) => onChangeBaseline(e.target.value || null)}
         title="hyperparam diff baseline"
-        style={{ font: '500 11.5px var(--ui)', flex: '0 0 auto', maxWidth: 200 }}
+        style={{ font: '500 var(--t-sm) var(--ui)', flex: '0 0 auto', maxWidth: 180, padding: '6px 10px', height: 34 }}
       >
-        <option value="">no diff baseline</option>
-        {allRuns.map(r => (
-          <option key={r.id} value={r.name}>diff vs {r.name}</option>
+        <option value="">no baseline</option>
+        {pinnedRuns.filter(r => r.id !== run.id).map(r => (
+          <option key={r.id} value={r.name}>vs {r.name}</option>
         ))}
       </select>
-      <button className="btn icon" title="share" style={{ flex: '0 0 auto' }}>↗</button>
-      <button className="btn solid" style={{ flex: '0 0 auto' }}>＋ new run</button>
+      <button
+        className="btn icon"
+        onClick={onToggleDark}
+        title={darkMode ? 'switch to light mode' : 'switch to dark mode'}
+        style={{ flex: '0 0 auto', width: 34, height: 34 }}
+      >
+        {darkMode ? <IconSun /> : <IconMoon />}
+      </button>
     </div>
   );
 }
@@ -43,7 +73,7 @@ function CkptNav({ run, ckpt, onSelectCkpt }) {
   const prev = () => idx > 0 && onSelectCkpt(run.checkpoints[idx - 1].step);
   const next = () => idx < total - 1 && onSelectCkpt(run.checkpoints[idx + 1].step);
   return (
-    <div className="row border-b" style={{ padding: '10px 16px', gap: 12, flex: '0 0 auto', background: 'var(--paper-warm)' }}>
+    <div className="row border-b" style={{ padding: '14px 16px', gap: 12, flex: '0 0 auto', background: 'var(--paper-warm)' }}>
       <span className="label-eyebrow">Checkpoint</span>
       <span className="num strong" style={{ fontSize: 15, fontFamily: 'var(--mono)' }}>{D.fmtStep(ckpt.step)}</span>
       <span className="muted" style={{ fontSize: 11, whiteSpace: 'nowrap' }}>step {idx + 1} of {total}</span>
@@ -51,12 +81,12 @@ function CkptNav({ run, ckpt, onSelectCkpt }) {
         <button className="btn icon" onClick={prev} disabled={idx === 0} title="previous (J)">◀</button>
         <button className="btn icon" onClick={next} disabled={idx === total - 1} title="next (L)">▶</button>
       </div>
-      <div style={{ marginLeft: 6 }}>
+      <div style={{ flex: 1, minWidth: 0, marginLeft: 6 }}>
         <CheckpointSparkbar
           checkpoints={run.checkpoints}
           activeStep={ckpt.step}
           onSelect={onSelectCkpt}
-          width={360} height={32}
+          height={32}
         />
       </div>
       <span className="grow" />
@@ -100,16 +130,14 @@ function EpisodePicker({ ckpt, selected, onSelect }) {
           <span className="ep-meta">{r.length.toLocaleString()}f · r {r.return}</span>
         </button>
       ))}
-      <span className="muted" style={{ fontSize: 11, alignSelf: 'center', paddingLeft: 4 }}>
-        {ckpt.rollouts.length} rollouts at this ckpt
-      </span>
+      
     </div>
   );
 }
 
 // ── Frame-level chart pair (cumulative + metric) ─────────────────────
 const METRIC_OPTIONS = [
-  { key: 'value',       label: 'V̂(s_t)' },
+  { key: 'value',       label: 'V(s_t)' },
   { key: 'step_reward', label: 'step_reward' },
   { key: 'action_logp', label: 'action_logp' },
   { key: 'advantage',   label: 'advantage' },
@@ -118,53 +146,32 @@ const METRIC_OPTIONS = [
 ];
 
 function FrameChartPair({ focalRun, focalCkpt, focalRollout, frame, setFrame, pinnedRuns, metric, setMetric }) {
-  // Build "lines" for cumulative_return chart
-  const cumLines = useM(() => {
+  // ── Line builder — shared helper adds name/strokeColor/dash for tooltip ──
+  const buildLines = (sig) => {
     const out = [];
-    // Focal
     out.push({
-      runId: focalRun.id,
-      values: D.frameSignal(focalRun, focalCkpt, focalRollout, 'cumulative_return'),
-      isFocal: true,
-      color: 'var(--ink)',
+      runId: focalRun.id, name: focalRun.name,
+      values: D.frameSignal(focalRun, focalCkpt, focalRollout, sig),
+      isFocal: true, strokeColor: RUN_LINE_STYLES[0].color, dash: null, color: 'var(--ink)',
     });
-    // Each pinned run contributes its best rollout @ its latest ckpt
+    let gi = 0;
     for (const pr of pinnedRuns) {
       if (pr.id === focalRun.id) continue;
       const c = pr.checkpoints[pr.checkpoints.length - 1];
       const ro = c.rollouts.find(r => r.kind === 'best') || c.rollouts[0];
+      const ls = RUN_LINE_STYLES[gi + 1] || RUN_LINE_STYLES[RUN_LINE_STYLES.length - 1];
       out.push({
-        runId: pr.id,
-        values: D.frameSignal(pr, c, ro, 'cumulative_return'),
-        isFocal: false,
-        color: '',
+        runId: pr.id, name: pr.name,
+        values: D.frameSignal(pr, c, ro, sig),
+        isFocal: false, strokeColor: ls.color, dash: ls.dash, color: '',
       });
+      gi++;
     }
     return out;
-  }, [focalRun, focalCkpt, focalRollout, pinnedRuns]);
+  };
 
-  // Build lines for metric chart
-  const metricLines = useM(() => {
-    const out = [];
-    out.push({
-      runId: focalRun.id,
-      values: D.frameSignal(focalRun, focalCkpt, focalRollout, metric),
-      isFocal: true,
-      color: 'var(--ink)',
-    });
-    for (const pr of pinnedRuns) {
-      if (pr.id === focalRun.id) continue;
-      const c = pr.checkpoints[pr.checkpoints.length - 1];
-      const ro = c.rollouts.find(r => r.kind === 'best') || c.rollouts[0];
-      out.push({
-        runId: pr.id,
-        values: D.frameSignal(pr, c, ro, metric),
-        isFocal: false,
-        color: '',
-      });
-    }
-    return out;
-  }, [focalRun, focalCkpt, focalRollout, pinnedRuns, metric]);
+  const cumLines    = useM(() => buildLines('cumulative_return'), [focalRun, focalCkpt, focalRollout, pinnedRuns]);
+  const metricLines = useM(() => buildLines(metric),              [focalRun, focalCkpt, focalRollout, pinnedRuns, metric]);
 
   const cumAtCursor   = cumLines[0]?.values?.[Math.min(frame, cumLines[0].values.length - 1)];
   const metricAtCursor = metricLines[0]?.values?.[Math.min(frame, metricLines[0].values.length - 1)];
@@ -173,15 +180,15 @@ function FrameChartPair({ focalRun, focalCkpt, focalRollout, frame, setFrame, pi
   const ghostsCount = cumLines.length - 1;
 
   return (
-    <div className="row gap-3" style={{ padding: '10px 16px 6px' }}>
+    <div className="row gap-3" style={{ padding: '14px 16px 10px' }}>
       <FrameLevelChart
         title="cumulative_return"
-        label={ghostsCount > 0 ? `─ focal · ┄ ${ghostsCount} ghost${ghostsCount > 1 ? 's' : ''}` : '─ focal'}
+        label={`- ${cumLines.length} pinned runs`}
         lines={cumLines}
         frame={frame}
         focalLength={focalRollout.length}
         setFrame={setFrame}
-        height={148}
+        height={160}
         valueAtCursor={cumAtCursor}
       />
       <div className="col" style={{ flex: 1, minWidth: 0 }}>
@@ -204,7 +211,7 @@ function FrameChartPair({ focalRun, focalCkpt, focalRollout, frame, setFrame, pi
           frame={frame}
           focalLength={focalRollout.length}
           setFrame={setFrame}
-          height={148}
+          height={160}
         />
       </div>
     </div>
@@ -212,8 +219,9 @@ function FrameChartPair({ focalRun, focalCkpt, focalRollout, frame, setFrame, pi
 }
 
 // Bare version (no header) — used when the parent renders its own title row
-function FrameLevelChartBare({ lines, frame, focalLength, setFrame, height = 148 }) {
+function FrameLevelChartBare({ lines, frame, focalLength, setFrame, height = 160 }) {
   const svgRef = React.useRef(null);
+  const [hover, setHover] = useSt(null); // { frame: int, pct: float 0-1 }
   const w = 480;
   const h = height;
   const padL = 32, padR = 8, padT = 8, padB = 18;
@@ -247,9 +255,19 @@ function FrameLevelChartBare({ lines, frame, focalLength, setFrame, height = 148
     setFrame(f);
   };
 
+  const onHover = (e) => {
+    if (!svgRef.current) return;
+    const rect = svgRef.current.getBoundingClientRect();
+    const pct = (e.clientX - rect.left) / rect.width;
+    const xVB = pct * w;
+    const f = Math.max(0, Math.min(xMax - 1, Math.round(((xVB - padL) / innerW) * xMax)));
+    setHover({ frame: f, pct });
+  };
+
   const fmt = (v) => Math.abs(v) >= 100 ? v.toFixed(0) : (Math.abs(v) >= 10 ? v.toFixed(1) : v.toFixed(2));
 
   return (
+    <div style={{ position: 'relative' }}>
     <div className="card" style={{ borderRadius: 3 }}>
       <svg
         ref={svgRef}
@@ -257,7 +275,7 @@ function FrameLevelChartBare({ lines, frame, focalLength, setFrame, height = 148
         viewBox={`0 0 ${w} ${h}`}
         width="100%" height={h}
         preserveAspectRatio="none"
-        style={{ cursor: 'col-resize', display: 'block' }}
+        style={{ cursor: 'col-resize', display: 'block', height: 'clamp(160px, calc(13vw + 55px), 350px)' }}
         onMouseDown={(e) => {
           onPointer(e);
           const move = (ev) => onPointer(ev);
@@ -268,6 +286,8 @@ function FrameLevelChartBare({ lines, frame, focalLength, setFrame, height = 148
           window.addEventListener('mousemove', move);
           window.addEventListener('mouseup', up);
         }}
+        onMouseMove={onHover}
+        onMouseLeave={() => setHover(null)}
       >
         {yTicks.map((v, i) => (
           <g key={i}>
@@ -276,7 +296,7 @@ function FrameLevelChartBare({ lines, frame, focalLength, setFrame, height = 148
           </g>
         ))}
         {yLo < 0 && yHi > 0 && (
-          <line x1={padL} y1={yScale(0)} x2={w - padR} y2={yScale(0)} stroke="rgba(28,24,19,.25)" />
+          <line x1={padL} y1={yScale(0)} x2={w - padR} y2={yScale(0)} stroke="var(--chart-zero-stroke)" strokeWidth="0.8" />
         )}
         <line x1={padL} y1={padT + innerH} x2={w - padR} y2={padT + innerH} className="axis" />
         {xTicks.map((f, i) => (
@@ -303,6 +323,15 @@ function FrameLevelChartBare({ lines, frame, focalLength, setFrame, height = 148
         {lines.filter(l => l.isFocal).map((ln) => (
           <path key={ln.runId} d={buildPath(ln.values, xScale, yScale, 2)} className="focal" />
         ))}
+        {/* Hover crosshair */}
+        {hover != null && (
+          <line
+            x1={xScale(hover.frame)} y1={padT}
+            x2={xScale(hover.frame)} y2={padT + innerH}
+            stroke="var(--ink-3)" strokeWidth="0.7" strokeDasharray="2 3"
+            style={{ pointerEvents: 'none' }}
+          />
+        )}
         {focalLength > 0 && (
           <g>
             <line x1={xScale(frame)} y1={padT} x2={xScale(frame)} y2={padT + innerH} className="playhead" />
@@ -310,6 +339,10 @@ function FrameLevelChartBare({ lines, frame, focalLength, setFrame, height = 148
           </g>
         )}
       </svg>
+    </div>
+    {hover != null && (
+      <ChartTooltip lines={lines} hoverFrame={hover.frame} hoverX={hover.pct} />
+    )}
     </div>
   );
 }
@@ -345,18 +378,13 @@ function LossStrip({ run, ckpt }) {
   };
 
   return (
-    <div className="col border-t" style={{ flex: '0 0 auto' }}>
+    <div className="col border-t" style={{ flex: '0 0 auto', padding: '0 16px' }}>
       <div className="row" style={{ alignItems: 'stretch' }}>
         <LossChart title="policy_loss" values={losses.policy_loss} atCkptValue={valAt(losses.policy_loss).toFixed(3)} width={300} height={78} ckptStepFrac={ckptStepFrac} />
         <div className="hr-v" />
         <LossChart title="value_loss" values={losses.value_loss} atCkptValue={valAt(losses.value_loss).toFixed(3)} width={300} height={78} ckptStepFrac={ckptStepFrac} />
         <div className="hr-v" />
         <LossChart title="entropy" values={losses.entropy} atCkptValue={valAt(losses.entropy).toFixed(3)} width={300} height={78} ckptStepFrac={ckptStepFrac} />
-      </div>
-      <div className="row border-t" style={{ padding: '4px 14px', fontSize: 10.5, color: 'var(--ink-3)' }}>
-        <span className="italic" style={{ fontFamily: 'var(--display)' }}>↳ continuous train metrics — vertical mark at active ckpt step</span>
-        <span className="grow" />
-        <a href="#" style={{ color: 'var(--ink-3)', textDecoration: 'underline' }}>open in Tensorboard ↗</a>
       </div>
     </div>
   );

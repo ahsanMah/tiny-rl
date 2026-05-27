@@ -1,6 +1,6 @@
 // hifi/charts.jsx — interactive chart suite
 
-const { useMemo, useRef, useCallback: useCB } = React;
+const { useMemo, useRef, useCallback: useCB, useState: useSt } = React;
 
 // ── Path helpers ─────────────────────────────────────────────────────
 // Build a polyline SVG path with optional decimation for perf.
@@ -20,6 +20,60 @@ function buildPath(values, xScale, yScale, decim = 1) {
 // Run pin → ghost class index (matches CSS --run-N)
 const GHOST_CLASS = { 0: 'ghost-1', 1: 'ghost-2', 2: 'ghost-3' };
 
+// ── Hover tooltip (shared by FrameLevelChart + FrameLevelChartBare) ──
+function ChartTooltip({ lines, hoverFrame, hoverX }) {
+  const fmt = (v) => {
+    if (v == null || isNaN(v)) return '–';
+    if (Math.abs(v) >= 100) return v.toFixed(0);
+    if (Math.abs(v) >= 10)  return v.toFixed(1);
+    return v.toFixed(2);
+  };
+  const anchor = hoverX > 0.55
+    ? { right: `calc(${((1 - hoverX) * 100).toFixed(1)}% + 8px)` }
+    : { left:  `calc(${(hoverX       * 100).toFixed(1)}% + 8px)` };
+  return (
+    <div style={{
+      position: 'absolute', top: 8, pointerEvents: 'none', zIndex: 20,
+      background: 'var(--paper-warm)', border: '1px solid var(--hairline)',
+      borderRadius: 6, padding: '6px 10px', minWidth: 150,
+      boxShadow: '0 3px 14px rgba(0,0,0,0.30)',
+      ...anchor,
+    }}>
+      <div style={{ fontSize: 10, color: 'var(--ink-3)', marginBottom: 5,
+                    fontFamily: 'var(--mono)', letterSpacing: '0.03em' }}>
+        frame {hoverFrame}
+      </div>
+      {lines.map((ln) => {
+        const val = ln.values[Math.min(hoverFrame, ln.values.length - 1)];
+        return (
+          <div key={ln.runId} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3 }}>
+            <svg width={18} height={8} viewBox="0 0 18 8"
+                 style={{ flexShrink: 0, display: 'block', overflow: 'visible' }}>
+              <line x1={1} y1={4} x2={17} y2={4}
+                stroke={ln.strokeColor || (ln.isFocal ? 'var(--ink)' : 'var(--ink-3)')}
+                strokeWidth={ln.isFocal ? 2 : 1.4}
+                strokeDasharray={ln.dash || undefined}
+                strokeLinecap="round"
+              />
+            </svg>
+            <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                           color: 'var(--ink-2)', maxWidth: 104, fontSize: 11,
+                           fontFamily: 'var(--ui)' }}>
+              {ln.name}
+            </span>
+            <span style={{ fontFamily: 'var(--mono)', fontSize: 11,
+                           fontWeight: ln.isFocal ? 600 : 400,
+                           color: ln.isFocal ? 'var(--accent)' : 'var(--ink)',
+                           flexShrink: 0 }}>
+              {fmt(val)}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 // ── Frame-level chart (cumulative_return or metric) ──────────────────
 // Each comparison line is: { run, ckpt, rollout, color, isFocal }.
 function FrameLevelChart({
@@ -27,6 +81,7 @@ function FrameLevelChart({
   yLabel, yMin, yMax, metric, valueAtCursor,
 }) {
   const svgRef = useRef(null);
+  const [hover, setHover] = useSt(null); // { frame: int, pct: float 0-1 }
   const w = 480;
   const h = height;
   const padL = 32, padR = 8, padT = 8, padB = 18;
@@ -88,6 +143,15 @@ function FrameLevelChart({
     return v.toFixed(2);
   };
 
+  const onHover = (e) => {
+    if (!svgRef.current) return;
+    const rect = svgRef.current.getBoundingClientRect();
+    const pct = (e.clientX - rect.left) / rect.width;
+    const xVB = pct * w;
+    const f = Math.max(0, Math.min(xMax - 1, Math.round(((xVB - padL) / innerW) * xMax)));
+    setHover({ frame: f, pct });
+  };
+
   return (
     <div className="col" style={{ minWidth: 0, flex: 1 }}>
       {/* Header */}
@@ -101,6 +165,7 @@ function FrameLevelChart({
           </span>
         )}
       </div>
+      <div style={{ position: 'relative' }}>
       <div className="card" style={{ borderRadius: 3, padding: 0 }}>
         <svg
           ref={svgRef}
@@ -119,7 +184,9 @@ function FrameLevelChart({
             window.addEventListener('mousemove', move);
             window.addEventListener('mouseup', up);
           }}
-          style={{ cursor: 'col-resize', display: 'block' }}
+          onMouseMove={onHover}
+          onMouseLeave={() => setHover(null)}
+          style={{ cursor: 'col-resize', display: 'block', height: 'clamp(148px, calc(13vw + 55px), 280px)' }}
         >
           {/* Y gridlines + labels */}
           {yTicks.map((v, i) => (
@@ -130,7 +197,7 @@ function FrameLevelChart({
           ))}
           {/* zero line emphasis if range straddles 0 */}
           {yLo < 0 && yHi > 0 && (
-            <line x1={padL} y1={yScale(0)} x2={w - padR} y2={yScale(0)} stroke="rgba(28,24,19,.25)" strokeWidth="0.8" />
+            <line x1={padL} y1={yScale(0)} x2={w - padR} y2={yScale(0)} stroke="rgba(255,255,255,.18)" strokeWidth="0.8" />
           )}
           {/* X axis */}
           <line x1={padL} y1={padT + innerH} x2={w - padR} y2={padT + innerH} className="axis" />
@@ -138,12 +205,12 @@ function FrameLevelChart({
             <text key={i} x={xScale(f) - 8} y={h - 4} className="axis-text">{f >= 1000 ? `${(f/1000).toFixed(f % 1000 === 0 ? 0 : 1)}k` : f}</text>
           ))}
 
-          {/* Ghost lines (drawn first so focal stays on top) */}
+          {/* Area fill + ghost lines (drawn first so focal stays on top) */}
           {lines.filter(l => !l.isFocal).map((ln, i) => {
             const cls = GHOST_CLASS[i % 3];
             return (
               <g key={ln.runId}>
-                <path d={buildPath(ln.values, xScale, yScale, 3)} className={`chart-svg ${cls}`}
+                <path d={buildPath(ln.values, xScale, yScale, 3)} className={cls}
                   style={{ stroke: ln.color }} />
                 {/* End marker */}
                 <line
@@ -156,19 +223,53 @@ function FrameLevelChart({
               </g>
             );
           })}
-          {/* Focal */}
-          {lines.filter(l => l.isFocal).map((ln) => (
-            <path key={ln.runId} d={buildPath(ln.values, xScale, yScale, 2)} className="focal" />
-          ))}
+          {/* Focal — area fill then line */}
+          {lines.filter(l => l.isFocal).map((ln) => {
+            const baseline = padT + innerH;
+            const pts = [];
+            for (let i = 0; i < ln.values.length; i += 2) {
+              pts.push([xScale(i), yScale(ln.values[i])]);
+            }
+            const lastI = ln.values.length - 1;
+            if (lastI % 2 !== 0) pts.push([xScale(lastI), yScale(ln.values[lastI])]);
+            const areaD = pts.length === 0 ? '' :
+              `M ${pts[0][0].toFixed(1)},${baseline} L ${pts.map(p => `${p[0].toFixed(1)},${p[1].toFixed(2)}`).join(' L ')} L ${pts[pts.length-1][0].toFixed(1)},${baseline} Z`;
+            return (
+              <g key={ln.runId}>
+                <defs>
+                  <linearGradient id="focalFill" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%"   stopColor="var(--accent)" stopOpacity="0.22" />
+                    <stop offset="100%" stopColor="var(--accent)" stopOpacity="0" />
+                  </linearGradient>
+                </defs>
+                <path d={areaD} fill="url(#focalFill)" />
+                <path d={buildPath(ln.values, xScale, yScale, 2)} className="focal" />
+              </g>
+            );
+          })}
 
+          {/* Hover crosshair */}
+          {hover != null && (
+            <line
+              x1={xScale(hover.frame)} y1={padT}
+              x2={xScale(hover.frame)} y2={padT + innerH}
+              stroke="var(--ink-3)" strokeWidth="0.7" strokeDasharray="2 3"
+              style={{ pointerEvents: 'none' }}
+            />
+          )}
           {/* Playhead */}
           {focalLength > 0 && (
             <g>
               <line x1={xScale(frame)} y1={padT} x2={xScale(frame)} y2={padT + innerH} className="playhead" />
-              <circle cx={xScale(frame)} cy={padT + innerH - 6} r="3" fill="var(--accent)" />
+              <circle cx={xScale(frame)} cy={padT + innerH - 6} r="3" fill="var(--accent)"
+                filter="drop-shadow(0 0 3px var(--accent))" />
             </g>
           )}
         </svg>
+      </div>
+      {hover != null && (
+        <ChartTooltip lines={lines} hoverFrame={hover.frame} hoverX={hover.pct} />
+      )}
       </div>
     </div>
   );
@@ -217,47 +318,72 @@ function LossChart({ title, values, atCkptValue, width, height = 80, ckptStepFra
 }
 
 // ── Checkpoint sparkbar ──────────────────────────────────────────────
-function CheckpointSparkbar({ checkpoints, activeStep, onSelect, width = 360, height = 32 }) {
-  const w = width;
+function CheckpointSparkbar({ checkpoints, activeStep, onSelect, height = 32 }) {
+  // Use a fixed internal coordinate width for maths; the SVG renders at 100% of its container.
+  const w = 360;
   const h = height;
-  const bw = (w - 4) / checkpoints.length - 2;
+  const n = checkpoints.length;
+  const bw = Math.max(2, (w - 4) / n - 2);
+  const minMean = Math.min(...checkpoints.map(c => c.mean));
   const maxMean = Math.max(...checkpoints.map(c => c.mean), 1);
+  // Normalise against the actual range so early low-reward bars are still visible
+  const range = Math.max(maxMean - Math.min(minMean, 0), 1);
 
   return (
-    <div style={{ display: 'flex', alignItems: 'center' }}>
-      <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} style={{ display: 'block' }}>
-        <line x1={0} y1={h - 1} x2={w} y2={h - 1} stroke="var(--hairline)" />
-        {checkpoints.map((c, i) => {
-          const x = 2 + i * (bw + 2);
-          const bh = Math.max(2, (c.mean / maxMean) * (h - 6));
-          const active = c.step === activeStep;
-          return (
-            <g key={c.step} style={{ cursor: 'pointer' }} onClick={() => onSelect(c.step)}>
-              {/* Hover hit area */}
-              <rect x={x - 1} y={0} width={bw + 2} height={h} fill="transparent" />
-              <rect
-                x={x} y={h - 2 - bh}
-                width={bw} height={bh}
-                fill={active ? 'var(--accent)' : 'var(--ink)'}
-                opacity={active ? 1 : (c.isDip ? 0.42 : 0.55)}
+    <svg
+      viewBox={`0 0 ${w} ${h}`}
+      width="100%" height={h}
+      preserveAspectRatio="none"
+      style={{ display: 'block', cursor: 'pointer', overflow: 'visible' }}
+    >
+      {/* Baseline */}
+      <line x1={0} y1={h - 1} x2={w} y2={h - 1} stroke="var(--hairline)" strokeWidth="1" />
+
+      {checkpoints.map((c, i) => {
+        const x = 2 + i * (bw + 2);
+        const bh = Math.max(2, ((c.mean - Math.min(minMean, 0)) / range) * (h - 8));
+        const active = c.step === activeStep;
+        return (
+          <g key={c.step} onClick={() => onSelect(c.step)}>
+            {/* Full-height transparent hit area */}
+            <rect x={x - 1} y={0} width={bw + 2} height={h} fill="transparent" />
+            {/* Bar */}
+            <rect
+              x={x} y={h - 2 - bh}
+              width={bw} height={bh}
+              rx="1"
+              fill={active ? 'var(--accent)' : 'var(--ink)'}
+              opacity={active ? 1 : (c.isDip ? 0.35 : 0.5)}
+            />
+            {/* Active indicator — small dot above bar instead of triangle */}
+            {active && (
+              <circle
+                cx={x + bw / 2} cy={h - 4 - bh}
+                r="2.5"
+                fill="var(--accent)"
               />
-              {active && (
-                <polygon
-                  points={`${x + bw / 2 - 3},0 ${x + bw / 2 + 3},0 ${x + bw / 2},4`}
-                  fill="var(--accent)"
-                />
-              )}
-              <title>{`ckpt ${D.fmtStep(c.step)} · μ ${c.mean}`}</title>
-            </g>
-          );
-        })}
-      </svg>
-    </div>
+            )}
+            <title>{`ckpt ${D.fmtStep(c.step)} · μ ${c.mean} ± ${c.std}`}</title>
+          </g>
+        );
+      })}
+    </svg>
   );
 }
 
+// ── Shared run line-style table ──────────────────────────────────────
+// Slot 0 = focused (solid ink). Slots 1-3 match ghost-1/2/3 CSS classes.
+// Used by both sparklines (left rail) and chart ghost curves.
+const RUN_LINE_STYLES = [
+  { color: 'var(--ink)',   dash: null,    width: 1.6 }, // 0 focused
+  { color: 'var(--run-2)', dash: '4 2',  width: 1.4 }, // 1 ghost-1
+  { color: 'var(--run-3)', dash: '6 3',  width: 1.4 }, // 2 ghost-2
+  { color: 'var(--run-4)', dash: '2 2',  width: 1.4 }, // 3 ghost-3
+];
+const RUN_LINE_DEFAULT = { color: 'var(--ink-4)', dash: null, width: 0.0 }; // unpinned
+
 // ── Sparkline (tiny chart for runs list) ─────────────────────────────
-function Sparkline({ values, width = 64, height = 16, color = 'var(--ink-2)' }) {
+function Sparkline({ values, width = 64, height = 16, color = 'var(--ink-2)', strokeDasharray = null, strokeWidth = 1 }) {
   const w = width;
   const h = height;
   if (!values || values.length === 0) return null;
@@ -272,7 +398,8 @@ function Sparkline({ values, width = 64, height = 16, color = 'var(--ink-2)' }) 
   }
   return (
     <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} style={{ display: 'block' }}>
-      <path d={d} stroke={color} strokeWidth="1" fill="none" />
+      <path d={d} stroke={color} strokeWidth={strokeWidth} fill="none"
+            strokeDasharray={strokeDasharray || undefined} />
     </svg>
   );
 }
@@ -294,7 +421,7 @@ function ActionBars({ probs, labels, width = 246, height = 64 }) {
             <rect x={i * (bw + gap)} y={h - 12 - bh} width={bw} height={bh}
                   fill={i === probs.indexOf(max) ? 'var(--accent)' : 'var(--ink)'} />
             <text x={i * (bw + gap) + bw / 2 - 4} y={h - 2}
-                  style={{ font: '9px var(--mono)', fill: 'var(--ink-3)' }}>{labels[i]}</text>
+                  style={{ font: '11px var(--mono)', fill: 'var(--ink-3)' }}>{labels[i]}</text>
           </g>
         );
       })}
@@ -334,7 +461,7 @@ function TdErrorStrip({ values, frame, totalFrames, width = 246, height = 38 }) 
             y={2}
             width={cw - 0.5}
             height={h - 4}
-            fill={`rgba(28,24,19,${(alpha * 0.85).toFixed(2)})`}
+            fill={`rgba(237,232,223,${(alpha * 0.75).toFixed(2)})`}
           />
         );
       })}
@@ -350,6 +477,7 @@ function TdErrorStrip({ values, frame, totalFrames, width = 246, height = 38 }) 
   );
 }
 
+window.ChartTooltip = ChartTooltip;
 window.FrameLevelChart = FrameLevelChart;
 window.LossChart = LossChart;
 window.CheckpointSparkbar = CheckpointSparkbar;
@@ -357,3 +485,5 @@ window.Sparkline = Sparkline;
 window.ActionBars = ActionBars;
 window.TdErrorStrip = TdErrorStrip;
 window.buildPath = buildPath;
+window.RUN_LINE_STYLES = RUN_LINE_STYLES;
+window.RUN_LINE_DEFAULT = RUN_LINE_DEFAULT;

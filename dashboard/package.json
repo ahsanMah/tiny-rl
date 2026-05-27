@@ -1,0 +1,7 @@
+{
+  "name": "rl-experiment-tracker",
+  "version": "1.0.0",
+  "scripts": {
+    "start": "npx browser-sync start --server --port 8080 --startPath 'RL Tracker.html' --files 'hifi/**/*' --no-notify"
+  }
+}
