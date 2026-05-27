@@ -30,7 +30,7 @@ function IconMoon({ size = 15, strokeWidth = 1.8 }) {
 // ── Top breadcrumb / actions bar ─────────────────────────────────────
 function TopBar({ run, ckpt, pinnedCount, diffBaselineName, onChangeBaseline, allRuns, pinnedRuns, darkMode, onToggleDark }) {
   return (
-    <div className="row border-b" style={{ padding: '8px 16px', gap: 10, height: 44, flex: '0 0 auto', minWidth: 0 }}>
+    <div className="row border-b" style={{ padding: '8px 16px', gap: 10, height: 68, flex: '0 0 auto', minWidth: 0 }}>
       <div className="doc-title" style={{ flex: '1 1 auto', minWidth: 0 }}>
         <span className="crumb">
           <span style={{ color: 'var(--ink)' }} className="strong">tracker</span>
@@ -47,7 +47,7 @@ function TopBar({ run, ckpt, pinnedCount, diffBaselineName, onChangeBaseline, al
         value={diffBaselineName || ''}
         onChange={(e) => onChangeBaseline(e.target.value || null)}
         title="hyperparam diff baseline"
-        style={{ font: '500 11.5px var(--ui)', flex: '0 0 auto', maxWidth: 200 }}
+        style={{ font: '500 var(--t-sm) var(--ui)', flex: '0 0 auto', maxWidth: 180, padding: '6px 10px', height: 34 }}
       >
         <option value="">no baseline</option>
         {pinnedRuns.filter(r => r.id !== run.id).map(r => (
@@ -73,7 +73,7 @@ function CkptNav({ run, ckpt, onSelectCkpt }) {
   const prev = () => idx > 0 && onSelectCkpt(run.checkpoints[idx - 1].step);
   const next = () => idx < total - 1 && onSelectCkpt(run.checkpoints[idx + 1].step);
   return (
-    <div className="row border-b" style={{ padding: '10px 16px', gap: 12, flex: '0 0 auto', background: 'var(--paper-warm)' }}>
+    <div className="row border-b" style={{ padding: '14px 16px', gap: 12, flex: '0 0 auto', background: 'var(--paper-warm)' }}>
       <span className="label-eyebrow">Checkpoint</span>
       <span className="num strong" style={{ fontSize: 15, fontFamily: 'var(--mono)' }}>{D.fmtStep(ckpt.step)}</span>
       <span className="muted" style={{ fontSize: 11, whiteSpace: 'nowrap' }}>step {idx + 1} of {total}</span>
@@ -81,12 +81,12 @@ function CkptNav({ run, ckpt, onSelectCkpt }) {
         <button className="btn icon" onClick={prev} disabled={idx === 0} title="previous (J)">◀</button>
         <button className="btn icon" onClick={next} disabled={idx === total - 1} title="next (L)">▶</button>
       </div>
-      <div style={{ marginLeft: 6 }}>
+      <div style={{ flex: 1, minWidth: 0, marginLeft: 6 }}>
         <CheckpointSparkbar
           checkpoints={run.checkpoints}
           activeStep={ckpt.step}
           onSelect={onSelectCkpt}
-          width={360} height={32}
+          height={32}
         />
       </div>
       <span className="grow" />
@@ -180,7 +180,7 @@ function FrameChartPair({ focalRun, focalCkpt, focalRollout, frame, setFrame, pi
   const ghostsCount = cumLines.length - 1;
 
   return (
-    <div className="row gap-3" style={{ padding: '10px 16px 6px' }}>
+    <div className="row gap-3" style={{ padding: '14px 16px 10px' }}>
       <FrameLevelChart
         title="cumulative_return"
         label={`- ${cumLines.length} pinned runs`}
@@ -188,7 +188,7 @@ function FrameChartPair({ focalRun, focalCkpt, focalRollout, frame, setFrame, pi
         frame={frame}
         focalLength={focalRollout.length}
         setFrame={setFrame}
-        height={148}
+        height={160}
         valueAtCursor={cumAtCursor}
       />
       <div className="col" style={{ flex: 1, minWidth: 0 }}>
@@ -211,7 +211,7 @@ function FrameChartPair({ focalRun, focalCkpt, focalRollout, frame, setFrame, pi
           frame={frame}
           focalLength={focalRollout.length}
           setFrame={setFrame}
-          height={148}
+          height={160}
         />
       </div>
     </div>
@@ -275,7 +275,7 @@ function FrameLevelChartBare({ lines, frame, focalLength, setFrame, height = 160
         viewBox={`0 0 ${w} ${h}`}
         width="100%" height={h}
         preserveAspectRatio="none"
-        style={{ cursor: 'col-resize', display: 'block' }}
+        style={{ cursor: 'col-resize', display: 'block', height: 'clamp(160px, calc(13vw + 55px), 350px)' }}
         onMouseDown={(e) => {
           onPointer(e);
           const move = (ev) => onPointer(ev);
@@ -378,7 +378,7 @@ function LossStrip({ run, ckpt }) {
   };
 
   return (
-    <div className="col border-t" style={{ flex: '0 0 auto' }}>
+    <div className="col border-t" style={{ flex: '0 0 auto', padding: '0 16px' }}>
       <div className="row" style={{ alignItems: 'stretch' }}>
         <LossChart title="policy_loss" values={losses.policy_loss} atCkptValue={valAt(losses.policy_loss).toFixed(3)} width={300} height={78} ckptStepFrac={ckptStepFrac} />
         <div className="hr-v" />
