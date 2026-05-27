@@ -37,6 +37,7 @@ class TrainConfig:
     train_steps: int = 1_000
     batch_size: int = 1
     learning_rate: float = 1e-3
+    ema_decay: float = 0.999
     log_every: int = 50
     save_dir: str | Path | None = None
     load_dir: str | None = None
@@ -135,14 +136,27 @@ class FlowMatchingTrainer:
         x1: mx.array,
         actions: mx.array,
         t: mx.array,
-    ) -> mx.array:
+        *,
+        return_recon_mse: bool = False,
+    ) -> mx.array | tuple[mx.array, mx.array]:
+        """Flow-matching loss at the given t. If ``return_recon_mse`` is True,
+        also returns the one-step x1-reconstruction MSE on the target frame
+        (``x1_pred = xt + (1 - t) * v_pred``). Skipped by default to keep
+        training fast.
+        """
         mask = make_final_frame_mask(x1)
         noise = self.sampling_fn(x1) * mask
         t_view = mx.reshape(t, (x1.shape[0], 1, 1, 1, 1)) * mask
         xt = (1.0 - t_view) * noise + t_view * x1 + (1 - mask) * x1
         target_velocity = mask * (x1 - noise)
         pred_velocity = model(xt, t, context=actions)
-        return mx.mean((pred_velocity[:, -1:] - target_velocity[:, -1:]) ** 2)
+        loss = mx.mean((pred_velocity[:, -1:] - target_velocity[:, -1:]) ** 2)
+        if not return_recon_mse:
+            return loss
+
+        x1_pred = xt[:, -1:] + (1.0 - t_view[:, -1:]) * pred_velocity[:, -1:]
+        recon_mse = mx.mean((x1_pred - x1[:, -1:]) ** 2)
+        return loss, recon_mse
 
     def loss(self, model: UNet3D, x1: mx.array, actions: mx.array) -> mx.array:
         t = mx.random.uniform(shape=(x1.shape[0],), low=0.0, high=1.0)
@@ -153,14 +167,24 @@ class FlowMatchingTrainer:
         batch: mx.array,
         actions: mx.array,
         timesteps: tuple[float, ...],
-    ) -> dict[float, float]:
-        metrics: dict[float, float] = {}
+    ) -> tuple[dict[float, float], dict[float, float]]:
+        """Per-timestep validation metrics: ``(losses, psnrs)``.
+
+        PSNR uses data range 2 since frames live in [-1, 1].
+        """
+        losses: dict[float, float] = {}
+        psnrs: dict[float, float] = {}
+        log10_max = 20.0 * float(mx.log10(mx.array(2.0)))
         for timestep in timesteps:
             t = mx.full((batch.shape[0],), timestep, dtype=batch.dtype)
-            loss = self._loss_at_t(self.model, batch, actions, t)
-            mx.eval(loss)
-            metrics[timestep] = float(loss)
-        return metrics
+            loss, recon_mse = self._loss_at_t(
+                self.model, batch, actions, t, return_recon_mse=True
+            )
+            psnr = log10_max - 10.0 * mx.log10(mx.maximum(recon_mse, 1e-12))
+            mx.eval(loss, psnr)
+            losses[timestep] = float(loss)
+            psnrs[timestep] = float(psnr)
+        return losses, psnrs
 
     def train_step(self, batch: mx.array, actions: mx.array) -> float:
         loss, grads = self.loss_and_grad(self.model, batch, actions)
@@ -437,11 +461,14 @@ def train_on_dataset(
                 val_actions,
                 min(train_config.batch_size * 4, int(val_videos.shape[0])),
             )
-            val_losses = trainer.eval_loss_by_timestep(
+            val_losses, val_psnrs = trainer.eval_loss_by_timestep(
                 val_batch, val_batch_actions, val_timesteps
             )
             avg_val_loss = sum(val_losses.values()) / len(val_losses)
-            val_report = f"avg_val_t={avg_val_loss:.4f}"
+            avg_val_psnr = sum(val_psnrs.values()) / len(val_psnrs)
+            val_report = (
+                f"avg_val_t={avg_val_loss:.4f} avg_val_psnr={avg_val_psnr:.2f}dB"
+            )
 
             print(
                 f"step={step:5d} steps/s={steps_per_sec:.2f} "
@@ -457,10 +484,11 @@ def train_on_dataset(
                     },
                 )
                 train_logger.log_validation_steps(step, val_losses)
+                train_logger.log_validation_psnrs(step, val_psnrs)
 
     if train_config.save_dir is not None:
         samples = sample_euler(
-            trainer.ema_model,
+            trainer.model,
             conditioning_clips=val_conditioning_clips[:, :-1],
             actions=val_conditioning_actions,
             num_steps=train_config.sample_steps,

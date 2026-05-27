@@ -44,6 +44,13 @@ class RLLogger:
                 f"Validation/Loss/t={float(timestep):.2f}", value, global_step
             )
 
+    def log_validation_psnrs(self, global_step: int, metrics: Dict[float, Any]):
+        """Logs validation x1-prediction PSNRs (dB) keyed by diffusion timestep."""
+        for timestep, value in metrics.items():
+            self.writer.add_scalar(
+                f"Validation/PSNR/t={float(timestep):.2f}", value, global_step
+            )
+
     def log_speed(self, global_step: int, steps_done: int, start_time: float):
         """
         Calculates and logs the Steps Per Second (SPS).
