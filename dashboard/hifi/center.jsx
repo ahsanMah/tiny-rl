@@ -17,7 +17,6 @@ function TopBar({ run, ckpt, pinnedCount, diffBaselineName, onChangeBaseline, al
           <span className="num" style={{ color: 'var(--ink-2)' }}>{D.fmtStep(ckpt.step)}</span>
         </span>
       </div>
-      <span className="tag" style={{ flex: '0 0 auto' }}>⊕ {pinnedCount} pinned</span>
       <select
         className="dropdown"
         value={diffBaselineName || ''}
@@ -25,9 +24,9 @@ function TopBar({ run, ckpt, pinnedCount, diffBaselineName, onChangeBaseline, al
         title="hyperparam diff baseline"
         style={{ font: '500 11.5px var(--ui)', flex: '0 0 auto', maxWidth: 200 }}
       >
-        <option value="">no diff baseline</option>
-        {allRuns.map(r => (
-          <option key={r.id} value={r.name}>diff vs {r.name}</option>
+        <option value="">no baseline</option>
+        {pinnedRuns.filter(r => r.id !== run.id).map(r => (
+          <option key={r.id} value={r.name}>vs {r.name}</option>
         ))}
       </select>
       <button className="btn icon" title="share" style={{ flex: '0 0 auto' }}>↗</button>
@@ -100,16 +99,14 @@ function EpisodePicker({ ckpt, selected, onSelect }) {
           <span className="ep-meta">{r.length.toLocaleString()}f · r {r.return}</span>
         </button>
       ))}
-      <span className="muted" style={{ fontSize: 11, alignSelf: 'center', paddingLeft: 4 }}>
-        {ckpt.rollouts.length} rollouts at this ckpt
-      </span>
+
     </div>
   );
 }
 
 // ── Frame-level chart pair (cumulative + metric) ─────────────────────
 const METRIC_OPTIONS = [
-  { key: 'value',       label: 'V̂(s_t)' },
+  { key: 'value',       label: 'V(s_t)' },
   { key: 'step_reward', label: 'step_reward' },
   { key: 'action_logp', label: 'action_logp' },
   { key: 'advantage',   label: 'advantage' },
@@ -152,17 +149,17 @@ function FrameChartPair({ focalRun, focalCkpt, focalRollout, frame, setFrame, pi
       isFocal: true,
       color: 'var(--ink)',
     });
-    for (const pr of pinnedRuns) {
+        for (const pr of pinnedRuns) {
       if (pr.id === focalRun.id) continue;
       const c = pr.checkpoints[pr.checkpoints.length - 1];
       const ro = c.rollouts.find(r => r.kind === 'best') || c.rollouts[0];
-      out.push({
+            out.push({
         runId: pr.id,
         values: D.frameSignal(pr, c, ro, metric),
         isFocal: false,
         color: '',
       });
-    }
+          }
     return out;
   }, [focalRun, focalCkpt, focalRollout, pinnedRuns, metric]);
 
@@ -214,7 +211,7 @@ function FrameChartPair({ focalRun, focalCkpt, focalRollout, frame, setFrame, pi
 // Bare version (no header) — used when the parent renders its own title row
 function FrameLevelChartBare({ lines, frame, focalLength, setFrame, height = 148 }) {
   const svgRef = React.useRef(null);
-  const w = 480;
+    const w = 480;
   const h = height;
   const padL = 32, padR = 8, padT = 8, padB = 18;
   const innerW = w - padL - padR;
@@ -250,7 +247,7 @@ function FrameLevelChartBare({ lines, frame, focalLength, setFrame, height = 148
   const fmt = (v) => Math.abs(v) >= 100 ? v.toFixed(0) : (Math.abs(v) >= 10 ? v.toFixed(1) : v.toFixed(2));
 
   return (
-    <div className="card" style={{ borderRadius: 3 }}>
+        <div className="card" style={{ borderRadius: 3 }}>
       <svg
         ref={svgRef}
         className="chart-svg"
@@ -268,7 +265,7 @@ function FrameLevelChartBare({ lines, frame, focalLength, setFrame, height = 148
           window.addEventListener('mousemove', move);
           window.addEventListener('mouseup', up);
         }}
-      >
+              >
         {yTicks.map((v, i) => (
           <g key={i}>
             <line x1={padL} y1={yScale(v)} x2={w - padR} y2={yScale(v)} className="grid" />
@@ -303,7 +300,7 @@ function FrameLevelChartBare({ lines, frame, focalLength, setFrame, height = 148
         {lines.filter(l => l.isFocal).map((ln) => (
           <path key={ln.runId} d={buildPath(ln.values, xScale, yScale, 2)} className="focal" />
         ))}
-        {focalLength > 0 && (
+                {focalLength > 0 && (
           <g>
             <line x1={xScale(frame)} y1={padT} x2={xScale(frame)} y2={padT + innerH} className="playhead" />
             <circle cx={xScale(frame)} cy={padT + innerH - 6} r="3" fill="var(--accent)" />
@@ -311,7 +308,7 @@ function FrameLevelChartBare({ lines, frame, focalLength, setFrame, height = 148
         )}
       </svg>
     </div>
-  );
+      );
 }
 
 // ── Loss strip (3 small charts) ─────────────────────────────────────
@@ -352,11 +349,6 @@ function LossStrip({ run, ckpt }) {
         <LossChart title="value_loss" values={losses.value_loss} atCkptValue={valAt(losses.value_loss).toFixed(3)} width={300} height={78} ckptStepFrac={ckptStepFrac} />
         <div className="hr-v" />
         <LossChart title="entropy" values={losses.entropy} atCkptValue={valAt(losses.entropy).toFixed(3)} width={300} height={78} ckptStepFrac={ckptStepFrac} />
-      </div>
-      <div className="row border-t" style={{ padding: '4px 14px', fontSize: 10.5, color: 'var(--ink-3)' }}>
-        <span className="italic" style={{ fontFamily: 'var(--display)' }}>↳ continuous train metrics — vertical mark at active ckpt step</span>
-        <span className="grow" />
-        <a href="#" style={{ color: 'var(--ink-3)', textDecoration: 'underline' }}>open in Tensorboard ↗</a>
       </div>
     </div>
   );
