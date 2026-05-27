@@ -137,11 +137,11 @@ class FlowMatchingTrainer:
         t: mx.array,
         *,
         return_recon_mse: bool = False,
-    ) -> mx.array | tuple[mx.array, mx.array]:
+    ) -> mx.array | tuple[mx.array, mx.array, mx.array]:
         """Flow-matching loss at the given t. If ``return_recon_mse`` is True,
-        also returns the one-step x1-reconstruction MSE on the target frame
-        (``x1_pred = xt + (1 - t) * v_pred``). Skipped by default to keep
-        training fast.
+        also returns the one-step x1-reconstruction MSE and the prediction itself
+        (``x1_pred = xt + (1 - t) * v_pred``, shape ``(B, 1, H, W, C)``).
+        Skipped by default to keep training fast.
         """
         mask = make_final_frame_mask(x1)
         noise = self.sampling_fn(x1) * mask
@@ -155,7 +155,7 @@ class FlowMatchingTrainer:
 
         x1_pred = xt[:, -1:] + (1.0 - t_view[:, -1:]) * pred_velocity[:, -1:]
         recon_mse = mx.mean((x1_pred - x1[:, -1:]) ** 2)
-        return loss, recon_mse
+        return loss, recon_mse, x1_pred
 
     def loss(self, model: UNet3D, x1: mx.array, actions: mx.array) -> mx.array:
         t = mx.random.uniform(shape=(x1.shape[0],), low=0.0, high=1.0)
@@ -166,24 +166,28 @@ class FlowMatchingTrainer:
         batch: mx.array,
         actions: mx.array,
         timesteps: tuple[float, ...],
-    ) -> tuple[dict[float, float], dict[float, float]]:
-        """Per-timestep validation metrics: ``(losses, psnrs)``.
+    ) -> tuple[dict[float, float], dict[float, float], dict[float, mx.array]]:
+        """Per-timestep validation metrics: ``(losses, psnrs, preds)``.
 
         PSNR uses data range 2 since frames live in [-1, 1].
+        ``preds`` maps each timestep to the one-step x1 prediction
+        ``(B, 1, H, W, C)`` for that batch — useful for image logging.
         """
         losses: dict[float, float] = {}
         psnrs: dict[float, float] = {}
+        preds: dict[float, mx.array] = {}
         log10_max = 20.0 * float(mx.log10(mx.array(2.0)))
         for timestep in timesteps:
             t = mx.full((batch.shape[0],), timestep, dtype=batch.dtype)
-            loss, recon_mse = self._loss_at_t(
+            loss, recon_mse, x1_pred = self._loss_at_t(
                 self.model, batch, actions, t, return_recon_mse=True
             )
             psnr = log10_max - 10.0 * mx.log10(mx.maximum(recon_mse, 1e-12))
-            mx.eval(loss, psnr)
+            mx.eval(loss, psnr, x1_pred)
             losses[timestep] = float(loss)
             psnrs[timestep] = float(psnr)
-        return losses, psnrs
+            preds[timestep] = x1_pred
+        return losses, psnrs, preds
 
     def train_step(self, batch: mx.array, actions: mx.array) -> float:
         loss, grads = self.loss_and_grad(self.model, batch, actions)
@@ -384,6 +388,7 @@ def train_on_dataset(
     model_config: ModelConfig | None = None,
     train_config: TrainConfig | None = None,
     model: UNet3D | None = None,
+    sample_fps: float = 8.0,
 ):
     model_config = ModelConfig() if model_config is None else model_config
     train_config = TrainConfig() if train_config is None else train_config
@@ -460,7 +465,7 @@ def train_on_dataset(
                 val_actions,
                 min(train_config.batch_size * 4, int(val_videos.shape[0])),
             )
-            val_losses, val_psnrs = trainer.eval_loss_by_timestep(
+            val_losses, val_psnrs, val_preds = trainer.eval_loss_by_timestep(
                 val_batch, val_batch_actions, val_timesteps
             )
             avg_val_loss = sum(val_losses.values()) / len(val_losses)
@@ -484,6 +489,11 @@ def train_on_dataset(
                 )
                 train_logger.log_validation_steps(step, val_losses)
                 train_logger.log_validation_psnrs(step, val_psnrs)
+                train_logger.log_reconstructions(
+                    step,
+                    val_batch[:, -1],
+                    {t: p[:, 0] for t, p in val_preds.items()},
+                )
 
     if train_config.save_dir is not None:
         samples = sample_euler(
@@ -496,7 +506,7 @@ def train_on_dataset(
             samples,
             train_config.save_dir,
             max_clips=sample_count,
-            fps=train_config.preview_fps,
+            fps=sample_fps,
         )
         print(f"saved samples to: {train_config.save_dir}")
 

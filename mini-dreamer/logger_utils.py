@@ -1,3 +1,4 @@
+import datetime
 import os
 import time
 from typing import Any, Dict
@@ -20,35 +21,69 @@ class RLLogger:
             exp_name: Name of the experiment/algorithm
         """
         # Append a timestamp so multiple runs of the same experiment don't overwrite each other
-        self.run_name = f"{exp_name}/{int(time.time())}"
+        datestr = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        self.run_name = f"{exp_name}/{datestr}"
         self.writer = SummaryWriter(os.path.join(log_dir, self.run_name))
         print(f"Logging to {self.writer.logdir}")
 
     def log_episode(self, global_step: int, reward: float, length: int):
         """Logs episode-level metrics (how well the agent is doing)."""
-        self.writer.add_scalar("Rollout/Episode_Reward", reward, global_step)
-        self.writer.add_scalar("Rollout/Episode_Length", length, global_step)
+        self.writer.add_scalar("rollout/episode_reward", reward, global_step)
+        self.writer.add_scalar("rollout/episode_length", length, global_step)
 
     def log_train_metrics(self, global_step: int, metrics: Dict[str, Any]):
         """
         Logs a dictionary of training metrics (losses, entropy, lr, etc.).
-        Metrics will automatically be grouped under the 'Train/' prefix in TensorBoard.
+        Metrics will automatically be grouped under the 'train/' prefix in TensorBoard.
         """
         for key, value in metrics.items():
-            self.writer.add_scalar(f"Train/{key}", value, global_step)
+            self.writer.add_scalar(f"train/{key}", value, global_step)
 
     def log_validation_steps(self, global_step: int, metrics: Dict[float, Any]):
         """Logs validation losses keyed by diffusion timestep."""
         for timestep, value in metrics.items():
             self.writer.add_scalar(
-                f"Validation/Loss/t={float(timestep):.2f}", value, global_step
+                f"val_loss/t={float(timestep):.2f}", value, global_step
             )
 
     def log_validation_psnrs(self, global_step: int, metrics: Dict[float, Any]):
         """Logs validation x1-prediction PSNRs (dB) keyed by diffusion timestep."""
         for timestep, value in metrics.items():
             self.writer.add_scalar(
-                f"Validation/PSNR/t={float(timestep):.2f}", value, global_step
+                f"val_psnr/t={float(timestep):.2f}", value, global_step
+            )
+
+    def log_reconstructions(
+        self,
+        global_step: int,
+        x_true,
+        x_preds: Dict[float, Any],
+    ) -> None:
+        """Log ground-truth and x1-prediction images to TensorBoard.
+
+        Accepts any array-like supported by ``np.asarray`` (e.g. ``mlx.array``).
+
+        Args:
+            global_step: Current training step.
+            x1_true: ``(B, H, W, C)`` ground-truth frames in ``[-1, 1]``.
+            x1_preds: ``{timestep: (B, H, W, C)}`` one-step x1 predictions in
+                ``[-1, 1]``, keyed by the diffusion timestep they were evaluated at.
+        """
+
+        def _to_tb(arr) -> np.ndarray:
+            """Array-like ``(B, H, W, C)`` in ``[-1, 1]`` → ``(B, C, H, W)`` in ``[0, 1]``."""
+            arr = np.asarray(arr)
+            arr = np.clip((arr + 1.0) / 2.0, 0.0, 1.0).astype(np.float32)
+            if arr.shape[-1] == 1:
+                arr = np.repeat(arr, 3, axis=-1)  # broadcast grayscale → RGB
+            return arr.transpose(0, 3, 1, 2)  # (B, C, H, W)
+
+        self.writer.add_images(
+            "reconstruction/ground_truth", _to_tb(x_true), global_step
+        )
+        for t, pred in sorted(x_preds.items()):
+            self.writer.add_images(
+                f"reconstruction/pred_t={t:.2f}", _to_tb(pred), global_step
             )
 
     def log_speed(self, global_step: int, steps_done: int, start_time: float):
