@@ -183,7 +183,7 @@ function FrameChartPair({ focalRun, focalCkpt, focalRollout, frame, setFrame, pi
     <div className="row gap-3" style={{ padding: '10px 16px 6px' }}>
       <FrameLevelChart
         title="cumulative_return"
-        label={ghostsCount > 0 ? `─ focal · ┄ ${ghostsCount} ghost${ghostsCount > 1 ? 's' : ''}` : '─ focal'}
+        label={`- ${cumLines.length} pinned runs`}
         lines={cumLines}
         frame={frame}
         focalLength={focalRollout.length}
@@ -219,8 +219,9 @@ function FrameChartPair({ focalRun, focalCkpt, focalRollout, frame, setFrame, pi
 }
 
 // Bare version (no header) — used when the parent renders its own title row
-function FrameLevelChartBare({ lines, frame, focalLength, setFrame, height = 148 }) {
+function FrameLevelChartBare({ lines, frame, focalLength, setFrame, height = 160 }) {
   const svgRef = React.useRef(null);
+  const [hover, setHover] = useSt(null); // { frame: int, pct: float 0-1 }
   const w = 480;
   const h = height;
   const padL = 32, padR = 8, padT = 8, padB = 18;
@@ -254,10 +255,20 @@ function FrameLevelChartBare({ lines, frame, focalLength, setFrame, height = 148
     setFrame(f);
   };
 
+  const onHover = (e) => {
+    if (!svgRef.current) return;
+    const rect = svgRef.current.getBoundingClientRect();
+    const pct = (e.clientX - rect.left) / rect.width;
+    const xVB = pct * w;
+    const f = Math.max(0, Math.min(xMax - 1, Math.round(((xVB - padL) / innerW) * xMax)));
+    setHover({ frame: f, pct });
+  };
+
   const fmt = (v) => Math.abs(v) >= 100 ? v.toFixed(0) : (Math.abs(v) >= 10 ? v.toFixed(1) : v.toFixed(2));
 
   return (
-        <div className="card" style={{ borderRadius: 3 }}>
+    <div style={{ position: 'relative' }}>
+    <div className="card" style={{ borderRadius: 3 }}>
       <svg
         ref={svgRef}
         className="chart-svg"
@@ -275,7 +286,9 @@ function FrameLevelChartBare({ lines, frame, focalLength, setFrame, height = 148
           window.addEventListener('mousemove', move);
           window.addEventListener('mouseup', up);
         }}
-              >
+        onMouseMove={onHover}
+        onMouseLeave={() => setHover(null)}
+      >
         {yTicks.map((v, i) => (
           <g key={i}>
             <line x1={padL} y1={yScale(v)} x2={w - padR} y2={yScale(v)} className="grid" />
@@ -310,7 +323,16 @@ function FrameLevelChartBare({ lines, frame, focalLength, setFrame, height = 148
         {lines.filter(l => l.isFocal).map((ln) => (
           <path key={ln.runId} d={buildPath(ln.values, xScale, yScale, 2)} className="focal" />
         ))}
-                {focalLength > 0 && (
+        {/* Hover crosshair */}
+        {hover != null && (
+          <line
+            x1={xScale(hover.frame)} y1={padT}
+            x2={xScale(hover.frame)} y2={padT + innerH}
+            stroke="var(--ink-3)" strokeWidth="0.7" strokeDasharray="2 3"
+            style={{ pointerEvents: 'none' }}
+          />
+        )}
+        {focalLength > 0 && (
           <g>
             <line x1={xScale(frame)} y1={padT} x2={xScale(frame)} y2={padT + innerH} className="playhead" />
             <circle cx={xScale(frame)} cy={padT + innerH - 6} r="3" fill="var(--accent)" />
@@ -318,7 +340,11 @@ function FrameLevelChartBare({ lines, frame, focalLength, setFrame, height = 148
         )}
       </svg>
     </div>
-      );
+    {hover != null && (
+      <ChartTooltip lines={lines} hoverFrame={hover.frame} hoverX={hover.pct} />
+    )}
+    </div>
+  );
 }
 
 // ── Loss strip (3 small charts) ─────────────────────────────────────
