@@ -29,6 +29,46 @@ from unet import UNet3D
 from video_utils import frames_to_clips, save_clip_previews
 
 
+@dataclass(frozen=True)
+class EnvConfig:
+    env_id: str = "MiniGrid-Empty-8x8-v0"
+
+
+@dataclass(frozen=True)
+class DatasetConfig:
+    tile_size: int = 8
+    seed: int = 0
+    clip_length: int = 4
+    clip_stride: int | None = None
+    max_clips: int | None = None
+    preview_fps: float = 2.0
+    rollout_steps: int = 32
+    preview_dir: str | None = None
+    preview_clips: int = 4
+
+
+@dataclass(frozen=True)
+class GenerateConfig:
+    load_dir: str | None = None
+    save_dir: str | None = None
+    generate_new_frames: int = 32
+    generate_num_steps: int = 32
+    num_samples: int = 1
+
+
+_SECTION_DATACLASSES = {
+    "env": EnvConfig,
+    "dataset": DatasetConfig,
+    "model": ModelConfig,
+    "train": TrainConfig,
+    "generate": GenerateConfig,
+}
+CONFIG_SCHEMA = {
+    section: {f.name for f in fields(cls)}
+    for section, cls in _SECTION_DATACLASSES.items()
+}
+
+
 def rollout_minigrid_frames(
     env: gym.Env,
     *,
@@ -176,46 +216,7 @@ def generate_minigrid_video(
 def cli() -> None:
     """MiniGrid world-model pretraining and generation."""
 
-
-@dataclass(frozen=True)
-class EnvConfig:
-    env_id: str
-
-
-@dataclass(frozen=True)
-class DatasetConfig:
-    tile_size: int = 8
-    seed: int = 0
-    clip_length: int = 4
-    clip_stride: int | None = None
-    max_clips: int | None = None
-    preview_fps: float = 2.0
-    rollout_steps: int = 32
-    preview_dir: str | None = None
-    preview_clips: int = 4
-
-
-@dataclass(frozen=True)
-class GenerateConfig:
-    load_dir: str | None
-    save_dir: str | None
-    generate_new_frames: int
-    generate_num_steps: int
-    num_samples: int
-
-
-_SECTION_DATACLASSES = {
-    "env": EnvConfig,
-    "dataset": DatasetConfig,
-    "model": ModelConfig,
-    "train": TrainConfig,
-    "generate": GenerateConfig,
-}
-CONFIG_SCHEMA = {
-    section: {f.name for f in fields(cls)}
-    for section, cls in _SECTION_DATACLASSES.items()
-}
-
+    """MiniGrid world-model pretraining and generation."""
 
 def _load_experiment_config(config_path: Path) -> dict[str, dict[str, Any]]:
     with config_path.open("rb") as f:
@@ -309,9 +310,8 @@ def _dataclass_options(cls, *, exclude: frozenset[str] = frozenset()):
     hints = typing.get_type_hints(cls)
 
     def _click_kwargs(hint, default) -> dict:
-        # Unwrap ``X | None`` → recurse on inner type
-        origin = getattr(hint, "__origin__", None)
-        if origin is types.UnionType or origin is typing.Union:
+        # Unwrap `X | None`
+        if isinstance(hint, types.UnionType):
             inner = [a for a in hint.__args__ if a is not type(None)]
             if len(inner) == 1:
                 return _click_kwargs(inner[0], default)
@@ -334,30 +334,10 @@ def _dataclass_options(cls, *, exclude: frozenset[str] = frozenset()):
     return decorator
 
 
-def _dataset_options(func):
-    func = click.option("--env-id", default="MiniGrid-Empty-8x8-v0")(func)
-    func = click.option("--tile-size", default=8, type=int)(func)
-    func = click.option("--seed", default=0, type=int)(func)
-    func = click.option("--clip-length", default=4, type=int)(func)
-    func = click.option(
-        "--clip-stride",
-        default=None,
-        type=int,
-        help="Stride between clips; defaults to 1 for a rolling window.",
-    )(func)
-    func = click.option("--max-clips", default=None, type=int)(func)
-    return func
-
-
-def _train_dataset_options(func):
-    func = _dataset_options(func)
-    func = click.option("--rollout-steps", default=32, type=int)(func)
-    return func
-
-
 @cli.command(name="train")
 @_config_option(["env", "dataset", "model", "train"])
-@_train_dataset_options
+@_dataclass_options(EnvConfig)
+@_dataclass_options(DatasetConfig)
 @_dataclass_options(ModelConfig)
 @_dataclass_options(TrainConfig)
 @click.pass_context
@@ -404,6 +384,7 @@ def train_cmd(ctx: click.Context, **kwargs) -> None:
         model_config=model_config,
         train_config=train_config,
         model=initial_model,
+        sample_fps=dataset_config.preview_fps,
     )
 
     save_model(model, save_path, config=infer_model_config(model))
@@ -412,37 +393,11 @@ def train_cmd(ctx: click.Context, **kwargs) -> None:
 
 @cli.command(name="generate")
 @_config_option(["env", "dataset", "generate"])
-@_dataset_options
-@click.option(
-    "--load-dir",
-    default=None,
-    help="Directory containing the saved model to load.",
-)
-@click.option(
-    "--save-dir",
-    default=None,
-    help="Output directory for generated previews. Defaults to <load-dir>/generated.",
-)
-@click.option("--generate-new-frames", default=32, type=int)
-@click.option("--generate-num-steps", default=32, type=int)
-@click.option("--num-samples", default=1, type=int)
-@click.option("--preview-fps", default=2.0, type=float)
+@_dataclass_options(EnvConfig)
+@_dataclass_options(DatasetConfig)
+@_dataclass_options(GenerateConfig)
 @click.pass_context
-def generate_cmd(
-    ctx: click.Context,
-    env_id: str,
-    tile_size: int,
-    seed: int,
-    clip_length: int,
-    clip_stride: int | None,
-    max_clips: int | None,
-    load_dir: str | None,
-    save_dir: str | None,
-    generate_new_frames: int,
-    generate_num_steps: int,
-    num_samples: int,
-    preview_fps: float,
-) -> None:
+def generate_cmd(ctx: click.Context, **kwargs) -> None:
     """Load a pretrained model and autoregressively generate a video."""
     env_config, dataset_config, generate_config = _build_generate_configs(ctx.params)
 
@@ -457,7 +412,6 @@ def generate_cmd(
         seed=dataset_config.seed,
         clip_length=dataset_config.clip_length - 1,  # only grab context clips
         clip_stride=dataset_config.clip_stride,
-        max_clips=dataset_config.max_clips,
         max_action_idx=3,
     )
     print(f"env: {env_config.env_id}")
