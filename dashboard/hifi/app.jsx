@@ -20,36 +20,36 @@ function saveSession(state) {
 
 // ── Tweak defaults — EDITMODE block lets the host persist tweaks ─────
 const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
-  "accent": "#b85a3e",
+  "accent": "#f1be6d",
   "density": "regular",
   "paperTone": "warm",
   "playerOverlay": "none"
 }/*EDITMODE-END*/;
 
 // Theme inject — translate tweaks to CSS variable overrides
-function ThemeInject({ tweaks }) {
+function ThemeInject({ tweaks, darkMode }) {
   const css = `
     :root {
       --accent: ${tweaks.accent};
-      ${tweaks.paperTone === 'cool' ? `
-        --paper:      #ecf0eb;
-        --paper-warm: #f2f6f0;
-        --paper-cool: #e2e7e0;
-      ` : tweaks.paperTone === 'neutral' ? `
-        --paper:      #efece7;
-        --paper-warm: #f5f3ee;
-        --paper-cool: #e6e2db;
+      ${darkMode && tweaks.paperTone === 'cool' ? `
+        --paper:      #141612;
+        --paper-warm: #1b1e1b;
+        --paper-cool: #0f110f;
+      ` : darkMode && tweaks.paperTone === 'neutral' ? `
+        --paper:      #151412;
+        --paper-warm: #1c1a17;
+        --paper-cool: #0f0e0c;
       ` : ''}
       ${tweaks.density === 'compact' ? `
-        --t-xs:  9px;
-        --t-sm:  10.5px;
-        --t-md:  12px;
-        --t-lg:  14px;
+        --t-xs:  10px;
+        --t-sm:  11.5px;
+        --t-md:  13px;
+        --t-lg:  15px;
       ` : tweaks.density === 'spacious' ? `
-        --t-xs:  11px;
-        --t-sm:  12.5px;
-        --t-md:  14px;
-        --t-lg:  16px;
+        --t-xs:  12px;
+        --t-sm:  13.5px;
+        --t-md:  15px;
+        --t-lg:  17px;
       ` : ''}
     }
   `;
@@ -71,6 +71,18 @@ function App() {
   const [overlay, setOverlay] = uS(TWEAK_DEFAULTS.playerOverlay);
   const [metric, setMetric] = uS(init.metric || 'value');
   const [query, setQuery] = uS('');
+  const [darkMode, setDarkMode] = uS(() => {
+    try { return localStorage.getItem('rl-dark-mode') !== 'false'; } catch { return true; }
+  });
+
+  // Apply theme to document
+  uE(() => {
+    document.documentElement.classList.toggle('light-medium-contrast', !darkMode);
+
+    try { localStorage.setItem('rl-dark-mode', String(darkMode)); } catch {}
+  }, [darkMode]);
+
+  const toggleDark = uCB(() => setDarkMode(d => !d), []);
 
   // Tweaks
   const [tweaks, setTweak] = useTweaks(TWEAK_DEFAULTS);
@@ -179,7 +191,7 @@ function App() {
 
   return (
     <React.Fragment>
-      <ThemeInject tweaks={tweaks} />
+      <ThemeInject tweaks={tweaks} darkMode={darkMode} />
 
       <div style={{ display: 'flex', width: '100%', height: '100%' }}>
         {/* LEFT RAIL */}
@@ -201,6 +213,9 @@ function App() {
             diffBaselineName={diffBaselineName}
             onChangeBaseline={setDiffBaselineName}
             allRuns={D.RUNS}
+            pinnedRuns={pinnedRuns}
+            darkMode={darkMode}
+            onToggleDark={toggleDark}
           />
           <CkptNav
             run={focusedRun}
@@ -208,39 +223,36 @@ function App() {
             onSelectCkpt={setCkptStep}
           />
 
-          <div className="col" style={{ padding: '14px 16px 10px', gap: 10, flex: '0 0 auto' }}>
-            <WalkerPlayer
-              run={focusedRun} ckpt={ckpt} rollout={rollout}
-              frame={frame} setFrame={setFrame}
-              playing={playing} setPlaying={setPlaying}
-              speed={speed} setSpeed={setSpeed}
-              overlay={overlay} setOverlay={setOverlay}
+          {/* Scrollable body */}
+          <div className="scroll col grow" style={{ minHeight: 0 }}>
+            <div className="col" style={{ padding: '18px 16px 12px', gap: 14, flex: '0 0 auto' }}>
+              <WalkerPlayer
+                run={focusedRun} ckpt={ckpt} rollout={rollout}
+                frame={frame} setFrame={setFrame}
+                playing={playing} setPlaying={setPlaying}
+                speed={speed} setSpeed={setSpeed}
+                overlay={overlay} setOverlay={setOverlay}
+              />
+              <EpisodePicker
+                ckpt={ckpt}
+                selected={episodeKind}
+                onSelect={(k) => { setEpisodeKind(k); setFrame(0); setPlaying(false); }}
+              />
+            </div>
+
+            <FrameChartPair
+              focalRun={focusedRun}
+              focalCkpt={ckpt}
+              focalRollout={rollout}
+              frame={frame}
+              setFrame={setFrame}
+              pinnedRuns={pinnedRuns}
+              metric={metric} setMetric={setMetric}
             />
-            <EpisodePicker
-              ckpt={ckpt}
-              selected={episodeKind}
-              onSelect={(k) => { setEpisodeKind(k); setFrame(0); setPlaying(false); }}
-            />
-          </div>
 
-          <FrameChartPair
-            focalRun={focusedRun}
-            focalCkpt={ckpt}
-            focalRollout={rollout}
-            frame={frame}
-            setFrame={setFrame}
-            pinnedRuns={pinnedRuns}
-            metric={metric} setMetric={setMetric}
-          />
+            <LossStrip run={focusedRun} ckpt={ckpt} />
+          </div>{/* end scrollable body */}
 
-          <div className="grow" style={{ minHeight: 0 }} />
-          <LossStrip run={focusedRun} ckpt={ckpt} />
-
-          <div className="row border-t" style={{ padding: '5px 16px', fontSize: 10.5, color: 'var(--ink-3)', flex: '0 0 auto' }}>
-            <span><span className="kbd">space</span> play  ·  <span className="kbd">← →</span> frame  ·  <span className="kbd">⇧← →</span> ±30  ·  <span className="kbd">J L</span> ckpt  ·  <span className="kbd">1 2 3</span> best/median/worst</span>
-            <span className="grow" />
-            <span className="italic" style={{ fontFamily: 'var(--display)' }}>"player is procedural — real video would render here"</span>
-          </div>
         </div>
 
         {/* RIGHT RAIL */}
@@ -260,7 +272,7 @@ function App() {
           <TweakColor
             label="hue"
             value={tweaks.accent}
-            options={['#b85a3e', '#3e6db8', '#3e8a5a', '#7a4a8a', '#1c1813']}
+            options={['#f1be6d', '#b85a3e', '#3e6db8', '#3e8a5a', '#7a4a8a']}
             onChange={(v) => setTweak('accent', v)}
           />
         </TweakSection>
