@@ -53,6 +53,14 @@ class RLLogger:
                 f"val_psnr/t={float(timestep):.2f}", value, global_step
             )
 
+    def log_validation_r2s(self, global_step: int, metrics: Dict[float, Any]):
+        """Logs validation R² (fraction of target-velocity variance explained)
+        keyed by diffusion timestep."""
+        for timestep, value in metrics.items():
+            self.writer.add_scalar(
+                f"val_r2/t={float(timestep):.2f}", value, global_step
+            )
+
     def log_reconstructions(
         self,
         global_step: int,

@@ -136,11 +136,17 @@ class FlowMatchingTrainer:
         actions: mx.array,
         t: mx.array,
         *,
-        return_recon_mse: bool = False,
-    ) -> mx.array | tuple[mx.array, mx.array, mx.array]:
-        """Flow-matching loss at the given t. If ``return_recon_mse`` is True,
-        also returns the one-step x1-reconstruction MSE and the prediction itself
-        (``x1_pred = xt + (1 - t) * v_pred``, shape ``(B, 1, H, W, C)``).
+        return_eval_aux: bool = False,
+    ) -> mx.array | tuple[mx.array, mx.array, mx.array, mx.array]:
+        """Flow-matching loss at the given t. If ``return_eval_aux`` is True,
+        also returns ``(recon_mse, x1_pred, r2)`` for eval/logging:
+
+        - ``recon_mse``: MSE of the one-step x1 reconstruction
+          ``x1_pred = xt + (1 - t) * v_pred``.
+        - ``x1_pred``: the prediction itself, shape ``(B, 1, H, W, C)``.
+        - ``r2``: ``1 - loss / E[target_velocity^2]`` — fraction of target
+          variance explained, scale-free baseline.
+
         Skipped by default to keep training fast.
         """
         mask = make_final_frame_mask(x1)
@@ -150,12 +156,14 @@ class FlowMatchingTrainer:
         target_velocity = mask * (x1 - noise)
         pred_velocity = model(xt, t, context=actions)
         loss = mx.mean((pred_velocity[:, -1:] - target_velocity[:, -1:]) ** 2)
-        if not return_recon_mse:
+        if not return_eval_aux:
             return loss
 
         x1_pred = xt[:, -1:] + (1.0 - t_view[:, -1:]) * pred_velocity[:, -1:]
         recon_mse = mx.mean((x1_pred - x1[:, -1:]) ** 2)
-        return loss, recon_mse, x1_pred
+        target_var = mx.mean(target_velocity[:, -1:] ** 2)
+        r2 = 1.0 - loss / mx.maximum(target_var, 1e-12)
+        return loss, recon_mse, x1_pred, r2
 
     def loss(self, model: UNet3D, x1: mx.array, actions: mx.array) -> mx.array:
         t = mx.random.uniform(shape=(x1.shape[0],), low=0.0, high=1.0)
@@ -166,28 +174,36 @@ class FlowMatchingTrainer:
         batch: mx.array,
         actions: mx.array,
         timesteps: tuple[float, ...],
-    ) -> tuple[dict[float, float], dict[float, float], dict[float, mx.array]]:
-        """Per-timestep validation metrics: ``(losses, psnrs, preds)``.
+    ) -> tuple[
+        dict[float, float],
+        dict[float, float],
+        dict[float, float],
+        dict[float, mx.array],
+    ]:
+        """Per-timestep validation metrics: ``(losses, psnrs, r2s, preds)``.
 
-        PSNR uses data range 2 since frames live in [-1, 1].
-        ``preds`` maps each timestep to the one-step x1 prediction
+        PSNR uses data range 2 since frames live in [-1, 1]. R² is
+        ``1 - loss / E[target_velocity^2]`` — fraction of target variance
+        explained. ``preds`` maps each timestep to the one-step x1 prediction
         ``(B, 1, H, W, C)`` for that batch — useful for image logging.
         """
         losses: dict[float, float] = {}
         psnrs: dict[float, float] = {}
+        r2s: dict[float, float] = {}
         preds: dict[float, mx.array] = {}
         log10_max = 20.0 * float(mx.log10(mx.array(2.0)))
         for timestep in timesteps:
             t = mx.full((batch.shape[0],), timestep, dtype=batch.dtype)
-            loss, recon_mse, x1_pred = self._loss_at_t(
-                self.model, batch, actions, t, return_recon_mse=True
+            loss, recon_mse, x1_pred, r2 = self._loss_at_t(
+                self.model, batch, actions, t, return_eval_aux=True
             )
             psnr = log10_max - 10.0 * mx.log10(mx.maximum(recon_mse, 1e-12))
-            mx.eval(loss, psnr, x1_pred)
+            mx.eval(loss, psnr, r2, x1_pred)
             losses[timestep] = float(loss)
             psnrs[timestep] = float(psnr)
+            r2s[timestep] = float(r2)
             preds[timestep] = x1_pred
-        return losses, psnrs, preds
+        return losses, psnrs, r2s, preds
 
     def train_step(self, batch: mx.array, actions: mx.array) -> float:
         loss, grads = self.loss_and_grad(self.model, batch, actions)
@@ -465,13 +481,15 @@ def train_on_dataset(
                 val_actions,
                 min(train_config.batch_size * 4, int(val_videos.shape[0])),
             )
-            val_losses, val_psnrs, val_preds = trainer.eval_loss_by_timestep(
+            val_losses, val_psnrs, val_r2s, val_preds = trainer.eval_loss_by_timestep(
                 val_batch, val_batch_actions, val_timesteps
             )
             avg_val_loss = sum(val_losses.values()) / len(val_losses)
             avg_val_psnr = sum(val_psnrs.values()) / len(val_psnrs)
+            avg_val_r2 = sum(val_r2s.values()) / len(val_r2s)
             val_report = (
-                f"avg_val_t={avg_val_loss:.4f} avg_val_psnr={avg_val_psnr:.2f}dB"
+                f"avg_val_t={avg_val_loss:.4f} avg_val_psnr={avg_val_psnr:.2f}dB "
+                f"avg_val_r2={avg_val_r2:.3f}"
             )
 
             print(
@@ -489,6 +507,7 @@ def train_on_dataset(
                 )
                 train_logger.log_validation_steps(step, val_losses)
                 train_logger.log_validation_psnrs(step, val_psnrs)
+                train_logger.log_validation_r2s(step, val_r2s)
                 train_logger.log_reconstructions(
                     step,
                     val_batch[:, -1],
