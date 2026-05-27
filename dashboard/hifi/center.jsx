@@ -2,8 +2,33 @@
 
 const { useMemo: useM, useState: useSt } = React;
 
+// ── Icon primitives (inline SVG — no library needed) ─────────────────
+function IconSun({ size = 15, strokeWidth = 1.8 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none"
+         stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="4"/>
+      <line x1="12" y1="2"  x2="12" y2="6"/>
+      <line x1="12" y1="18" x2="12" y2="22"/>
+      <line x1="2"  y1="12" x2="6"  y2="12"/>
+      <line x1="18" y1="12" x2="22" y2="12"/>
+      <line x1="4.93"  y1="4.93"  x2="7.76"  y2="7.76"/>
+      <line x1="16.24" y1="16.24" x2="19.07" y2="19.07"/>
+      <line x1="4.93"  y1="19.07" x2="7.76"  y2="16.24"/>
+      <line x1="16.24" y1="7.76"  x2="19.07" y2="4.93"/>
+    </svg>
+  );
+}
+function IconMoon({ size = 15, strokeWidth = 1.8 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none"
+         stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round">
+      <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+    </svg>
+  );
+}
 // ── Top breadcrumb / actions bar ─────────────────────────────────────
-function TopBar({ run, ckpt, pinnedCount, diffBaselineName, onChangeBaseline, allRuns }) {
+function TopBar({ run, ckpt, pinnedCount, diffBaselineName, onChangeBaseline, allRuns, pinnedRuns, darkMode, onToggleDark }) {
   return (
     <div className="row border-b" style={{ padding: '8px 16px', gap: 10, height: 44, flex: '0 0 auto', minWidth: 0 }}>
       <div className="doc-title" style={{ flex: '1 1 auto', minWidth: 0 }}>
@@ -17,7 +42,7 @@ function TopBar({ run, ckpt, pinnedCount, diffBaselineName, onChangeBaseline, al
           <span className="num" style={{ color: 'var(--ink-2)' }}>{D.fmtStep(ckpt.step)}</span>
         </span>
       </div>
-      <select
+            <select
         className="dropdown"
         value={diffBaselineName || ''}
         onChange={(e) => onChangeBaseline(e.target.value || null)}
@@ -29,8 +54,14 @@ function TopBar({ run, ckpt, pinnedCount, diffBaselineName, onChangeBaseline, al
           <option key={r.id} value={r.name}>vs {r.name}</option>
         ))}
       </select>
-      <button className="btn icon" title="share" style={{ flex: '0 0 auto' }}>↗</button>
-      <button className="btn solid" style={{ flex: '0 0 auto' }}>＋ new run</button>
+      <button
+        className="btn icon"
+        onClick={onToggleDark}
+        title={darkMode ? 'switch to light mode' : 'switch to dark mode'}
+        style={{ flex: '0 0 auto', width: 34, height: 34 }}
+      >
+        {darkMode ? <IconSun /> : <IconMoon />}
+      </button>
     </div>
   );
 }
@@ -99,7 +130,7 @@ function EpisodePicker({ ckpt, selected, onSelect }) {
           <span className="ep-meta">{r.length.toLocaleString()}f · r {r.return}</span>
         </button>
       ))}
-
+      
     </div>
   );
 }
@@ -118,7 +149,7 @@ function FrameChartPair({ focalRun, focalCkpt, focalRollout, frame, setFrame, pi
   // Build "lines" for cumulative_return chart
   const cumLines = useM(() => {
     const out = [];
-    // Focal
+// Focal
     out.push({
       runId: focalRun.id,
       values: D.frameSignal(focalRun, focalCkpt, focalRollout, 'cumulative_return'),
@@ -130,13 +161,13 @@ function FrameChartPair({ focalRun, focalCkpt, focalRollout, frame, setFrame, pi
       if (pr.id === focalRun.id) continue;
       const c = pr.checkpoints[pr.checkpoints.length - 1];
       const ro = c.rollouts.find(r => r.kind === 'best') || c.rollouts[0];
-      out.push({
+            out.push({
         runId: pr.id,
         values: D.frameSignal(pr, c, ro, 'cumulative_return'),
         isFocal: false,
         color: '',
       });
-    }
+          }
     return out;
   }, [focalRun, focalCkpt, focalRollout, pinnedRuns]);
 
