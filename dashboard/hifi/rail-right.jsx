@@ -37,8 +37,8 @@ function RailRight({ run, ckpt, rollout, frame, baselineRun, allRuns }) {
   const changes = hpKeys.filter(k => baselineRun && baseHp[k] !== run.hp[k]);
 
   // Action probs at current frame
-  const probs = D.actionProbs(run, ckpt, rollout, frame);
-  const labels = D.ACTION_LABELS[run.env] || ['0','1','2','3','4','5','6','7'];
+  // const probs = D.actionProbs(run, ckpt, rollout, frame);
+  // const labels = D.ACTION_LABELS[run.env] || ['0','1','2','3','4','5','6','7'];
 
   // TD-error for this rollout
   const tdValues = D.frameSignal(run, ckpt, rollout, 'td_error');
@@ -72,32 +72,35 @@ function RailRight({ run, ckpt, rollout, frame, baselineRun, allRuns }) {
             <span className="muted" style={{ fontSize: 10 }}>updated</span>
             <span className="num strong" style={{ fontSize: 14 }}>{run.ago}</span>
           </div>
-        </div>
-      </Section>
-
-      {/* This checkpoint */}
-      <Section title="This checkpoint" right={`${D.fmtStep(ckpt.step)} · ${ckpt.rollouts.length} rollouts`}>
-        <div className="kv">
-          <span className="k">mean return</span><span className="v">{ckpt.mean} <span className="muted">± {ckpt.std}</span></span>
-          <span className="k">best</span><span className="v">{ckpt.best}</span>
-          <span className="k">median</span><span className="v">{ckpt.median}</span>
-          <span className="k">worst</span><span className="v">{ckpt.worst}</span>
-          <span className="k">current ep</span><span className="v" style={{ color: 'var(--accent)' }}>{rollout.kind} · {rollout.length}f · r {rollout.return}</span>
+          <div className="col">
+            <span className="muted" style={{ fontSize: 10 }}>Rollouts</span>
+            <span className="num strong" style={{ fontSize: 14 }}>{ckpt.rollouts.length}</span>
+          </div>
         </div>
       </Section>
 
       {/* Hyperparams */}
-      <Section
-        title="Hyperparams"
-        right={
-          baselineRun ? (
-            <span style={{ color: 'var(--ink-3)' }}>
-              diff vs <span style={{ color: 'var(--ink-2)' }}>{baselineRun.name}</span>
-              {' '}<span style={{ color: changes.length ? 'var(--accent)' : 'var(--ink-4)' }}>{changes.length}Δ</span>
-            </span>
-          ) : 'no baseline'
-        }
-      >
+      <Section title="Hyperparams">
+        {/* Diff subtitle */}
+        <div style={{ fontFamily: 'var(--display)', fontStyle: 'italic', fontSize: 11.5,
+                      color: 'var(--ink-3)', marginBottom: 8, lineHeight: 1.3 }}>
+          {baselineRun ? (
+            <>
+              diff vs{' '}
+              <span style={{ fontStyle: 'normal', fontWeight: 600, color: 'var(--ink-2)',
+                             fontFamily: 'var(--mono)' }}>
+                {baselineRun.name}
+              </span>
+              {' '}
+              <span style={{ fontStyle: 'normal',
+                             color: changes.length ? 'var(--accent)' : 'var(--ink-4)' }}>
+                {changes.length}Δ
+              </span>
+            </>
+          ) : (
+            <span style={{ color: 'var(--ink-4)' }}>no baseline selected</span>
+          )}
+        </div>
         <div className="col gap-1">
           {hpKeys.map(k => (
             <HpRow
@@ -111,20 +114,6 @@ function RailRight({ run, ckpt, rollout, frame, baselineRun, allRuns }) {
         </div>
       </Section>
 
-      {/* Action distribution @ current frame */}
-      <Section title="Action distribution" right={`@ frame ${frame}`}>
-        <ActionBars probs={probs} labels={labels} width={260} height={68} />
-      </Section>
-
-      {/* TD-error for this rollout */}
-      <Section title="TD-error" right="|err| this rollout">
-        <TdErrorStrip values={tdValues} frame={frame} totalFrames={rollout.length} width={260} height={38} />
-        <div className="muted" style={{ fontSize: 10.5, marginTop: 6, fontStyle: 'italic' }}>
-          {Math.abs(tdValues[frame] || 0) > 1
-            ? 'Value head surprised — stumble / recovery region.'
-            : 'Value prediction tracking well at this frame.'}
-        </div>
-      </Section>
 
       {/* Tags + notes */}
       <Section title="Tags + notes">
