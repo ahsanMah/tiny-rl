@@ -23,15 +23,15 @@ function RunRow({ run, isFocused, isPinned, onFocus, onTogglePin, lineSlot }) {
 
   return (
     <div className={`run-row ${isFocused ? 'active' : ''}`}
-         style={{ gridTemplateColumns: '10px 14px minmax(0,1fr) 50px 40px', columnGap: 6, padding: '5px 10px' }}
+         style={{ gridTemplateColumns: '16px minmax(0,1fr) 50px 40px', columnGap: 6, padding: '9px 12px' }}
          onClick={onFocus}>
       <button
         onClick={(e) => { e.stopPropagation(); onTogglePin(); }}
         title={isPinned ? 'unpin' : 'pin'}
         style={{
           border: 'none', background: 'transparent', padding: 0, cursor: 'pointer',
-          color: isPinned ? 'var(--accent)' : 'var(--ink-4)',
-          fontSize: 11, width: 14, height: 14, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+          color: isPinned ? 'var(--tertiary)' : 'var(--ink-4)',
+          width: 16, height: 16, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
         }}
       >
         <IconPin filled={isPinned} size={15} />
@@ -91,14 +91,14 @@ function RailLeft({ runs, focusedId, pinnedIds, onFocus, onTogglePin, query, set
   })();
 
   return (
-    <div className="col" style={{ width: 296, background: 'var(--paper-cool)', borderRight: '1px solid var(--hairline)', height: '100%' }}>
+    <div className="col" style={{ width: 'clamp(150px, 30vw, 340px)', flexShrink: 0, background: 'var(--paper-cool)', borderRight: '1px solid var(--hairline)', height: '100%' }}>
       {/* Header */}
-      <div className="col" style={{ padding: '12px 12px 8px', gap: 8, borderBottom: '1px solid var(--hairline)' }}>
+      <div className="col" style={{ padding: '16px 14px 12px', gap: 10, borderBottom: '1px solid var(--hairline)' }}>
         <div className="row" style={{ gap: 8 }}>
           <span className="display" style={{ fontSize: 15, fontWeight: 700 }}>tracker</span>
           <span className="muted" style={{ fontSize: 11 }}>/ 247 runs</span>
           <span className="grow" />
-          <button className="btn icon" title="new run">＋</button>
+          <button className="btn tert" style={{ padding: '4px 10px', fontSize: 12 }}>＋ new run</button>
         </div>
         <input
           className="input"
@@ -107,7 +107,7 @@ function RailLeft({ runs, focusedId, pinnedIds, onFocus, onTogglePin, query, set
           onChange={(e) => setQuery(e.target.value)}
           style={{ fontFamily: 'var(--mono)', fontSize: 11 }}
         />
-        <div className="row" style={{ gap: 4, fontSize: 10 }}>
+        <div className="row" style={{ gap: 4, fontSize: 14 }}>
           <span className="label-eyebrow">group</span>
           {[
             { key: 'alg',  label: 'alg'  },
@@ -128,7 +128,7 @@ function RailLeft({ runs, focusedId, pinnedIds, onFocus, onTogglePin, query, set
       <div className="scroll grow">
         {/* Pinned section */}
         <div className="col">
-          <div className="row" style={{ padding: '10px 12px 4px', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 }}>
+          <div className="row" style={{ padding: '14px 14px 6px', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 }}>
             <span className="label-eyebrow">Pinned · {pinned.length}</span>
           </div>
           {pinned.length === 0 && (
@@ -150,7 +150,7 @@ function RailLeft({ runs, focusedId, pinnedIds, onFocus, onTogglePin, query, set
         {/* Groups */}
         {grouped.map(([groupName, groupRuns]) => (
           <div key={groupName} className="col">
-            <div className="row" style={{ padding: '12px 12px 4px', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 }}>
+            <div className="row" style={{ padding: '14px 14px 6px', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 }}>
               <span className="label-eyebrow">{groupName} · {groupRuns.length}</span>
               <span className="muted" style={{ fontSize: 10, whiteSpace: 'nowrap' }}>↕ recent</span>
             </div>
@@ -171,7 +171,7 @@ function RailLeft({ runs, focusedId, pinnedIds, onFocus, onTogglePin, query, set
       </div>
 
       {/* Footer */}
-      <div className="row" style={{ padding: '6px 12px', borderTop: '1px solid var(--hairline)', fontSize: 10.5, color: 'var(--ink-3)' }}>
+      <div className="row" style={{ padding: '10px 14px', borderTop: '1px solid var(--hairline)', fontSize: 10.5, color: 'var(--ink-3)' }}>
         <span>{filtered.length} of {runs.length}</span>
         <span className="grow" />
         <span><span className="kbd">⌘</span>+<span className="kbd">K</span></span>
