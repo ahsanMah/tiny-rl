@@ -43,7 +43,6 @@ class TrainConfig:
     load_dir: str | None = None
     num_gen_samples: int = 4
     sample_steps: int = 32
-    preview_fps: float = 8.0
     sampling_distribution: str = "uniform"
     log_tensorboard: bool = False
 

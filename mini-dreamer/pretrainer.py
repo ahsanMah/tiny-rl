@@ -75,7 +75,6 @@ def actions_to_clips(
     *,
     clip_length: int,
     clip_stride: int | None = None,
-    max_clips: int | None = None,
 ) -> mx.array:
     """Slice a 1-D action stream into (num_clips, clip_length) windows."""
     if actions.ndim != 1:
@@ -91,8 +90,6 @@ def actions_to_clips(
     clips: list[np.ndarray] = []
     for start in range(0, actions.shape[0] - clip_length + 1, clip_stride):
         clips.append(actions[start : start + clip_length])
-        if max_clips is not None and len(clips) >= max_clips:
-            break
 
     return mx.array(np.stack(clips, axis=0))
 
@@ -105,7 +102,6 @@ def make_minigrid_dataset(
     seed: int = 42,
     clip_length: int = 4,
     clip_stride: int | None = None,
-    max_clips: int | None = None,
     max_action_idx: int = -1,
 ) -> tuple[mx.array, mx.array]:
     frames, actions = rollout_minigrid_frames(
@@ -119,13 +115,11 @@ def make_minigrid_dataset(
         frames,
         clip_length=clip_length,
         clip_stride=clip_stride,
-        max_clips=max_clips,
     )
     action_clips = actions_to_clips(
         actions,
         clip_length=clip_length,
         clip_stride=clip_stride,
-        max_clips=max_clips,
     )
     return frame_clips, action_clips
 
@@ -365,7 +359,7 @@ def _train_dataset_options(func):
 @_config_option(["env", "dataset", "model", "train"])
 @_train_dataset_options
 @_dataclass_options(ModelConfig)
-@_dataclass_options(TrainConfig, exclude=frozenset({"preview_fps"}))
+@_dataclass_options(TrainConfig)
 @click.pass_context
 def train_cmd(ctx: click.Context, **kwargs) -> None:
     """Train the diffusion world model on MiniGrid rollouts."""
@@ -381,7 +375,6 @@ def train_cmd(ctx: click.Context, **kwargs) -> None:
         seed=dataset_config.seed,
         clip_length=dataset_config.clip_length,
         clip_stride=dataset_config.clip_stride,
-        max_clips=dataset_config.max_clips,
     )
     print(f"env: {env_config.env_id}")
     print(f"clips shape: {tuple(clips.shape)}")

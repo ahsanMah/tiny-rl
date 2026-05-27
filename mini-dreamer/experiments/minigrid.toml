@@ -2,29 +2,30 @@
 env_id = "MiniGrid-Empty-8x8-v0"
 
 [dataset]
-rollout_steps = 32
-tile_size = 8
+rollout_steps = 10000
+tile_size = 16
 seed = 0
 clip_length = 4
 clip_stride = 1
-max_clips = 128
 preview_dir = "logs/minigrid-v1/previews"
 preview_clips = 4
 preview_fps = 2.0
 
 [model]
 base_channels = 16
+num_transformer_blocks = 2
 
 [train]
 save_dir = "logs/minigrid-v1"
 train_steps = 10000
-batch_size = 8
+batch_size = 32
 learning_rate = 3e-4
 log_every = 100
+log_tensorboard = true
 
 [generate]
 load_dir = "logs/minigrid-v1"
 save_dir = "logs/minigrid-v1/generated"
-generate_new_frames = 32
+generate_new_frames = 2
 generate_num_steps = 32
 num_samples = 1
