@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal, Tuple
 
@@ -11,7 +11,6 @@ import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as optim
 from mlx.utils import tree_map
-from numpy import dtype
 
 from logger_utils import RLLogger
 from unet import UNet3D, print_param_table
@@ -27,18 +26,21 @@ NoiseDistribution = Literal["uniform", "logitnorm"]
 @dataclass(frozen=True)
 class ModelConfig:
     base_channels: int = 16
+    max_context_size: int = 3
+    num_transformer_blocks: int = 2
 
 
 @dataclass(frozen=True)
 class TrainConfig:
-    steps: int = 1_000
+    train_steps: int = 1_000
     batch_size: int = 1
     learning_rate: float = 1e-3
     log_every: int = 50
-    sample_dir: str | Path | None = None
+    save_dir: str | Path | None = None
+    load_dir: str | None = None
     num_gen_samples: int = 4
     sample_steps: int = 32
-    sample_fps: float = 8.0
+    preview_fps: float = 8.0
 
 
 def make_final_frame_mask(x: mx.array) -> mx.array:
@@ -196,7 +198,10 @@ def sample_euler(
     if num_steps <= 0:
         raise ValueError(f"num_steps must be > 0, got {num_steps}")
 
-    batch_size = int(conditioning_clips.shape[0])
+    batch_size, history_size = conditioning_clips.shape[0], conditioning_clips.shape[1]
+    assert actions.shape == (batch_size, history_size + 1), (
+        f"Actions should include history and the next action"
+    )
     x_shape = (
         batch_size,
         1,
@@ -272,7 +277,9 @@ def generate_video(
         raise ValueError(
             f"initial_clip must contain at least 2 frames, got {clip_length}"
         )
-
+    print(f"Generating {num_new_frames} frames from {clip_length} initial frames...")
+    print(f"Using max_context_size={model.max_context_size}")
+    print(f"Using actions={actions}")
     frames = initial_clip
     max_context_size = model.max_context_size
     for step in range(num_new_frames):
@@ -280,7 +287,10 @@ def generate_video(
         print(
             f"generating frame {step + 1}/{num_new_frames} with conditioning window shape {window.shape}..."
         )
-        action_window = actions[:, -max_context_size - 1 :]
+        end = frames.shape[1] + 1  # frame index being generated, + 1 inclusive
+        action_window = actions[:, max(0, end - max_context_size - 1) : end]
+        print(f"Using action_window={action_window}")
+
         sample = sample_euler(
             model,
             conditioning_clips=window,
@@ -306,7 +316,7 @@ def train_on_dataset(
     train_config = TrainConfig() if train_config is None else train_config
 
     if actions is None:
-        actions = mx.zeros((videos.shape[0], num_env_actions), dtype=mx.int8)
+        actions = mx.zeros((videos.shape[0], 1), dtype=mx.int8)
 
     dataset_size = int(videos.shape[0])
     if dataset_size < 2:
@@ -327,8 +337,8 @@ def train_on_dataset(
         model = UNet3D(
             in_channels=int(videos.shape[-1]),
             out_channels=int(videos.shape[-1]),
-            base_channels=model_config.base_channels,
             num_actions=num_env_actions,
+            **asdict(model_config),
         )
     trainer = FlowMatchingTrainer(model, learning_rate=train_config.learning_rate)
 
@@ -338,7 +348,7 @@ def train_on_dataset(
     print_param_table(model)
 
     sample_count = min(train_config.num_gen_samples, int(val_videos.shape[0]))
-    if train_config.sample_dir is not None:
+    if train_config.save_dir is not None:
         val_conditioning_clips = val_videos[:sample_count]
         val_conditioning_actions = val_actions[:sample_count]
 
@@ -346,7 +356,7 @@ def train_on_dataset(
     losses: list[float] = []
     val_timesteps = (0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0)
 
-    for step in range(1, train_config.steps + 1):
+    for step in range(1, train_config.train_steps + 1):
         batch, batch_actions = sample_batch(
             train_videos, train_actions, train_config.batch_size
         )
@@ -356,7 +366,7 @@ def train_on_dataset(
         if (
             step == 1
             or step % train_config.log_every == 0
-            or step == train_config.steps
+            or step == train_config.train_steps
         ):
             elapsed = time.time() - start
             avg_loss = sum(losses[-train_config.log_every :]) / min(
@@ -389,7 +399,7 @@ def train_on_dataset(
                 )
                 train_logger.log_validation_steps(step, val_losses)
 
-    if train_config.sample_dir is not None:
+    if train_config.save_dir is not None:
         samples = sample_euler(
             trainer.ema_model,
             conditioning_clips=val_conditioning_clips[:, :-1],
@@ -398,11 +408,11 @@ def train_on_dataset(
         )
         save_clip_previews(
             samples,
-            train_config.sample_dir,
+            train_config.save_dir,
             max_clips=sample_count,
-            fps=train_config.sample_fps,
+            fps=train_config.preview_fps,
         )
-        print(f"saved samples to: {train_config.sample_dir}")
+        print(f"saved samples to: {train_config.save_dir}")
 
     return trainer.ema_model, losses
 

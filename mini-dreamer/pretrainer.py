@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
 
@@ -179,15 +179,15 @@ class EnvConfig:
 
 @dataclass(frozen=True)
 class DatasetConfig:
-    rollout_steps: int
-    tile_size: int
-    seed: int
-    clip_length: int
-    clip_stride: int | None
-    max_clips: int | None
-    preview_dir: str | None
-    preview_clips: int
-    preview_fps: float
+    tile_size: int = 8
+    seed: int = 0
+    clip_length: int = 4
+    clip_stride: int | None = None
+    max_clips: int | None = None
+    preview_fps: float = 2.0
+    rollout_steps: int = 32
+    preview_dir: str | None = None
+    preview_clips: int = 4
 
 
 @dataclass(frozen=True)
@@ -199,35 +199,16 @@ class GenerateConfig:
     num_samples: int
 
 
-CONFIG_SCHEMA: dict[str, set[str]] = {
-    "env": {"env_id"},
-    "dataset": {
-        "rollout_steps",
-        "tile_size",
-        "seed",
-        "clip_length",
-        "clip_stride",
-        "max_clips",
-        "preview_dir",
-        "preview_clips",
-        "preview_fps",
-    },
-    "model": {"base_channels", "num_transformer_blocks"},
-    "train": {
-        "save_dir",
-        "load_dir",
-        "train_steps",
-        "batch_size",
-        "learning_rate",
-        "log_every",
-    },
-    "generate": {
-        "load_dir",
-        "save_dir",
-        "generate_new_frames",
-        "generate_num_steps",
-        "num_samples",
-    },
+_SECTION_DATACLASSES = {
+    "env": EnvConfig,
+    "dataset": DatasetConfig,
+    "model": ModelConfig,
+    "train": TrainConfig,
+    "generate": GenerateConfig,
+}
+CONFIG_SCHEMA = {
+    section: {f.name for f in fields(cls)}
+    for section, cls in _SECTION_DATACLASSES.items()
 }
 
 
@@ -255,62 +236,30 @@ def _load_experiment_config(config_path: Path) -> dict[str, dict[str, Any]]:
     return config
 
 
-
-def _build_dataset_config(resolved: dict[str, Any]) -> DatasetConfig:
-    return DatasetConfig(
-        rollout_steps=resolved["rollout_steps"],
-        tile_size=resolved["tile_size"],
-        seed=resolved["seed"],
-        clip_length=resolved["clip_length"],
-        clip_stride=resolved["clip_stride"],
-        max_clips=resolved["max_clips"],
-        preview_dir=resolved["preview_dir"],
-        preview_clips=resolved["preview_clips"],
-        preview_fps=resolved["preview_fps"],
-    )
+def _from_resolved(cls, resolved: dict[str, Any]):
+    """Construct a dataclass from a resolved params dict, ignoring unrelated keys."""
+    valid = {f.name for f in fields(cls)}
+    return cls(**{k: v for k, v in resolved.items() if k in valid})
 
 
 def _build_train_configs(
     resolved: dict[str, Any],
 ) -> tuple[EnvConfig, DatasetConfig, ModelConfig, TrainConfig]:
-    dataset_config = _build_dataset_config(resolved)
     return (
-        EnvConfig(env_id=resolved["env_id"]),
-        dataset_config,
-        ModelConfig(
-            base_channels=resolved["base_channels"],
-            num_transformer_blocks=resolved.get("num_transformer_blocks", 2),
-        ),
-        TrainConfig(
-            steps=resolved["train_steps"],
-            batch_size=resolved["batch_size"],
-            learning_rate=resolved["learning_rate"],
-            log_every=resolved["log_every"],
-            sample_dir=resolved["save_dir"],
-            sample_fps=dataset_config.preview_fps,
-        ),
+        _from_resolved(EnvConfig, resolved),
+        _from_resolved(DatasetConfig, resolved),
+        _from_resolved(ModelConfig, resolved),
+        _from_resolved(TrainConfig, resolved),
     )
 
 
 def _build_generate_configs(
     resolved: dict[str, Any],
 ) -> tuple[EnvConfig, DatasetConfig, GenerateConfig]:
-    dataset_values = {
-        "rollout_steps": 32,
-        "preview_dir": None,
-        "preview_clips": 4,
-        **resolved,
-    }
     return (
-        EnvConfig(env_id=resolved["env_id"]),
-        _build_dataset_config(dataset_values),
-        GenerateConfig(
-            load_dir=resolved["load_dir"],
-            save_dir=resolved["save_dir"],
-            generate_new_frames=resolved["generate_new_frames"],
-            generate_num_steps=resolved["generate_num_steps"],
-            num_samples=resolved["num_samples"],
-        ),
+        _from_resolved(EnvConfig, resolved),
+        _from_resolved(DatasetConfig, resolved),
+        _from_resolved(GenerateConfig, resolved),
     )
 
 
@@ -406,8 +355,6 @@ def train_cmd(
     env_config, dataset_config, model_config, train_config = _build_train_configs(
         ctx.params
     )
-    save_dir = ctx.params["save_dir"]
-    load_dir = ctx.params["load_dir"]
 
     env = gym.make(env_config.env_id)
     clips, action_clips = make_minigrid_dataset(
@@ -432,14 +379,14 @@ def train_cmd(
         )
         print(f"saved previews to: {dataset_config.preview_dir}")
 
-    save_path = Path(save_dir)
+    save_path = Path(train_config.save_dir)
     num_actions = int(env.action_space.n)
     train_logger = RLLogger(log_dir=str(save_path.parent), exp_name=save_path.name)
 
     initial_model = None
-    if load_dir is not None:
-        initial_model = load_model(load_dir)
-        print(f"resuming training from: {load_dir}")
+    if train_config.load_dir is not None:
+        initial_model = load_model(train_config.load_dir)
+        print(f"resuming training from: {train_config.load_dir}")
 
     try:
         model, _ = train_on_dataset(
