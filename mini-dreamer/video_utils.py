@@ -162,6 +162,62 @@ def _annotate_action(frame: np.ndarray, action: int) -> np.ndarray:
     return np.asarray(img)
 
 
+def save_diffusion_mp4(
+    context_frames: mx.array,
+    intermediates: list[mx.array],
+    output_path: str | Path,
+    *,
+    fps: float = 8.0,
+) -> None:
+    """Save a diffusion denoising trajectory as an MP4.
+
+    Each video frame shows a horizontal strip:
+        [ctx_0 | ctx_1 | … | ctx_L-1 ‖ generated_at_step_t]
+
+    Context frames are static across all video frames; the generated column
+    animates from pure noise (step 0) to the clean prediction (step N-1).
+    Multiple batch items are stacked vertically.
+
+    Args:
+        context_frames: ``(B, L, H, W, C)`` conditioning frames (static).
+        intermediates: list of ``(B, 1, H, W, C)`` arrays, one per denoising
+            step, as returned by ``sample_euler(return_intermediates=True)``.
+        output_path: destination ``.mp4`` file path.
+        fps: playback speed of the output video.
+    """
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    ctx_np = to_uint8_video(np.asarray(context_frames))  # (B, L, H, W, C)
+    B, L, H, W, C = ctx_np.shape
+
+    def _to_rgb(arr: np.ndarray) -> np.ndarray:
+        """Ensure last dim is 3 (broadcast grayscale, strip alpha)."""
+        if arr.shape[-1] == 1:
+            return np.repeat(arr, 3, axis=-1)
+        if arr.shape[-1] == 4:
+            return arr[..., :3]
+        return arr
+
+    ctx_rgb = _to_rgb(ctx_np)  # (B, L, H, W, 3)
+    sep = np.zeros((H, 2, 3), dtype=np.uint8)  # thin black column between ctx and gen
+
+    video_frames: list[np.ndarray] = []
+    for step_x in intermediates:
+        gen_np = to_uint8_video(np.asarray(step_x))  # (B, 1, H, W, C)
+        gen_rgb = _to_rgb(gen_np[:, 0])              # (B, H, W, 3)
+
+        rows: list[np.ndarray] = []
+        for b in range(B):
+            ctx_strip = np.concatenate([ctx_rgb[b, i] for i in range(L)], axis=1)  # (H, L*W, 3)
+            row = np.concatenate([ctx_strip, sep, gen_rgb[b]], axis=1)  # (H, L*W+2+W, 3)
+            rows.append(row)
+
+        video_frames.append(np.concatenate(rows, axis=0))  # (B*H, total_W, 3)
+
+    iio.mimsave(str(output_path), video_frames, fps=fps)
+
+
 def save_clip_previews(
     clips: mx.array,
     output_dir: str | Path,

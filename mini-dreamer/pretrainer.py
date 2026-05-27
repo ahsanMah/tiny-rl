@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import tomllib
-from dataclasses import dataclass, fields
+import types
+import typing
+from dataclasses import MISSING, dataclass, fields
 from pathlib import Path
 from typing import Any
 
@@ -303,6 +305,41 @@ def _config_option(sections: list[str]):
     return decorator
 
 
+def _dataclass_options(cls, *, exclude: frozenset[str] = frozenset()):
+    """Decorator factory: emit one ``@click.option`` per field of ``cls``.
+
+    Fields in ``exclude`` are skipped (use when another decorator already
+    covers the same option name).  The options are inserted in the same
+    order as the dataclass fields so ``--help`` output is readable.
+    """
+    hints = typing.get_type_hints(cls)
+
+    def _click_kwargs(hint, default) -> dict:
+        # Unwrap ``X | None`` → recurse on inner type
+        origin = getattr(hint, "__origin__", None)
+        if origin is types.UnionType or origin is typing.Union:
+            inner = [a for a in hint.__args__ if a is not type(None)]
+            if len(inner) == 1:
+                return _click_kwargs(inner[0], default)
+        if hint is bool:
+            return {"is_flag": True, "default": bool(default)}
+        if hint in (int, float, str):
+            return {"type": hint, "default": default}
+        # Path / other types: pass as string
+        return {"type": str, "default": str(default) if default is not None else None}
+
+    def decorator(func):
+        for f in reversed(fields(cls)):
+            if f.name in exclude:
+                continue
+            default = f.default if f.default is not MISSING else None
+            kwargs = _click_kwargs(hints[f.name], default)
+            func = click.option(f"--{f.name.replace('_', '-')}", **kwargs)(func)
+        return func
+
+    return decorator
+
+
 def _dataset_options(func):
     func = click.option("--env-id", default="MiniGrid-Empty-8x8-v0")(func)
     func = click.option("--tile-size", default=8, type=int)(func)
@@ -327,41 +364,10 @@ def _train_dataset_options(func):
 @cli.command(name="train")
 @_config_option(["env", "dataset", "model", "train"])
 @_train_dataset_options
-@click.option("--save-dir", default="logs/minigrid-v1")
-@click.option(
-    "--load-dir",
-    default=None,
-    help="Resume training from a checkpoint saved in this directory.",
-)
-@click.option("--base-channels", default=16, type=int)
-@click.option("--train-steps", default=10_000, type=int)
-@click.option("--batch-size", default=8, type=int)
-@click.option("--learning-rate", default=3e-4, type=float)
-@click.option("--log-every", default=100, type=int)
-@click.option("--preview-dir", default=None)
-@click.option("--preview-clips", default=4, type=int)
-@click.option("--preview-fps", default=2.0, type=float)
+@_dataclass_options(ModelConfig)
+@_dataclass_options(TrainConfig, exclude=frozenset({"preview_fps"}))
 @click.pass_context
-def train_cmd(
-    ctx: click.Context,
-    env_id: str,
-    rollout_steps: int,
-    tile_size: int,
-    seed: int,
-    clip_length: int,
-    clip_stride: int | None,
-    max_clips: int | None,
-    save_dir: str,
-    load_dir: str | None,
-    base_channels: int,
-    train_steps: int,
-    batch_size: int,
-    learning_rate: float,
-    log_every: int,
-    preview_dir: str | None,
-    preview_clips: int,
-    preview_fps: float,
-) -> None:
+def train_cmd(ctx: click.Context, **kwargs) -> None:
     """Train the diffusion world model on MiniGrid rollouts."""
     env_config, dataset_config, model_config, train_config = _build_train_configs(
         ctx.params
