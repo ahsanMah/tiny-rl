@@ -10,7 +10,6 @@ import gymnasium as gym
 import minigrid  # noqa: F401  # registers MiniGrid envs in gymnasium
 import mlx.core as mx
 import numpy as np
-from click.core import ParameterSource
 from minigrid.wrappers import RGBImgObsWrapper
 
 from diffusion import (
@@ -213,7 +212,7 @@ CONFIG_SCHEMA: dict[str, set[str]] = {
         "preview_clips",
         "preview_fps",
     },
-    "model": {"base_channels"},
+    "model": {"base_channels", "num_transformer_blocks"},
     "train": {
         "save_dir",
         "load_dir",
@@ -230,45 +229,9 @@ CONFIG_SCHEMA: dict[str, set[str]] = {
         "num_samples",
     },
 }
-TRAIN_CONFIG_OPTIONS = {
-    "env_id": "env",
-    "rollout_steps": "dataset",
-    "tile_size": "dataset",
-    "seed": "dataset",
-    "clip_length": "dataset",
-    "clip_stride": "dataset",
-    "max_clips": "dataset",
-    "preview_dir": "dataset",
-    "preview_clips": "dataset",
-    "preview_fps": "dataset",
-    "base_channels": "model",
-    "save_dir": "train",
-    "load_dir": "train",
-    "train_steps": "train",
-    "batch_size": "train",
-    "learning_rate": "train",
-    "log_every": "train",
-}
-GENERATE_CONFIG_OPTIONS = {
-    "env_id": "env",
-    "tile_size": "dataset",
-    "seed": "dataset",
-    "clip_length": "dataset",
-    "clip_stride": "dataset",
-    "max_clips": "dataset",
-    "preview_fps": "dataset",
-    "load_dir": "generate",
-    "save_dir": "generate",
-    "generate_new_frames": "generate",
-    "generate_num_steps": "generate",
-    "num_samples": "generate",
-}
 
 
-def _load_experiment_config(config_path: Path | None) -> dict[str, dict[str, Any]]:
-    if config_path is None:
-        return {}
-
+def _load_experiment_config(config_path: Path) -> dict[str, dict[str, Any]]:
     with config_path.open("rb") as f:
         config = tomllib.load(f)
 
@@ -292,37 +255,6 @@ def _load_experiment_config(config_path: Path | None) -> dict[str, dict[str, Any
     return config
 
 
-def _resolve_command_options(
-    ctx: click.Context,
-    *,
-    config_path: Path | None,
-    option_sections: dict[str, str],
-) -> dict[str, Any]:
-    resolved = dict(ctx.params)
-    config = _load_experiment_config(config_path)
-    option_lookup = {
-        param.name: param
-        for param in ctx.command.params
-        if isinstance(param, click.Option) and param.name is not None
-    }
-
-    for option_name, section in option_sections.items():
-        if ctx.get_parameter_source(option_name) is not ParameterSource.DEFAULT:
-            continue
-        if option_name not in config.get(section, {}):
-            continue
-        raw_value = config[section][option_name]
-        try:
-            resolved[option_name] = option_lookup[option_name].type_cast_value(
-                ctx, raw_value
-            )
-        except click.ClickException as exc:
-            raise click.ClickException(
-                f"Invalid value for [{section}].{option_name}: {raw_value!r}"
-            ) from exc
-
-    return resolved
-
 
 def _build_dataset_config(resolved: dict[str, Any]) -> DatasetConfig:
     return DatasetConfig(
@@ -345,7 +277,10 @@ def _build_train_configs(
     return (
         EnvConfig(env_id=resolved["env_id"]),
         dataset_config,
-        ModelConfig(base_channels=resolved["base_channels"]),
+        ModelConfig(
+            base_channels=resolved["base_channels"],
+            num_transformer_blocks=resolved.get("num_transformer_blocks", 2),
+        ),
         TrainConfig(
             steps=resolved["train_steps"],
             batch_size=resolved["batch_size"],
@@ -379,14 +314,33 @@ def _build_generate_configs(
     )
 
 
-def _config_option(func):
-    return click.option(
-        "--config",
-        "config_path",
-        type=click.Path(exists=True, dir_okay=False, path_type=Path),
-        default=None,
-        help="Path to an experiment config TOML file.",
-    )(func)
+def _config_option(sections: list[str]):
+    """Return a decorator that adds an eager --config option for the given TOML sections.
+
+    When --config is provided, the named sections are merged into ctx.default_map so
+    Click applies them as fallback defaults before the command function is called.
+    Explicit CLI flags always take precedence.
+    """
+
+    def _callback(ctx: click.Context, _param: click.Parameter, value: Path | None) -> None:
+        if value is None:
+            return
+        config = _load_experiment_config(value)
+        ctx.default_map = {}
+        for section in sections:
+            ctx.default_map.update(config.get(section, {}))
+
+    def decorator(func):
+        return click.option(
+            "--config",
+            type=click.Path(exists=True, dir_okay=False, path_type=Path),
+            is_eager=True,
+            expose_value=False,
+            callback=_callback,
+            help="Path to an experiment config TOML file.",
+        )(func)
+
+    return decorator
 
 
 def _dataset_options(func):
@@ -411,7 +365,7 @@ def _train_dataset_options(func):
 
 
 @cli.command(name="train")
-@_config_option
+@_config_option(["env", "dataset", "model", "train"])
 @_train_dataset_options
 @click.option("--save-dir", default="logs/minigrid-v1")
 @click.option(
@@ -430,7 +384,6 @@ def _train_dataset_options(func):
 @click.pass_context
 def train_cmd(
     ctx: click.Context,
-    config_path: Path | None,
     env_id: str,
     rollout_steps: int,
     tile_size: int,
@@ -450,14 +403,11 @@ def train_cmd(
     preview_fps: float,
 ) -> None:
     """Train the diffusion world model on MiniGrid rollouts."""
-    resolved = _resolve_command_options(
-        ctx, config_path=config_path, option_sections=TRAIN_CONFIG_OPTIONS
-    )
     env_config, dataset_config, model_config, train_config = _build_train_configs(
-        resolved
+        ctx.params
     )
-    save_dir = resolved["save_dir"]
-    load_dir = resolved["load_dir"]
+    save_dir = ctx.params["save_dir"]
+    load_dir = ctx.params["load_dir"]
 
     env = gym.make(env_config.env_id)
     clips, action_clips = make_minigrid_dataset(
@@ -509,7 +459,7 @@ def train_cmd(
 
 
 @cli.command(name="generate")
-@_config_option
+@_config_option(["env", "dataset", "generate"])
 @_dataset_options
 @click.option(
     "--load-dir",
@@ -528,7 +478,6 @@ def train_cmd(
 @click.pass_context
 def generate_cmd(
     ctx: click.Context,
-    config_path: Path | None,
     env_id: str,
     tile_size: int,
     seed: int,
@@ -541,13 +490,9 @@ def generate_cmd(
     generate_num_steps: int,
     num_samples: int,
     preview_fps: float,
-    **_ignored,
 ) -> None:
     """Load a pretrained model and autoregressively generate a video."""
-    resolved = _resolve_command_options(
-        ctx, config_path=config_path, option_sections=GENERATE_CONFIG_OPTIONS
-    )
-    env_config, dataset_config, generate_config = _build_generate_configs(resolved)
+    env_config, dataset_config, generate_config = _build_generate_configs(ctx.params)
 
     if generate_config.load_dir is None:
         raise click.UsageError("Missing option '--load-dir'.")
@@ -579,7 +524,7 @@ def generate_cmd(
     sample_count = min(generate_config.num_samples, int(clips.shape[0]))
     generate_minigrid_video(
         model,
-        initial_clip=clips[:sample_count:, : model.max_context_size + 1],
+        initial_clip=clips[:sample_count, : model.max_context_size + 1],
         initial_actions=action_clips[:sample_count],
         num_actions=num_actions,
         num_new_frames=generate_config.generate_new_frames,
