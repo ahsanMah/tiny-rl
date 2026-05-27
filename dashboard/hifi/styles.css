@@ -1,0 +1,385 @@
+/* hifi/styles.css — editorial scientific-notebook theme
+   Paper-toned background, warm ink, restrained accent, hairlines.
+   Source Serif 4 for display + key numerals, IBM Plex Sans for UI,
+   JetBrains Mono for data. */
+
+:root {
+  /* Paper + ink */
+  --paper:       #f4f1ea;   /* primary canvas */
+  --paper-warm:  #faf6ec;   /* card / elevated */
+  --paper-cool:  #ece8df;   /* recessed / rail bg */
+  --paper-rule:  #ddd6c4;   /* subtle dividers */
+
+  --ink:         #1c1813;
+  --ink-2:       #4b4337;
+  --ink-3:       #7c7466;
+  --ink-4:       #a59c8b;
+
+  --hairline:        rgba(28, 24, 19, 0.10);
+  --hairline-strong: rgba(28, 24, 19, 0.18);
+  --hairline-dashed: rgba(28, 24, 19, 0.22);
+
+  /* Accent — rust orange, used sparingly for playheads, status, active */
+  --accent:        #b85a3e;
+  --accent-soft:   #d9876a;
+  --accent-deep:   #8a3f29;
+
+  /* Status */
+  --running:    #4f7a45;
+  --done:       #3a342b;
+  --failed:     #a3422a;
+  --queued:     #968b75;
+
+  /* Comparison run palette (deterministic per pin slot) */
+  --run-1: var(--ink);
+  --run-2: #7a5230;     /* umber */
+  --run-3: #3f6663;     /* muted teal */
+  --run-4: #6a4a64;     /* muted plum */
+  --run-5: #5a6a3a;     /* olive */
+
+  /* Typography */
+  --display:  'Source Serif 4', 'Iowan Old Style', Georgia, serif;
+  --ui:       'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --mono:     'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+
+  /* Scales */
+  --t-xs:  10px;
+  --t-sm:  11.5px;
+  --t-md:  13px;
+  --t-lg:  15px;
+  --t-xl:  18px;
+  --t-xxl: 24px;
+  --t-display: 32px;
+
+  /* Spacing */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-7: 32px;
+
+  --radius-sm: 3px;
+  --radius-md: 6px;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0; padding: 0;
+  height: 100%; width: 100%;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--ui);
+  font-size: var(--t-md);
+  line-height: 1.4;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: "ss01", "cv11";
+  overflow: hidden;
+}
+
+#root { width: 100%; height: 100%; display: flex; }
+
+/* Type utilities ---------------------------------------------------- */
+.display { font-family: var(--display); font-weight: 600; letter-spacing: -0.012em; }
+.serif   { font-family: var(--display); }
+.mono    { font-family: var(--mono); }
+.num     { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.italic  { font-style: italic; }
+
+.label-eyebrow {
+  font-family: var(--ui);
+  font-size: 9.5px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+.label-eyebrow.truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.muted  { color: var(--ink-3); }
+.muted-soft { color: var(--ink-4); }
+.strong { font-weight: 600; color: var(--ink); }
+
+/* Layout helpers ---------------------------------------------------- */
+.row { display: flex; align-items: center; }
+.col { display: flex; flex-direction: column; }
+.grow { flex: 1 1 auto; min-width: 0; min-height: 0; }
+.gap-1 { gap: var(--sp-1); }
+.gap-2 { gap: var(--sp-2); }
+.gap-3 { gap: var(--sp-3); }
+.gap-4 { gap: var(--sp-4); }
+.gap-6 { gap: var(--sp-6); }
+
+/* Hairlines --------------------------------------------------------- */
+.hr-h { height: 1px; background: var(--hairline); width: 100%; }
+.hr-v { width: 1px;  background: var(--hairline); height: 100%; }
+.border-r { border-right: 1px solid var(--hairline); }
+.border-l { border-left:  1px solid var(--hairline); }
+.border-t { border-top:    1px solid var(--hairline); }
+.border-b { border-bottom: 1px solid var(--hairline); }
+.border-b-strong { border-bottom: 1px solid var(--hairline-strong); }
+
+/* Tag chip ---------------------------------------------------------- */
+.tag {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 7px;
+  font: 500 var(--t-xs) var(--ui);
+  letter-spacing: 0.02em;
+  color: var(--ink-2);
+  background: var(--paper-warm);
+  border: 1px solid var(--hairline-strong);
+  border-radius: 2px;
+  white-space: nowrap;
+  user-select: none;
+  flex-shrink: 0;
+}
+.tag.solid { background: var(--ink); color: var(--paper-warm); border-color: var(--ink); }
+.tag.accent { color: var(--accent); border-color: var(--accent-soft); background: rgba(184,90,62,0.06); }
+.tag.ghost  { background: transparent; }
+.tag.dotted { border-style: dashed; }
+
+/* Status dot -------------------------------------------------------- */
+.status-dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 7px; }
+.status-dot.running { background: var(--running); box-shadow: 0 0 0 3px rgba(79,122,69,.18); }
+.status-dot.done    { background: var(--ink-3); }
+.status-dot.failed  { background: var(--failed); }
+.status-dot.queued  { background: var(--queued); }
+
+/* Buttons ----------------------------------------------------------- */
+.btn {
+  border: 1px solid var(--hairline-strong);
+  background: var(--paper-warm);
+  color: var(--ink);
+  font: 500 var(--t-sm) var(--ui);
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background .12s, border-color .12s, color .12s;
+  user-select: none;
+  white-space: nowrap;
+}
+.btn:hover { background: var(--paper); border-color: var(--ink-3); }
+.btn:active { background: var(--paper-cool); }
+.btn.icon { padding: 4px 6px; min-width: 24px; display: inline-flex; align-items: center; justify-content: center; }
+.btn.solid { background: var(--ink); color: var(--paper-warm); border-color: var(--ink); }
+.btn.solid:hover { background: #000; border-color: #000; }
+.btn.active { background: var(--ink); color: var(--paper-warm); border-color: var(--ink); }
+.btn.accent { background: var(--accent); color: var(--paper-warm); border-color: var(--accent); }
+.btn.ghost { background: transparent; }
+
+/* Input ------------------------------------------------------------- */
+.input {
+  border: 1px solid var(--hairline-strong);
+  background: var(--paper-warm);
+  font: 400 var(--t-sm) var(--ui);
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  color: var(--ink);
+  outline: none;
+  width: 100%;
+}
+.input:focus { border-color: var(--ink-3); background: #fff; }
+
+/* Selectable list rows --------------------------------------------- */
+.run-row {
+  display: grid;
+  align-items: center;
+  padding: 6px 10px;
+  font-size: var(--t-sm);
+  border-bottom: 1px solid var(--hairline);
+  cursor: pointer;
+  position: relative;
+  transition: background .1s;
+}
+.run-row:hover { background: var(--paper-warm); }
+.run-row.active {
+  background: var(--paper-warm);
+}
+.run-row.active::before {
+  content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 2px;
+  background: var(--accent);
+}
+
+/* Stats grid -------------------------------------------------------- */
+.kv {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  column-gap: var(--sp-4);
+  row-gap: 3px;
+  font-size: var(--t-sm);
+}
+.kv .k { color: var(--ink-3); font-family: var(--ui); white-space: nowrap; }
+.kv .v { font-family: var(--mono); font-variant-numeric: tabular-nums; text-align: right; color: var(--ink); white-space: nowrap; }
+.kv .v.changed { color: var(--accent); font-weight: 500; }
+.kv .v.old { color: var(--ink-4); text-decoration: line-through; font-size: 10.5px; }
+
+/* Sparkline / chart SVG defaults ----------------------------------- */
+.chart-svg { display: block; }
+.chart-svg .axis    { stroke: var(--ink); stroke-width: 1; fill: none; }
+.chart-svg .grid    { stroke: rgba(28,24,19,.08); stroke-width: 1; fill: none; }
+.chart-svg .focal   { stroke: var(--ink); stroke-width: 1.6; fill: none; }
+.chart-svg .ghost-1 { stroke: var(--run-2); stroke-width: 1.1; fill: none; stroke-dasharray: 4 2; opacity: .75; }
+.chart-svg .ghost-2 { stroke: var(--run-3); stroke-width: 1.1; fill: none; stroke-dasharray: 6 3; opacity: .75; }
+.chart-svg .ghost-3 { stroke: var(--run-4); stroke-width: 1.1; fill: none; stroke-dasharray: 2 2; opacity: .75; }
+.chart-svg .secondary { stroke: var(--ink-3); stroke-width: 1; fill: none; stroke-dasharray: 3 2; }
+.chart-svg .axis-text { fill: var(--ink-3); font: 9px var(--mono); }
+.chart-svg .playhead   { stroke: var(--accent); stroke-width: 1.2; fill: none; }
+.chart-svg .playhead-soft { stroke: var(--accent); stroke-width: 1; fill: none; stroke-dasharray: 3 3; opacity: .8; }
+
+/* Scrollbar (subtle, mono-tone) ------------------------------------ */
+.scroll {
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--ink-4) transparent;
+}
+.scroll::-webkit-scrollbar { width: 6px; height: 6px; }
+.scroll::-webkit-scrollbar-track { background: transparent; }
+.scroll::-webkit-scrollbar-thumb { background: var(--paper-rule); border-radius: 3px; }
+.scroll::-webkit-scrollbar-thumb:hover { background: var(--ink-4); }
+
+/* Card -------------------------------------------------------------- */
+.card { background: var(--paper-warm); border: 1px solid var(--hairline); }
+
+/* Drop down (visual placeholder, real menu wired up in JSX) -------- */
+.dropdown {
+  display: inline-flex; align-items: center; gap: 6px;
+  font: 500 var(--t-sm) var(--ui);
+  padding: 3px 8px;
+  border: 1px solid var(--hairline-strong);
+  background: var(--paper-warm);
+  border-radius: var(--radius-sm);
+  cursor: pointer; user-select: none;
+  white-space: nowrap;
+}
+.dropdown:hover { background: var(--paper); }
+.dropdown .caret { color: var(--ink-3); font-size: 9px; }
+
+/* Eyebrow rule: hairline + small caps title for sections */
+.eyebrow-rule {
+  display: flex; align-items: center; gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-4) var(--sp-1);
+}
+.eyebrow-rule::after {
+  content: ''; flex: 1; height: 1px; background: var(--hairline);
+}
+
+/* Video / canvas frame container */
+.player {
+  position: relative;
+  background: #181311;
+  border: 1px solid var(--hairline-strong);
+  overflow: hidden;
+}
+.player canvas { display: block; width: 100%; height: 100%; }
+.player .ph {
+  position: absolute; left: 0; right: 0; bottom: 0;
+  display: flex; justify-content: space-between;
+  padding: 6px 10px;
+  font: 500 var(--t-xs) var(--mono);
+  color: rgba(244,241,234,.85);
+  pointer-events: none;
+}
+
+/* Episode picker button */
+.ep-btn {
+  flex: 1;
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px;
+  padding: 6px 12px;
+  background: var(--paper-warm);
+  border: 1px solid var(--hairline-strong);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font: 500 var(--t-sm) var(--ui);
+  color: var(--ink-2);
+  transition: background .1s, border-color .1s, color .1s;
+}
+.ep-btn:hover { border-color: var(--ink-3); }
+.ep-btn.active {
+  background: var(--ink); color: var(--paper-warm); border-color: var(--ink);
+}
+.ep-btn.active .ep-icon { color: var(--accent-soft); }
+.ep-btn .ep-icon { color: var(--accent); font-size: 12px; }
+.ep-btn .ep-meta { font-family: var(--mono); font-size: 10.5px; opacity: .8; }
+
+/* Frame scrub track */
+.scrub {
+  display: flex; align-items: center; gap: 8px;
+  font: 500 var(--t-xs) var(--mono);
+  color: var(--ink-3);
+}
+.scrub .track {
+  flex: 1;
+  position: relative;
+  height: 4px;
+  background: var(--paper-rule);
+  border-radius: 2px;
+  cursor: pointer;
+}
+.scrub .fill {
+  position: absolute; left: 0; top: 0; bottom: 0;
+  background: var(--ink);
+  border-radius: 2px;
+}
+.scrub .head {
+  position: absolute;
+  top: -4px;
+  width: 12px; height: 12px;
+  background: var(--accent);
+  border-radius: 50%;
+  transform: translateX(-50%);
+  box-shadow: 0 1px 0 rgba(0,0,0,.15);
+}
+
+/* Hairline divider w/ ornament */
+.divider-ornament {
+  display: flex; align-items: center; gap: 8px;
+  color: var(--ink-4);
+  font: 9px var(--mono);
+}
+.divider-ornament::before,
+.divider-ornament::after { content: ''; flex: 1; height: 1px; background: var(--hairline); }
+
+/* Heatmap dot grid */
+.heatmap-grid { display: grid; gap: 2px; }
+.heatmap-grid > i {
+  display: block;
+  background: var(--ink);
+}
+
+/* Keyboard hint */
+.kbd {
+  font: 500 9.5px var(--mono);
+  padding: 1px 5px;
+  border: 1px solid var(--hairline-strong);
+  border-bottom-width: 2px;
+  border-radius: 3px;
+  color: var(--ink-2);
+  background: var(--paper-warm);
+}
+
+/* Document title banner */
+.doc-title {
+  display: flex; align-items: baseline; gap: var(--sp-3);
+  padding: 0 var(--sp-3);
+  min-width: 0;
+  overflow: hidden;
+}
+.doc-title .crumb {
+  font: 500 var(--t-sm) var(--ui);
+  color: var(--ink-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.doc-title .crumb .sep { margin: 0 6px; color: var(--ink-4); }
+.doc-title .crumb .current { color: var(--ink); font-weight: 600; }
