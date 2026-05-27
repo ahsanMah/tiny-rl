@@ -16,7 +16,11 @@ function IconPin({ filled = false, size = 11 }) {
 
 function RunRow({ run, isFocused, isPinned, onFocus, onTogglePin, lineSlot }) {
   const sparkValues = run.checkpoints.map(c => c.mean);
-  
+  // Pick the matching line style: slot 0 = focused, 1-3 = ghosts, null = unpinned default
+  const ls = lineSlot != null
+    ? (RUN_LINE_STYLES[lineSlot] || RUN_LINE_STYLES[RUN_LINE_STYLES.length - 1])
+    : RUN_LINE_DEFAULT;
+
   return (
     <div className={`run-row ${isFocused ? 'active' : ''}`}
          style={{ gridTemplateColumns: '10px 14px minmax(0,1fr) 50px 40px', columnGap: 6, padding: '5px 10px' }}
@@ -35,7 +39,12 @@ function RunRow({ run, isFocused, isPinned, onFocus, onTogglePin, lineSlot }) {
       <span className="strong" style={{ overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis', minWidth: 0 }}>
         {run.name}
       </span>
-      <Sparkline values={sparkValues} width={50} height={14} />
+      <Sparkline
+        values={sparkValues} width={50} height={14}
+        color={ls.color}
+        strokeWidth={ls.width}
+        strokeDasharray={ls.dash}
+      />
       <span className="num muted" style={{ textAlign: 'right', fontSize: 10.5 }}>{D.fmtReward(run.reward)}</span>
     </div>
   );
@@ -43,6 +52,17 @@ function RunRow({ run, isFocused, isPinned, onFocus, onTogglePin, lineSlot }) {
 
 function RailLeft({ runs, focusedId, pinnedIds, onFocus, onTogglePin, query, setQuery }) {
   const [groupBy, setGroupBy] = useS('alg'); // 'alg' | 'env' | 'flat'
+
+  // ── Slot map: focused run = 0, other pinned in D.RUNS order = 1, 2, 3 ──
+  // Must match the order FrameChartPair iterates pinnedRuns (D.RUNS order).
+  const slotMap = {};
+  slotMap[focusedId] = 0;
+  let nextSlot = 1;
+  for (const r of runs) {
+    if (r.id !== focusedId && pinnedIds.includes(r.id)) {
+      slotMap[r.id] = nextSlot++;
+    }
+  }
 
   const filtered = runs.filter(r => {
     if (!query) return true;
@@ -122,7 +142,8 @@ function RailLeft({ runs, focusedId, pinnedIds, onFocus, onTogglePin, query, set
               isPinned={true}
               onFocus={() => onFocus(r.id)}
               onTogglePin={() => onTogglePin(r.id)}
-                          />
+              lineSlot={slotMap[r.id] ?? null}
+            />
           ))}
         </div>
 
