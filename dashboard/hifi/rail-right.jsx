@@ -2,7 +2,7 @@
 
 function HpRow({ k, v, base, changed }) {
   return (
-    <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', minHeight: 18 }}>
+    <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', minHeight: 24 }}>
       <span className="muted" style={{ fontSize: 11 }}>{k}</span>
       <span style={{ display: 'flex', gap: 6, alignItems: 'baseline' }}>
         {changed && base !== undefined && (
@@ -18,8 +18,8 @@ function HpRow({ k, v, base, changed }) {
 
 function Section({ title, right, children }) {
   return (
-    <div className="col" style={{ padding: '10px 14px', borderBottom: '1px solid var(--hairline)' }}>
-      <div className="row" style={{ alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 6, gap: 8 }}>
+    <div className="col" style={{ padding: '14px 16px', borderBottom: '1px solid var(--hairline)' }}>
+      <div className="row" style={{ alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 10, gap: 8 }}>
         <span className="label-eyebrow" style={{ flex: '1 1 auto', minWidth: 0 }}>{title}</span>
         {right && <span style={{ fontSize: 10.5, color: 'var(--ink-3)', whiteSpace: 'nowrap', flex: '0 0 auto' }}>{right}</span>}
       </div>
@@ -44,7 +44,7 @@ function RailRight({ run, ckpt, rollout, frame, baselineRun, allRuns }) {
   const tdValues = D.frameSignal(run, ckpt, rollout, 'td_error');
 
   return (
-    <div className="col scroll" style={{ width: 296, background: 'var(--paper)', borderLeft: '1px solid var(--hairline)', height: '100%' }}>
+    <div className="col scroll" style={{ width: 'clamp(190px, 15vw, 280px)', flexShrink: 0, background: 'var(--paper)', borderLeft: '1px solid var(--hairline)', height: '100%' }}>
 
       {/* Focused run */}
       <Section title="Focused"
@@ -59,7 +59,7 @@ function RailRight({ run, ckpt, rollout, frame, baselineRun, allRuns }) {
         <div className="num muted" style={{ fontSize: 11, marginTop: 2 }}>
           #{run.id} · {run.env} · {run.alg.toUpperCase()}
         </div>
-        <div className="row" style={{ marginTop: 8, gap: 14 }}>
+        <div className="row" style={{ marginTop: 12, gap: 16 }}>
           <div className="col">
             <span className="muted" style={{ fontSize: 10 }}>steps</span>
             <span className="num strong" style={{ fontSize: 14 }}>{D.fmtStep(run.steps)}</span>
@@ -114,7 +114,7 @@ function RailRight({ run, ckpt, rollout, frame, baselineRun, allRuns }) {
         </div>
       </Section>
 
-
+      
       {/* Tags + notes */}
       <Section title="Tags + notes">
         <div className="row gap-1" style={{ flexWrap: 'wrap', marginBottom: 6 }}>
