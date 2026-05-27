@@ -146,53 +146,32 @@ const METRIC_OPTIONS = [
 ];
 
 function FrameChartPair({ focalRun, focalCkpt, focalRollout, frame, setFrame, pinnedRuns, metric, setMetric }) {
-  // Build "lines" for cumulative_return chart
-  const cumLines = useM(() => {
+  // ── Line builder — shared helper adds name/strokeColor/dash for tooltip ──
+  const buildLines = (sig) => {
     const out = [];
-// Focal
     out.push({
-      runId: focalRun.id,
-      values: D.frameSignal(focalRun, focalCkpt, focalRollout, 'cumulative_return'),
-      isFocal: true,
-      color: 'var(--ink)',
+      runId: focalRun.id, name: focalRun.name,
+      values: D.frameSignal(focalRun, focalCkpt, focalRollout, sig),
+      isFocal: true, strokeColor: RUN_LINE_STYLES[0].color, dash: null, color: 'var(--ink)',
     });
-    // Each pinned run contributes its best rollout @ its latest ckpt
+    let gi = 0;
     for (const pr of pinnedRuns) {
       if (pr.id === focalRun.id) continue;
       const c = pr.checkpoints[pr.checkpoints.length - 1];
       const ro = c.rollouts.find(r => r.kind === 'best') || c.rollouts[0];
-            out.push({
-        runId: pr.id,
-        values: D.frameSignal(pr, c, ro, 'cumulative_return'),
-        isFocal: false,
-        color: '',
+      const ls = RUN_LINE_STYLES[gi + 1] || RUN_LINE_STYLES[RUN_LINE_STYLES.length - 1];
+      out.push({
+        runId: pr.id, name: pr.name,
+        values: D.frameSignal(pr, c, ro, sig),
+        isFocal: false, strokeColor: ls.color, dash: ls.dash, color: '',
       });
-          }
+      gi++;
+    }
     return out;
-  }, [focalRun, focalCkpt, focalRollout, pinnedRuns]);
+  };
 
-  // Build lines for metric chart
-  const metricLines = useM(() => {
-    const out = [];
-    out.push({
-      runId: focalRun.id,
-      values: D.frameSignal(focalRun, focalCkpt, focalRollout, metric),
-      isFocal: true,
-      color: 'var(--ink)',
-    });
-        for (const pr of pinnedRuns) {
-      if (pr.id === focalRun.id) continue;
-      const c = pr.checkpoints[pr.checkpoints.length - 1];
-      const ro = c.rollouts.find(r => r.kind === 'best') || c.rollouts[0];
-            out.push({
-        runId: pr.id,
-        values: D.frameSignal(pr, c, ro, metric),
-        isFocal: false,
-        color: '',
-      });
-          }
-    return out;
-  }, [focalRun, focalCkpt, focalRollout, pinnedRuns, metric]);
+  const cumLines    = useM(() => buildLines('cumulative_return'), [focalRun, focalCkpt, focalRollout, pinnedRuns]);
+  const metricLines = useM(() => buildLines(metric),              [focalRun, focalCkpt, focalRollout, pinnedRuns, metric]);
 
   const cumAtCursor   = cumLines[0]?.values?.[Math.min(frame, cumLines[0].values.length - 1)];
   const metricAtCursor = metricLines[0]?.values?.[Math.min(frame, metricLines[0].values.length - 1)];
@@ -242,7 +221,7 @@ function FrameChartPair({ focalRun, focalCkpt, focalRollout, frame, setFrame, pi
 // Bare version (no header) — used when the parent renders its own title row
 function FrameLevelChartBare({ lines, frame, focalLength, setFrame, height = 148 }) {
   const svgRef = React.useRef(null);
-    const w = 480;
+  const w = 480;
   const h = height;
   const padL = 32, padR = 8, padT = 8, padB = 18;
   const innerW = w - padL - padR;
@@ -304,7 +283,7 @@ function FrameLevelChartBare({ lines, frame, focalLength, setFrame, height = 148
           </g>
         ))}
         {yLo < 0 && yHi > 0 && (
-          <line x1={padL} y1={yScale(0)} x2={w - padR} y2={yScale(0)} stroke="rgba(28,24,19,.25)" />
+          <line x1={padL} y1={yScale(0)} x2={w - padR} y2={yScale(0)} stroke="var(--chart-zero-stroke)" strokeWidth="0.8" />
         )}
         <line x1={padL} y1={padT + innerH} x2={w - padR} y2={padT + innerH} className="axis" />
         {xTicks.map((f, i) => (
