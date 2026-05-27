@@ -173,8 +173,6 @@ function RailLeft({ runs, focusedId, pinnedIds, onFocus, onTogglePin, query, set
       {/* Footer */}
       <div className="row" style={{ padding: '10px 14px', borderTop: '1px solid var(--hairline)', fontSize: 10.5, color: 'var(--ink-3)' }}>
         <span>{filtered.length} of {runs.length}</span>
-        <span className="grow" />
-        <span><span className="kbd">⌘</span>+<span className="kbd">K</span></span>
       </div>
     </div>
   );
