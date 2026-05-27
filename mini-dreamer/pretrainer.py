@@ -18,6 +18,7 @@ from diffusion import (
     generate_video,
     infer_model_config,
     load_model,
+    sample_euler_to_mp4,
     save_model,
     train_on_dataset,
 )
@@ -163,6 +164,14 @@ def generate_minigrid_video(
         fps=sample_fps,
         actions=full_actions,
     )
+    sample_euler_to_mp4(
+        model,
+        conditioning_clips=initial_clip,  # (B, L, H, W, C)
+        actions=full_actions,  # (B, L+1)
+        output_path=f"{save_dir}/denoising.mp4",
+        num_steps=num_steps,
+        fps=num_steps / 4.0,  # always 8 seconds
+    )
     print(f"saved generated video to: {save_dir}")
     return generated
 
@@ -271,7 +280,9 @@ def _config_option(sections: list[str]):
     Explicit CLI flags always take precedence.
     """
 
-    def _callback(ctx: click.Context, _param: click.Parameter, value: Path | None) -> None:
+    def _callback(
+        ctx: click.Context, _param: click.Parameter, value: Path | None
+    ) -> None:
         if value is None:
             return
         config = _load_experiment_config(value)
@@ -379,30 +390,25 @@ def train_cmd(
         )
         print(f"saved previews to: {dataset_config.preview_dir}")
 
-    save_path = Path(train_config.save_dir)
     num_actions = int(env.action_space.n)
-    train_logger = RLLogger(log_dir=str(save_path.parent), exp_name=save_path.name)
+    save_path = Path(train_config.save_dir)
 
     initial_model = None
     if train_config.load_dir is not None:
         initial_model = load_model(train_config.load_dir)
         print(f"resuming training from: {train_config.load_dir}")
 
-    try:
-        model, _ = train_on_dataset(
-            clips,
-            actions=action_clips,
-            num_env_actions=num_actions,
-            model_config=model_config,
-            train_config=train_config,
-            model=initial_model,
-            train_logger=train_logger,
-        )
+    model, _ = train_on_dataset(
+        clips,
+        actions=action_clips,
+        num_env_actions=num_actions,
+        model_config=model_config,
+        train_config=train_config,
+        model=initial_model,
+    )
 
-        save_model(model, save_path, config=infer_model_config(model))
-        print(f"saved model to: {save_path}")
-    finally:
-        train_logger.close()
+    save_model(model, save_path, config=infer_model_config(model))
+    print(f"saved model to: {save_path}")
 
 
 @cli.command(name="generate")

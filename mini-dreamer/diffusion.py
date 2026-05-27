@@ -5,6 +5,7 @@ import json
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from pprint import pp, pprint
 from typing import Literal, Tuple
 
 import mlx.core as mx
@@ -18,6 +19,7 @@ from video_utils import (
     load_video_dataset,
     make_random_video_dataset,
     save_clip_previews,
+    save_diffusion_mp4,
 )
 
 NoiseDistribution = Literal["uniform", "logitnorm"]
@@ -41,6 +43,8 @@ class TrainConfig:
     num_gen_samples: int = 4
     sample_steps: int = 32
     preview_fps: float = 8.0
+    sampling_distribution: str = "uniform"
+    log_tensorboard: bool = False
 
 
 def make_final_frame_mask(x: mx.array) -> mx.array:
@@ -194,7 +198,16 @@ def sample_euler(
     conditioning_clips: mx.array,
     actions: mx.array,
     num_steps: int = 32,
-) -> mx.array:
+    return_intermediates: bool = False,
+) -> mx.array | list[mx.array]:
+    """Run Euler integration to generate the next frame.
+
+    Args:
+        return_intermediates: if True, return a list of ``(B, 1, H, W, C)``
+            arrays — one snapshot of the noisy frame ``x`` after each Euler
+            step — instead of the final concatenated clip.  Useful for
+            visualising the denoising trajectory.
+    """
     if num_steps <= 0:
         raise ValueError(f"num_steps must be > 0, got {num_steps}")
 
@@ -211,15 +224,53 @@ def sample_euler(
     )
     x = mx.random.normal(x_shape, dtype=conditioning_clips.dtype)
     dt = 1.0 / num_steps
+    intermediates: list[mx.array] = []
     for step in range(num_steps):
         t = mx.full((batch_size,), step / num_steps, dtype=conditioning_clips.dtype)
         xt = mx.concatenate([conditioning_clips, x], axis=1)
         v = model(xt, t, context=actions)
         x = x + dt * v[:, -1:]
+        if return_intermediates:
+            mx.eval(x)
+            intermediates.append(x)
+
+    if return_intermediates:
+        return intermediates
 
     samples = mx.concatenate([conditioning_clips, x], axis=1)
     mx.eval(samples)
     return samples
+
+
+def sample_euler_to_mp4(
+    model: UNet3D,
+    *,
+    conditioning_clips: mx.array,
+    actions: mx.array,
+    output_path: str | Path,
+    num_steps: int = 32,
+    fps: float = 8.0,
+) -> None:
+    """Generate one new frame and save the full denoising trajectory as an MP4.
+
+    The MP4 shows the context frames as static columns on the left and the
+    evolving generated frame on the right — one MP4 frame per Euler step.
+
+    Args:
+        conditioning_clips: ``(B, L, H, W, C)`` context frames.
+        actions: ``(B, L+1)`` action tokens.
+        output_path: destination ``.mp4`` file.
+        num_steps: Euler integration steps (= number of MP4 frames).
+        fps: playback speed of the saved video.
+    """
+    intermediates = sample_euler(
+        model,
+        conditioning_clips=conditioning_clips,
+        actions=actions,
+        num_steps=num_steps,
+        return_intermediates=True,
+    )
+    save_diffusion_mp4(conditioning_clips, intermediates, output_path, fps=fps)
 
 
 def save_model(model: UNet3D, save_dir: str | Path, *, config: dict) -> None:
@@ -310,10 +361,18 @@ def train_on_dataset(
     model_config: ModelConfig | None = None,
     train_config: TrainConfig | None = None,
     model: UNet3D | None = None,
-    train_logger: RLLogger | None = None,
 ):
     model_config = ModelConfig() if model_config is None else model_config
     train_config = TrainConfig() if train_config is None else train_config
+    train_logger = None
+    if train_config.log_tensorboard:
+        save_path = Path(train_config.save_dir)
+        train_logger = RLLogger(log_dir=str(save_path.parent), exp_name=save_path.name)
+
+    print("Using train config:")
+    pprint(train_config)
+    print("Using model config:")
+    pprint(model_config)
 
     if actions is None:
         actions = mx.zeros((videos.shape[0], 1), dtype=mx.int8)
