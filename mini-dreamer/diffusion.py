@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import time
 from dataclasses import asdict, dataclass
@@ -52,19 +53,9 @@ def make_final_frame_mask(x: mx.array) -> mx.array:
     return mx.reshape(frame_mask, (1, x.shape[1], 1, 1, 1))
 
 
-def infer_model_config(model: UNet3D) -> dict[str, int]:
-    return {
-        "in_channels": int(model.res1.shortcut.weight.shape[-1]),
-        "out_channels": int(model.out_conv.weight.shape[0]),
-        "base_channels": int(model.out_conv.weight.shape[-1]),
-        "num_actions": int(model.context_embed.embed.weight.shape[0]),
-        "max_context_size": int(model.max_context_size),
-    }
-
-
-def clone_model(model: UNet3D) -> UNet3D:
-    clone = UNet3D(**infer_model_config(model))
-    clone.update(tree_map(lambda x: x * 1.0, model.parameters()))
+def clone_model(model_config_dict, original_parameters) -> UNet3D:
+    clone = UNet3D(**model_config_dict)
+    clone.update(tree_map(lambda x: x * 1.0, original_parameters))
     return clone
 
 
@@ -104,7 +95,8 @@ def sample_noise(
 class FlowMatchingTrainer:
     def __init__(
         self,
-        model: UNet3D,
+        model,
+        ema_model,
         *,
         learning_rate: float = 1e-3,
         weight_decay: float = 1e-4,
@@ -115,7 +107,7 @@ class FlowMatchingTrainer:
         logit_norm_scale: float = 1.0,
     ):
         self.model = model
-        self.ema_model = clone_model(model)
+        self.ema_model = ema_model
         self.ema_decay = ema_decay
         self.optimizer = optim.AdamW(
             learning_rate=learning_rate, weight_decay=weight_decay
@@ -403,7 +395,6 @@ def train_on_dataset(
     num_env_actions: int = 1,
     model_config: ModelConfig | None = None,
     train_config: TrainConfig | None = None,
-    model: UNet3D | None = None,
     sample_fps: float = 8.0,
 ):
     model_config = ModelConfig() if model_config is None else model_config
@@ -436,14 +427,27 @@ def train_on_dataset(
     val_videos = videos[train_size:]
     val_actions = actions[train_size:]
 
-    if model is None:
-        model = UNet3D(
-            in_channels=int(videos.shape[-1]),
-            out_channels=int(videos.shape[-1]),
-            num_actions=num_env_actions,
-            **asdict(model_config),
-        )
-    trainer = FlowMatchingTrainer(model, learning_rate=train_config.learning_rate)
+    input_config = {
+        "in_channels": int(videos.shape[-1]),
+        "out_channels": int(videos.shape[-1]),
+        "num_actions": num_env_actions,
+    }
+    full_model_config = {**input_config, **asdict(model_config)}
+
+    if train_config.load_dir is not None:
+        model = load_model(train_config.load_dir)
+        print(f"resuming training from: {train_config.load_dir}")
+    else:
+        model = UNet3D(**full_model_config)
+
+    ema_model = clone_model(full_model_config, model.parameters())
+    trainer = FlowMatchingTrainer(
+        model, ema_model, learning_rate=train_config.learning_rate
+    )
+
+    checkpoint_interval = 1000
+    save_path = Path(train_config.save_dir) / "resume-ckpt"
+    print(f"periodically saving checkpoints to: {save_path}")
 
     print("dataset:", tuple(videos.shape))
     print("train split:", tuple(train_videos.shape))
@@ -514,6 +518,13 @@ def train_on_dataset(
                     {t: p[:, 0] for t, p in val_preds.items()},
                 )
 
+            if step % checkpoint_interval == 0:
+                save_model(
+                    model,
+                    save_path,
+                    config={"step": step, **asdict(train_config), **full_model_config},
+                )
+
     if train_config.save_dir is not None:
         samples = sample_euler(
             trainer.model,
@@ -529,7 +540,7 @@ def train_on_dataset(
         )
         print(f"saved samples to: {train_config.save_dir}")
 
-    return trainer.ema_model, losses
+    return trainer.ema_model, full_model_config
 
 
 def train_overfit_random_noise(

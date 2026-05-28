@@ -3,7 +3,7 @@ from __future__ import annotations
 import tomllib
 import types
 import typing
-from dataclasses import MISSING, dataclass, fields
+from dataclasses import MISSING, asdict, dataclass, fields
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +18,6 @@ from diffusion import (
     ModelConfig,
     TrainConfig,
     generate_video,
-    infer_model_config,
     load_model,
     sample_euler_to_mp4,
     save_model,
@@ -218,6 +217,7 @@ def cli() -> None:
 
     """MiniGrid world-model pretraining and generation."""
 
+
 def _load_experiment_config(config_path: Path) -> dict[str, dict[str, Any]]:
     with config_path.open("rb") as f:
         config = tomllib.load(f)
@@ -372,22 +372,16 @@ def train_cmd(ctx: click.Context, **kwargs) -> None:
     num_actions = int(env.action_space.n)
     save_path = Path(train_config.save_dir)
 
-    initial_model = None
-    if train_config.load_dir is not None:
-        initial_model = load_model(train_config.load_dir)
-        print(f"resuming training from: {train_config.load_dir}")
-
-    model, _ = train_on_dataset(
+    model, full_model_config = train_on_dataset(
         clips,
         actions=action_clips,
         num_env_actions=num_actions,
         model_config=model_config,
         train_config=train_config,
-        model=initial_model,
         sample_fps=dataset_config.preview_fps,
     )
 
-    save_model(model, save_path, config=infer_model_config(model))
+    save_model(model, save_path, config=full_model_config)
     print(f"saved model to: {save_path}")
 
 

@@ -2,7 +2,7 @@
 env_id = "MiniGrid-Empty-8x8-v0"
 
 [dataset]
-rollout_steps = 10000
+rollout_steps = 20000
 tile_size = 16
 seed = 0
 clip_length = 4
@@ -12,16 +12,18 @@ preview_clips = 4
 preview_fps = 2.0
 
 [model]
-base_channels = 16
-num_transformer_blocks = 2
+base_channels = 32
+num_transformer_blocks = 4
 
 [train]
 save_dir = "logs/minigrid-v1"
-train_steps = 10000
-batch_size = 32
+train_steps = 100000
+batch_size = 8
 learning_rate = 3e-4
 log_every = 100
 log_tensorboard = true
+sampling_distribution  ="logitnorm"
+
 
 [generate]
 load_dir = "logs/minigrid-v1"
