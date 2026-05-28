@@ -18,43 +18,6 @@ function saveSession(state) {
   } catch {}
 }
 
-// ── Tweak defaults — EDITMODE block lets the host persist tweaks ─────
-const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
-  "accent": "#f1be6d",
-  "density": "regular",
-  "paperTone": "warm",
-  "playerOverlay": "none"
-}/*EDITMODE-END*/;
-
-// Theme inject — translate tweaks to CSS variable overrides
-function ThemeInject({ tweaks, darkMode }) {
-  const css = `
-    :root {
-      --accent: ${tweaks.accent};
-      ${darkMode && tweaks.paperTone === 'cool' ? `
-        --paper:      #141612;
-        --paper-warm: #1b1e1b;
-        --paper-cool: #0f110f;
-      ` : darkMode && tweaks.paperTone === 'neutral' ? `
-        --paper:      #151412;
-        --paper-warm: #1c1a17;
-        --paper-cool: #0f0e0c;
-      ` : ''}
-      ${tweaks.density === 'compact' ? `
-        --t-xs:  10px;
-        --t-sm:  11.5px;
-        --t-md:  13px;
-        --t-lg:  15px;
-      ` : tweaks.density === 'spacious' ? `
-        --t-xs:  12px;
-        --t-sm:  13.5px;
-        --t-md:  15px;
-        --t-lg:  17px;
-      ` : ''}
-    }
-  `;
-  return <style dangerouslySetInnerHTML={{ __html: css }} />;
-}
 
 function App() {
   const init = uM(loadSession, []);
@@ -68,7 +31,7 @@ function App() {
   const [frame, setFrame] = uS(init.frame || 0);
   const [playing, setPlaying] = uS(false);
   const [speed, setSpeed] = uS(1);
-  const [overlay, setOverlay] = uS(TWEAK_DEFAULTS.playerOverlay);
+  const [overlay, setOverlay] = uS('none');
   const [metric, setMetric] = uS(init.metric || 'value');
   const [query, setQuery] = uS('');
   const [darkMode, setDarkMode] = uS(() => {
@@ -77,21 +40,12 @@ function App() {
 
   // Apply theme to document
   uE(() => {
-    document.documentElement.classList.toggle('light-medium-contrast', !darkMode);
+    document.documentElement.classList.toggle('dark', darkMode);
 
     try { localStorage.setItem('rl-dark-mode', String(darkMode)); } catch {}
   }, [darkMode]);
 
   const toggleDark = uCB(() => setDarkMode(d => !d), []);
-
-  // Tweaks
-  const [tweaks, setTweak] = useTweaks(TWEAK_DEFAULTS);
-
-  // When tweak default overlay changes, propagate to player state
-  uE(() => {
-    if (tweaks.playerOverlay !== overlay) setOverlay(tweaks.playerOverlay);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tweaks.playerOverlay]);
 
   // ── Derived ────────────────────────────────────────────────────
   const focusedRun = uM(() => D.RUNS.find(r => r.id === focusedId), [focusedId]);
@@ -191,8 +145,6 @@ function App() {
 
   return (
     <React.Fragment>
-      <ThemeInject tweaks={tweaks} darkMode={darkMode} />
-
       <div style={{ display: 'flex', width: '100%', height: '100%' }}>
         {/* LEFT RAIL */}
         <RailLeft
@@ -225,7 +177,7 @@ function App() {
 
           {/* Scrollable body */}
           <div className="scroll col grow" style={{ minHeight: 0 }}>
-            <div className="col" style={{ padding: '18px 16px 12px', gap: 14, flex: '0 0 auto' }}>
+            <div className="col" style={{ padding: '28px 20px 20px', gap: 20, flex: '0 0 auto' }}>
               <WalkerPlayer
                 run={focusedRun} ckpt={ckpt} rollout={rollout}
                 frame={frame} setFrame={setFrame}
@@ -266,53 +218,6 @@ function App() {
         />
       </div>
 
-      {/* Tweaks */}
-      <TweaksPanel title="Tweaks">
-        <TweakSection label="Accent">
-          <TweakColor
-            label="hue"
-            value={tweaks.accent}
-            options={['#f1be6d', '#b85a3e', '#3e6db8', '#3e8a5a', '#7a4a8a']}
-            onChange={(v) => setTweak('accent', v)}
-          />
-        </TweakSection>
-        <TweakSection label="Theme">
-          <TweakRadio
-            label="paper tone"
-            value={tweaks.paperTone}
-            options={[
-              { value: 'warm',    label: 'warm' },
-              { value: 'cool',    label: 'cool' },
-              { value: 'neutral', label: 'neutral' },
-            ]}
-            onChange={(v) => setTweak('paperTone', v)}
-          />
-        </TweakSection>
-        <TweakSection label="Density">
-          <TweakRadio
-            label="text"
-            value={tweaks.density}
-            options={[
-              { value: 'compact',  label: 'compact' },
-              { value: 'regular',  label: 'regular' },
-              { value: 'spacious', label: 'spacious' },
-            ]}
-            onChange={(v) => setTweak('density', v)}
-          />
-        </TweakSection>
-        <TweakSection label="Player">
-          <TweakRadio
-            label="default overlay"
-            value={tweaks.playerOverlay}
-            options={[
-              { value: 'none',       label: 'none' },
-              { value: 'saliency',   label: 'saliency' },
-              { value: 'trajectory', label: 'traj' },
-            ]}
-            onChange={(v) => setTweak('playerOverlay', v)}
-          />
-        </TweakSection>
-      </TweaksPanel>
     </React.Fragment>
   );
 }

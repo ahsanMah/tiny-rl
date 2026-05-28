@@ -178,16 +178,6 @@ function frameSignal(run, ckpt, rollout, metric) {
   return arr;
 }
 
-// Action probabilities @ frame f — Dirichlet-ish vector summing to 1
-function actionProbs(run, ckpt, rollout, frame) {
-  const seed = (parseInt(run.id, 16) + ckpt.step / 1e5 + rollout.idx * 13 + Math.floor(frame / 4)) | 0;
-  const r = rng(seed);
-  const raw = [];
-  for (let i = 0; i < N_ACTIONS; i++) raw.push(0.05 + Math.pow(r(), 1.4));
-  const s = raw.reduce((a, b) => a + b, 0);
-  return raw.map(x => x / s);
-}
-
 // Look up run by id
 function getRun(id) { return RUNS.find(r => r.id === id); }
 function getCheckpoint(run, step) { return run.checkpoints.find(c => c.step === step) || run.checkpoints[run.checkpoints.length - 1]; }
@@ -210,7 +200,6 @@ D.RUNS = RUNS;
 D.ALGS = ALGS;
 D.N_ACTIONS = N_ACTIONS;
 D.frameSignal = frameSignal;
-D.actionProbs = actionProbs;
 D.getRun = getRun;
 D.getCheckpoint = getCheckpoint;
 D.getRollout = getRollout;
@@ -218,14 +207,5 @@ D.fmtStep = fmtStep;
 D.fmtReward = fmtReward;
 D.fmtTime = fmtTime;
 D.rng = rng;
-
-// Action labels per env (walker2d uses joint torques; we'll pretend semantic)
-D.ACTION_LABELS = {
-  'walker2d-v4': ['thigh','leg','foot','thigh-r','leg-r','foot-r','hip','—'],
-  'ant-v4':      ['hip-fl','knee-fl','hip-fr','knee-fr','hip-bl','knee-bl','hip-br','knee-br'],
-  'humanoid-v4': ['abdomen','hip','knee','ankle','shoulder','elbow','wrist','—'],
-  'Breakout':    ['noop','fire','right','left','—','—','—','—'],
-  'Pong':        ['noop','fire','right','left','rl','lf','—','—'],
-};
 
 window.D = D;

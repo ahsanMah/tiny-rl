@@ -34,7 +34,7 @@ function ChartTooltip({ lines, hoverFrame, hoverX }) {
   return (
     <div style={{
       position: 'absolute', top: 8, pointerEvents: 'none', zIndex: 20,
-      background: 'var(--paper-warm)', border: '1px solid var(--hairline)',
+      background: 'var(--surface)', border: '1px solid var(--hairline)',
       borderRadius: 6, padding: '6px 10px', minWidth: 150,
       boxShadow: '0 3px 14px rgba(0,0,0,0.30)',
       ...anchor,
@@ -186,7 +186,7 @@ function FrameLevelChart({
           }}
           onMouseMove={onHover}
           onMouseLeave={() => setHover(null)}
-          style={{ cursor: 'col-resize', display: 'block', height: 'clamp(148px, calc(13vw + 55px), 280px)' }}
+          style={{ cursor: 'col-resize', display: 'block', height: 'clamp(160px, calc(13vw + 55px), 320px)' }}
         >
           {/* Y gridlines + labels */}
           {yTicks.map((v, i) => (
@@ -223,30 +223,10 @@ function FrameLevelChart({
               </g>
             );
           })}
-          {/* Focal — area fill then line */}
-          {lines.filter(l => l.isFocal).map((ln) => {
-            const baseline = padT + innerH;
-            const pts = [];
-            for (let i = 0; i < ln.values.length; i += 2) {
-              pts.push([xScale(i), yScale(ln.values[i])]);
-            }
-            const lastI = ln.values.length - 1;
-            if (lastI % 2 !== 0) pts.push([xScale(lastI), yScale(ln.values[lastI])]);
-            const areaD = pts.length === 0 ? '' :
-              `M ${pts[0][0].toFixed(1)},${baseline} L ${pts.map(p => `${p[0].toFixed(1)},${p[1].toFixed(2)}`).join(' L ')} L ${pts[pts.length-1][0].toFixed(1)},${baseline} Z`;
-            return (
-              <g key={ln.runId}>
-                <defs>
-                  <linearGradient id="focalFill" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%"   stopColor="var(--accent)" stopOpacity="0.22" />
-                    <stop offset="100%" stopColor="var(--accent)" stopOpacity="0" />
-                  </linearGradient>
-                </defs>
-                <path d={areaD} fill="url(#focalFill)" />
-                <path d={buildPath(ln.values, xScale, yScale, 2)} className="focal" />
-              </g>
-            );
-          })}
+          {/* Focal line */}
+          {lines.filter(l => l.isFocal).map((ln) => (
+            <path key={ln.runId} d={buildPath(ln.values, xScale, yScale, 2)} className="focal" />
+          ))}
 
           {/* Hover crosshair */}
           {hover != null && (
@@ -404,86 +384,11 @@ function Sparkline({ values, width = 64, height = 16, color = 'var(--ink-2)', st
   );
 }
 
-// ── Action distribution bars ─────────────────────────────────────────
-function ActionBars({ probs, labels, width = 246, height = 64 }) {
-  const w = width;
-  const h = height;
-  const n = probs.length;
-  const gap = 3;
-  const bw = (w - gap * (n - 1)) / n;
-  const max = Math.max(...probs);
-  return (
-    <svg width="100%" height={h} viewBox={`0 0 ${w} ${h}`} style={{ display: 'block' }}>
-      {probs.map((p, i) => {
-        const bh = (p / max) * (h - 14);
-        return (
-          <g key={i}>
-            <rect x={i * (bw + gap)} y={h - 12 - bh} width={bw} height={bh}
-                  fill={i === probs.indexOf(max) ? 'var(--accent)' : 'var(--ink)'} />
-            <text x={i * (bw + gap) + bw / 2 - 4} y={h - 2}
-                  style={{ font: '11px var(--mono)', fill: 'var(--ink-3)' }}>{labels[i]}</text>
-          </g>
-        );
-      })}
-    </svg>
-  );
-}
-
-// ── TD-error strip (1-row heatmap synced to frame) ───────────────────
-function TdErrorStrip({ values, frame, totalFrames, width = 246, height = 38 }) {
-  const w = width;
-  const h = height;
-  const cols = Math.min(64, values.length);
-  const cw = (w - 2) / cols;
-  // Bin the values to columns
-  const binned = useMemo(() => {
-    const out = new Array(cols).fill(0);
-    const binSize = Math.ceil(values.length / cols);
-    for (let i = 0; i < cols; i++) {
-      let max = 0;
-      for (let j = i * binSize; j < Math.min(values.length, (i + 1) * binSize); j++) {
-        const v = Math.abs(values[j]);
-        if (v > max) max = v;
-      }
-      out[i] = max;
-    }
-    return out;
-  }, [values, cols]);
-  const maxV = Math.max(...binned, 0.01);
-  const activeCol = Math.floor((frame / (totalFrames || 1)) * cols);
-  return (
-    <svg width="100%" height={h} viewBox={`0 0 ${w} ${h}`} style={{ display: 'block' }}>
-      {binned.map((v, i) => {
-        const alpha = Math.min(1, v / maxV);
-        return (
-          <rect key={i}
-            x={1 + i * cw}
-            y={2}
-            width={cw - 0.5}
-            height={h - 4}
-            fill={`rgba(237,232,223,${(alpha * 0.75).toFixed(2)})`}
-          />
-        );
-      })}
-      {/* Frame indicator */}
-      <line
-        x1={1 + activeCol * cw + cw / 2}
-        y1={0}
-        x2={1 + activeCol * cw + cw / 2}
-        y2={h}
-        stroke="var(--accent)" strokeWidth="1"
-      />
-    </svg>
-  );
-}
-
 window.ChartTooltip = ChartTooltip;
 window.FrameLevelChart = FrameLevelChart;
 window.LossChart = LossChart;
 window.CheckpointSparkbar = CheckpointSparkbar;
 window.Sparkline = Sparkline;
-window.ActionBars = ActionBars;
-window.TdErrorStrip = TdErrorStrip;
 window.buildPath = buildPath;
 window.RUN_LINE_STYLES = RUN_LINE_STYLES;
 window.RUN_LINE_DEFAULT = RUN_LINE_DEFAULT;

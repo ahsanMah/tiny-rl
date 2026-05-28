@@ -415,4 +415,3 @@ function WalkerPlayer({
 }
 
 window.WalkerPlayer = WalkerPlayer;
-window.drawWalker = drawWalker;

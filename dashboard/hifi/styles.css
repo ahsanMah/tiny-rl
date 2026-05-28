@@ -1,136 +1,116 @@
-/* hifi/styles.css — editorial scientific-notebook theme
-Source Serif 4 for display + key numerals, IBM Plex Sans for UI,
-JetBrains Mono for data.
-
-── TRY 1: THEMING WITH M3 (TO BE IMPROVE) ───────────────────────────────────────────────
-1. This file defines dark M3 tokens in :root (default/fallback).
-2. light-mc.css defines .light-medium-contrast which overrides them.
-3. Semantic tokens (--paper, --ink, --accent…) reference var(--md-sys-color-*)
-  so they automatically update when the theme class changes — no duplication.
-─────────────────────────────────────────────────────────────────── */
-
-@import './css/light-mc.css';
-
+/* hifi/styles.css
+   Two fonts: DM Sans (UI) + JetBrains Mono (data).
+   Dark by default; light mode via .light-medium-contrast on <html>.
+   light-mc.css overrides the same tokens for light mode. */
 
 /* ════════════════════════════════════════════════════════════════════
-  M3 DARK TOKEN LAYER  (mirrors dark-mc.css — these are the defaults)
-  Uses `html` (specificity 0,0,1) so that .light-medium-contrast
-  (specificity 0,1,0) always wins when the light class is present.
-  ════════════════════════════════════════════════════════════════════ */
-html {
-  /* surfaces */
-  --md-sys-color-surface:                  rgb(24  19  11);
-  --md-sys-color-surface-variant:          rgb(79  69  57);
-  --md-sys-color-surface-container-lowest: rgb(11   7   3);
-  --md-sys-color-surface-container-low:    rgb(34  29  21);
-  --md-sys-color-surface-container:        rgb(45  39  31);
-  --md-sys-color-surface-container-high:   rgb(56  50  41);
-  --md-sys-color-surface-bright:           rgb(74  67  58);
-
-  /* ink */
-  --md-sys-color-on-surface:               rgb(236 225 212);
-  --md-sys-color-on-surface-variant:       rgb(210 196 180);
-  --md-sys-color-outline:                  rgb(155 143 128);
-  --md-sys-color-outline-variant:          rgb(79  69  57);
-
-  /* primary (golden amber) */
-  --md-sys-color-primary:                  rgb(241 190 109);  /* primary-fixed-dim — warm amber, readable on dark */
-  --md-sys-color-on-primary:               rgb(53  34   0);
-  --md-sys-color-primary-container:        rgb(182 137  62);
-  --md-sys-color-primary-fixed:            rgb(255 222 174);  /* soft glow / hover fill */
-
-  /* secondary */
-  --md-sys-color-secondary-fixed-dim:      rgb(220 195 161);
-
-  /* tertiary (sage green) */
-  --md-sys-color-tertiary:                 rgb(203 228 184);
-  --md-sys-color-on-tertiary:              rgb(24  42  13);
-  --md-sys-color-tertiary-container:       rgb(129 152 113);
-  --md-sys-color-tertiary-fixed:           rgb(209 234 190);
-  --md-sys-color-tertiary-fixed-dim:       rgb(182 206 163);
-
-  /* error */
-  --md-sys-color-error:                    rgb(255 180 171);
-}
-
-
-/* ════════════════════════════════════════════════════════════════════
-  SEMANTIC BRIDGE  — friendly names → M3 tokens
-  Everything below never has a hardcoded color. If M3 changes, only
-  the block above (and light-mc.css) needs updating.
-  ════════════════════════════════════════════════════════════════════ */
+   TOKENS  (dark defaults — light-mc.css overrides these)
+   html specificity (0,0,1) loses to .light-medium-contrast (0,1,0)
+   ════════════════════════════════════════════════════════════════════ */
 :root {
   /* ── Surfaces ──────────────────────────────────────────────────── */
-  --paper:      var(--md-sys-color-surface);
-  --paper-warm: var(--md-sys-color-surface-container);
-  --paper-cool: var(--md-sys-color-surface-container-low);
-  --paper-rule: var(--md-sys-color-surface-variant);
+  --paper:        rgb(255 248 244);
+  --surface:      rgb(230 218 205);  
+  --surface-low:  rgb(245 236 226);
+  --surface-deep: rgb(255 255 255); 
 
-  /* ── Ink ───────────────────────────────────────────────────────── */
-  --ink:   var(--md-sys-color-on-surface);
-  --ink-2: var(--md-sys-color-on-surface-variant);
-  --ink-3: var(--md-sys-color-outline);
-  --ink-4: var(--md-sys-color-outline-variant);
+  --ink:   rgb(19  17  14);
+  --ink-2: rgb(61  53  43);
+  --ink-3: rgb(110  95  78);
+  --ink-4: rgb(162 145 125);          /* was rgb(118 107 96) — too close to ink-3 */
 
-  /* ── Hairlines — opacity layers over outline ───────────────────── */
-  --hairline:        color-mix(in srgb, var(--md-sys-color-outline) 22%, transparent);
-  --hairline-strong: color-mix(in srgb, var(--md-sys-color-outline) 42%, transparent);
-  --hairline-dashed: color-mix(in srgb, var(--md-sys-color-outline) 55%, transparent);
+  --accent:     rgb(221, 147, 20);     /* was rgb(73 50 16) — now reads as a color */
+  --accent-dim: rgb(205 158  35);     /* was rgb(180 140 60) — more saturated */
+  --accent-on:  rgb(255 248 232);     /* was rgb(230 192 147) — lighter for contrast */
 
-  /* ── Accent (golden amber) ─────────────────────────────────────── */
-  --accent:      var(--md-sys-color-primary);
-  --accent-soft: var(--md-sys-color-primary-fixed);
-  --accent-deep: var(--md-sys-color-primary-container);
+  --green:     rgb(28  105   0);      /* was rgb(24 82 0) */
+  --green-dim: rgb(88  138  52);      /* was rgb(81 119 60) */
+  --green-on:  rgb(255 255 255);
 
-  /* ── Tertiary (sage green) ─────────────────────────────────────── */
-  --tertiary:     var(--md-sys-color-tertiary);
-  --tertiary-on:  var(--md-sys-color-on-tertiary);
-  --tertiary-dim: var(--md-sys-color-tertiary-container);
+  --hairline:        color-mix(in srgb, var(--ink-3) 16%, transparent);
+  --hairline-strong: color-mix(in srgb, var(--ink-3) 32%, transparent);
+  --hairline-dashed: color-mix(in srgb, var(--ink-3) 45%, transparent);
 
-  /* ── Status ────────────────────────────────────────────────────── */
-  --running: var(--tertiary);
-  --done:    var(--md-sys-color-outline);
-  --failed:  var(--md-sys-color-error);
-  --queued:  var(--md-sys-color-outline-variant);
 
-  /* ── Comparison run palette ────────────────────────────────────── */
-  --run-1: var(--ink);
-  --run-2: var(--md-sys-color-secondary-fixed-dim);
-  --run-3: var(--md-sys-color-tertiary-fixed-dim);
-  --run-4: var(--md-sys-color-error);
-  --run-5: var(--md-sys-color-tertiary-fixed);
+  --running: var(--green);
+  --done:    var(--ink-3);
+  --failed:  rgb(116 0 6);
+  --queued:  var(--ink-4);
+  
+  --run-1: var(--ink);  /* add this back */
+  --run-2: rgb(185  110   0);
+  --run-3: rgb(45   130  10);
+  --run-4: rgb(175   25  15);
+  --run-5: rgb(20    80 200);
+  --run-6: rgb(78, 19, 161);
+  --run-7: rgb(132, 15, 138);
+  --run-8: rgb(18, 152, 150);
+  --run-9: rgb(81, 185, 6);
 
   /* ── Typography ────────────────────────────────────────────────── */
-  --display: 'Source Serif 4', Georgia, serif;
-  --ui:      'DM Sans', system-ui, -apple-system, sans-serif;
-  --mono:    'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
-
-  /* ── Chart strokes — theme-aware opacity layers ────────────────── */
-  --chart-axis-stroke: color-mix(in srgb, var(--md-sys-color-on-surface) 18%, transparent);
-  --chart-grid-stroke:  color-mix(in srgb, var(--md-sys-color-on-surface)  6%, transparent);
-  --chart-zero-stroke:  color-mix(in srgb, var(--md-sys-color-on-surface) 16%, transparent);
+  --ui:   'DM Sans', system-ui, -apple-system, sans-serif;
+  --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
 
   /* ── Type scale ────────────────────────────────────────────────── */
-  --t-xs:  12px;
-  --t-sm:  13px;
-  --t-md:  15px;
-  --t-lg:  17px;
-  --t-xl:  20px;
-  --t-xxl: 25px;
+  --t-xs:  12.5px;
+  --t-sm:  14px;
+  --t-md:  15.5px;
+  --t-lg:  18px;
+  --t-xl:  21px;
+  --t-xxl: 26px;
   --t-display: 36px;
 
   /* ── Spacing ───────────────────────────────────────────────────── */
-  --sp-1: 5px;  --sp-2: 10px; --sp-3: 14px; --sp-4: 18px;
-  --sp-5: 24px; --sp-6: 30px; --sp-7: 40px;
+  --sp-1: 6px;  --sp-2: 12px; --sp-3: 18px; --sp-4: 24px;
+  --sp-5: 32px; --sp-6: 44px; --sp-7: 56px;
 
-  --radius-sm: 3px;
-  --radius-md: 6px;
+  --radius-sm: 4px;
+  --radius-md: 8px;
+
+  /* ── Chart strokes ─────────────────────────────────────────────── */
+  --chart-axis-stroke: color-mix(in srgb, var(--ink) 18%, transparent);
+  --chart-grid-stroke:  color-mix(in srgb, var(--ink)  6%, transparent);
+  --chart-zero-stroke:  color-mix(in srgb, var(--ink) 16%, transparent);
 }
 
+.dark {
+  /* ── Surfaces ──────────────────────────────────────────────────── */
+  --paper:        rgb(24  19  11);   /* main background              */
+  --surface:      rgb(45  39  31);   /* elevated: cards, inputs      */
+  --surface-low:  rgb(34  29  21);   /* recessed: left rail          */
+  --surface-deep: rgb(11   7   3);   /* player backdrop              */
+
+  /* ── Ink ───────────────────────────────────────────────────────── */
+  --ink:   rgb(236 225 212);
+  --ink-2: rgb(210 196 180);
+  --ink-3: rgb(155 143 128);
+  --ink-4: rgb(79   69  57);
+
+  /* ── Hairlines ─────────────────────────────────────────────────── */
+  --hairline:        color-mix(in srgb, var(--ink-3) 16%, transparent);
+  --hairline-strong: color-mix(in srgb, var(--ink-3) 32%, transparent);
+  --hairline-dashed: color-mix(in srgb, var(--ink-3) 45%, transparent);
+
+  /* ── Accent (amber) ────────────────────────────────────────────── */
+  --accent:      rgb(233, 169, 30);
+  --accent-on:   rgb(111 73 0);
+  --accent-dim:  rgb(255 222 174);
+
+  /* ── Green (running status, pins) ──────────────────────────────── */
+  --green:     rgb(82  155  50);
+  --green-dim: rgb(45   95  20);
+  --green-on:  rgb(8    30   0);
+
+  /* ── Status ────────────────────────────────────────────────────── */
+  --running: var(--green);
+  --done:    var(--ink-3);
+  --failed:  rgb(255 180 171);
+  --queued:  var(--ink-4);
+}
 
 /* ════════════════════════════════════════════════════════════════════
-  BASE RESET + GLOBAL STYLES
-  ════════════════════════════════════════════════════════════════════ */
+   BASE RESET + GLOBAL STYLES
+   ════════════════════════════════════════════════════════════════════ */
 * { box-sizing: border-box; }
 
 html, body {
@@ -150,8 +130,8 @@ html, body {
 #root { width: 100%; height: 100%; display: flex; }
 
 /* Type utilities ---------------------------------------------------- */
-.display { font-family: var(--display); font-weight: 600; letter-spacing: -0.012em; }
-.serif   { font-family: var(--display); }
+.display { font-family: var(--ui); font-weight: 600; }
+.serif   { font-family: var(--ui); }
 .mono    { font-family: var(--mono); }
 .num     { font-family: var(--mono); font-variant-numeric: tabular-nums; }
 .italic  { font-style: italic; }
@@ -171,13 +151,13 @@ html, body {
   min-width: 0;
 }
 
-.muted {font-size: var(--t-sm) !important; color: var(--ink-3);}
+.muted      { font-size: var(--t-sm) !important; color: var(--ink-3); }
 .muted-soft { color: var(--ink-4); }
-.strong { font-weight: 600; color: var(--ink); }
+.strong     { font-weight: 600; color: var(--ink); }
 
 /* Layout helpers ---------------------------------------------------- */
-.row { display: flex; align-items: center; }
-.col { display: flex; flex-direction: column; }
+.row  { display: flex; align-items: center; }
+.col  { display: flex; flex-direction: column; }
 .grow { flex: 1 1 auto; min-width: 0; min-height: 0; }
 .gap-1 { gap: var(--sp-1); }
 .gap-2 { gap: var(--sp-2); }
@@ -200,18 +180,18 @@ html, body {
   padding: 2px 7px;
   font: 500 var(--t-xs) var(--ui);
   letter-spacing: 0.02em;
-  color: var(--ink-2);
-  background: var(--paper-warm);
+  color: var(--green-on);
+  background: var(--green);
   border: 1px solid var(--hairline-strong);
   border-radius: 2px;
   white-space: nowrap;
   user-select: none;
   flex-shrink: 0;
 }
-.tag.solid { background: var(--ink); color: var(--paper-warm); border-color: var(--ink); }
-.tag.accent { color: var(--accent); border-color: var(--accent-soft); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.tag.solid  { background: var(--ink); color: var(--surface); border-color: var(--ink); }
+.tag.accent { color: var(--accent); border-color: var(--accent-dim); background: color-mix(in srgb, var(--accent) 8%, transparent); }
 .tag.ghost  { background: transparent; }
-.tag.dotted { border-style: dashed; }
+.tag.dotted { border-style: dashed; color: var(--accent)}
 
 /* Status dot -------------------------------------------------------- */
 .status-dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 7px; }
@@ -221,8 +201,8 @@ html, body {
 }
 
 @keyframes pulse {
-  0%, 100% { box-shadow: 0 0 0 3px color-mix(in srgb, var(--tertiary) 20%, transparent); }
-  50%       { box-shadow: 0 0 0 6px color-mix(in srgb, var(--tertiary) 38%, transparent); }
+  0%, 100% { box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 20%, transparent); }
+  50%       { box-shadow: 0 0 0 6px color-mix(in srgb, var(--green) 38%, transparent); }
 }
 .status-dot.done   { background: var(--ink-3); }
 .status-dot.failed { background: var(--failed); }
@@ -232,7 +212,7 @@ html, body {
 /* Buttons ----------------------------------------------------------- */
 .btn {
   border: 1px solid var(--hairline-strong);
-  background: var(--paper-warm);
+  background: var(--surface);
   color: var(--ink);
   font: 500 var(--t-sm) var(--ui);
   padding: 4px 10px;
@@ -243,21 +223,21 @@ html, body {
   white-space: nowrap;
 }
 .btn:hover  { background: var(--paper); border-color: var(--ink-3); }
-.btn:active { background: var(--paper-cool); }
+.btn:active { background: var(--surface-low); }
 .btn.icon   { padding: 1px; min-width: 24px; display: inline-flex; align-items: center; justify-content: center; font-size: var(--t-xl); }
-.btn.solid  { background: var(--ink);      color: var(--paper-warm); border-color: var(--ink); }
+.btn.solid  { background: var(--ink);    color: var(--surface); border-color: var(--ink); }
 .btn.solid:hover { background: var(--ink-2); border-color: var(--ink-2); }
-.btn.tert   { background: var(--tertiary); color: var(--tertiary-on); border-color: var(--tertiary); }
+.btn.tert   { background: var(--green);  color: var(--green-on); border-color: var(--green); }
 .btn.tert:hover { filter: brightness(1.1); }
-.btn.active { background: var(--ink);      color: var(--paper-warm); border-color: var(--ink); }
-.btn.accent { background: var(--accent);   color: var(--paper-warm); border-color: var(--accent); }
+.btn.active { background: var(--green);    color: var(--green-on); border-color: var(--ink); }
+.btn.accent { background: var(--accent); color: var(--surface); border-color: var(--accent); }
 .btn.ghost  { background: transparent; }
 
 
 /* Input ------------------------------------------------------------- */
 .input {
   border: 1px solid var(--hairline-strong);
-  background: var(--paper-warm);
+  background: var(--surface);
   font: 400 var(--t-sm) var(--ui);
   padding: 4px 8px;
   border-radius: var(--radius-sm);
@@ -265,7 +245,7 @@ html, body {
   outline: none;
   width: 100%;
 }
-.input:focus { border-color: var(--accent-soft); background: var(--paper-warm); }
+.input:focus { border-color: var(--accent-dim); background: var(--surface); }
 
 /* Selectable list rows --------------------------------------------- */
 .run-row {
@@ -278,11 +258,11 @@ html, body {
   position: relative;
   transition: background .1s;
 }
-.run-row:hover  { background: var(--paper-warm); }
-.run-row.active { background: var(--paper-warm); }
+.run-row:hover  { background: var(--surface); }
+.run-row.active { background: var(--surface); }
 .run-row.active::before {
   content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
-  background: linear-gradient(to bottom, var(--accent), var(--tertiary));
+  background: linear-gradient(to bottom, var(--accent), var(--green));
   box-shadow: 2px 0 14px var(--accent);
 }
 
@@ -291,7 +271,7 @@ html, body {
   display: grid;
   grid-template-columns: auto 1fr;
   column-gap: var(--sp-4);
-  row-gap: 6px;
+  row-gap: 10px;
   font-size: var(--t-sm);
 }
 .kv .k { color: var(--ink-3); font-family: var(--ui); white-space: nowrap; }
@@ -303,13 +283,13 @@ html, body {
 .chart-svg { display: block; }
 .chart-svg .axis    { stroke: var(--chart-axis-stroke); stroke-width: 1; fill: none; }
 .chart-svg .grid    { stroke: var(--chart-grid-stroke); stroke-width: 1; fill: none; }
-.chart-svg .focal   { stroke: var(--accent); stroke-width: 2; fill: none; }
+.chart-svg .focal   { stroke: var(--run-1); stroke-width: 2; fill: none; }
 .chart-svg .ghost-1 { stroke: var(--run-2); stroke-width: 1.2; fill: none; stroke-dasharray: 4 2; opacity: .88; }
 .chart-svg .ghost-2 { stroke: var(--run-3); stroke-width: 1.2; fill: none; stroke-dasharray: 6 3; opacity: .88; }
 .chart-svg .ghost-3 { stroke: var(--run-4); stroke-width: 1.2; fill: none; stroke-dasharray: 2 2; opacity: .88; }
 .chart-svg .secondary { stroke: var(--ink-3); stroke-width: 1; fill: none; stroke-dasharray: 3 2; }
 .chart-svg .axis-text { fill: var(--ink-3); font: 11px var(--mono); }
-.chart-svg .playhead   { stroke: var(--accent); stroke-width: 1.2; fill: none; }
+.chart-svg .playhead      { stroke: var(--accent); stroke-width: 1.2; fill: none; }
 .chart-svg .playhead-soft { stroke: var(--accent); stroke-width: 1; fill: none; stroke-dasharray: 3 3; opacity: .8; }
 
 /* Scrollbar (subtle, mono-tone) ------------------------------------ */
@@ -320,19 +300,19 @@ html, body {
 }
 .scroll::-webkit-scrollbar { width: 6px; height: 6px; }
 .scroll::-webkit-scrollbar-track { background: transparent; }
-.scroll::-webkit-scrollbar-thumb { background: var(--paper-rule); border-radius: 3px; }
-.scroll::-webkit-scrollbar-thumb:hover { background: var(--ink-4); }
+.scroll::-webkit-scrollbar-thumb { background: var(--ink-4); border-radius: 3px; }
+.scroll::-webkit-scrollbar-thumb:hover { background: var(--ink-3); }
 
 /* Card -------------------------------------------------------------- */
-.card { background: var(--paper-cool); border: 1px solid var(--hairline); }
+.card { background: var(--surface-low); border: 1px solid var(--hairline); }
 
-/* Drop down (visual placeholder, real menu wired up in JSX) -------- */
+/* Dropdown ---------------------------------------------------------- */
 .dropdown {
   display: inline-flex; align-items: center; gap: 6px;
   font: 500 var(--t-sm) var(--ui);
   padding: 3px 8px;
   border: 1px solid var(--hairline-strong);
-  background: var(--paper-warm);
+  background: var(--surface);
   border-radius: var(--radius-sm);
   cursor: pointer; user-select: none;
   white-space: nowrap;
@@ -344,14 +324,14 @@ html, body {
 /* Eyebrow rule: hairline + small caps title for sections */
 .eyebrow-rule {
   display: flex; align-items: center; gap: var(--sp-2);
-  padding: var(--sp-3) var(--sp-4) var(--sp-1);
+  padding: var(--sp-4) var(--sp-4) var(--sp-2);
 }
 .eyebrow-rule::after { content: ''; flex: 1; height: 1px; background: var(--hairline); }
 
 /* Video / canvas frame container */
 .player {
   position: relative;
-  background: var(--md-sys-color-surface-container-lowest);
+  background: var(--surface-deep);
   border: 1px solid var(--hairline-strong);
   overflow: hidden;
 }
@@ -371,7 +351,7 @@ html, body {
   display: flex; align-items: center; justify-content: space-between;
   gap: 8px;
   padding: 6px 12px;
-  background: var(--paper-warm);
+  background: var(--surface);
   border: 1px solid var(--hairline-strong);
   border-radius: var(--radius-sm);
   cursor: pointer;
@@ -380,9 +360,9 @@ html, body {
   transition: background .1s, border-color .1s, color .1s;
 }
 .ep-btn:hover { border-color: var(--ink-3); }
-.ep-btn.active { background: var(--tertiary); color: var(--tertiary-on); border-color: var(--tertiary); }
-.ep-btn.active .ep-icon { color: var(--accent); }
-.ep-btn .ep-icon { color: var(--tertiary); font-size: var(--t-sm); }
+.ep-btn.active { background: var(--green); color: var(--green-on); border-color: var(--green); }
+.ep-btn.active .ep-icon { color: var(--accent);}
+.ep-btn .ep-icon { color: var(--green); font-size: var(--t-sm); }
 .ep-btn .ep-meta { font-family: var(--mono); font-size: var(--t-xs); opacity: .8; }
 
 
@@ -394,7 +374,7 @@ html, body {
 }
 .scrub .track {
   flex: 1; position: relative; height: 4px;
-  background: color-mix(in srgb, var(--md-sys-color-on-surface) 10%, transparent);
+  background: color-mix(in srgb, var(--ink) 10%, transparent);
   border-radius: 2px; cursor: pointer;
 }
 .scrub .fill {
@@ -432,7 +412,7 @@ html, body {
   border-bottom-width: 2px;
   border-radius: 3px;
   color: var(--ink-2);
-  background: var(--paper-warm);
+  background: var(--surface);
 }
 
 /* Document title banner */
@@ -443,11 +423,11 @@ html, body {
 }
 .doc-title .crumb {
   font: 500 var(--t-md) var(--ui);
-  color: var(--ink-3);
+  color: var(--accent);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   min-width: 0;
 }
-.doc-title .crumb .sep { margin: 0 6px; color: var(--ink-4); }
+.doc-title .crumb .sep     { margin: 0 6px; color: var(--ink-4); }
 .doc-title .crumb .current { color: var(--ink); font-weight: 600; }
