@@ -138,6 +138,32 @@ async function loadAllRuns() {
   console.log('All runs loaded:', runs);
   return runs;
 }
+// ── Real signal loading (.npz files) ────────────────────────────────────
+// We use JSZip to unzip  and then parse each .npy 
+
+// Cache: rollout.dir → { step_reward: Float32Array, cumulative_return: Float32Array, ... }
+const SIGNAL_CACHE = new Map();
+
+// Parse a single .npy binary buffer into a Float32Array.
+function parseNpy(buffer) {
+  const view = new DataView(buffer);
+  const major = view.getUint8(6);
+  const headerLen = major >= 2 ? view.getUint32(8, true) : view.getUint16(8, true);
+  const headerStart = major >= 2 ? 12 : 10;
+  const headerStr = new TextDecoder().decode(new Uint8Array(buffer, headerStart, headerLen));
+  const dataBuffer = buffer.slice(headerStart + headerLen);
+
+  const dtypeMatch = headerStr.match(/'descr':\s*'([^']+)'/);
+  const dtype = dtypeMatch ? dtypeMatch[1] : '<f4';
+
+  switch (dtype) {
+    case '<f4': return new Float32Array(dataBuffer);
+    case '<f8': return new Float32Array(new Float64Array(dataBuffer)); // downcast to float32
+    case '<i4': return new Int32Array(dataBuffer);
+    default:    return new Float32Array(dataBuffer);
+  }
+}
+
 
 // ── Per-frame signal synthesis ───────────────────────────────────────────
 // Still used as a fallback for signals not present in the real .npz files.
@@ -149,7 +175,7 @@ function frameKey(runId, step, kind, metric) {
 }
 
 function frameSignal(run, ckpt, rollout, metric) {
-  const key = frameKey(run.id, ckpt.step, rollout.kind, metric);
+    const key = frameKey(run.id, ckpt.step, rollout.kind, metric);
   if (FRAME_CACHE.has(key)) return FRAME_CACHE.get(key);
 
   const len = rollout.length;
