@@ -101,7 +101,7 @@ html {
   --run-5: var(--md-sys-color-tertiary-fixed);
 
   /* ── Typography ────────────────────────────────────────────────── */
-  --display: 'Source Serif 4', Georgia, serif;
+  --display: 'DM Sans', system-ui, -apple-system, sans-serif;
   --ui:      'DM Sans', system-ui, -apple-system, sans-serif;
   --mono:    'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
 
@@ -150,8 +150,8 @@ html, body {
 #root { width: 100%; height: 100%; display: flex; }
 
 /* Type utilities ---------------------------------------------------- */
-.display { font-family: var(--display); font-weight: 600; letter-spacing: -0.012em; }
-.serif   { font-family: var(--display); }
+.display { font-family: var(--ui); font-weight: 600; }
+.serif   { font-family: var(--ui); }
 .mono    { font-family: var(--mono); }
 .num     { font-family: var(--mono); font-variant-numeric: tabular-nums; }
 .italic  { font-style: italic; }
