@@ -1,13 +1,18 @@
-// hifi/data.jsx — synthetic data layer for the prototype
-// All deterministic. In production these come from a backend.
-//
-// Hierarchy: Project → Run → Checkpoint → Rollout (best/median/worst + 2 more)
-// Each rollout has per-frame signals: step_reward, value, action_logp,
-// advantage, td_error, entropy, action_probs[8].
+// hifi/data.jsx — real data loader
+// Replaces the synthetic data generator with actual files from dashboard_artifacts.
 
 const D = {};
 
-// ── Deterministic RNG (mulberry32-ish) ───────────────────────────────
+// ── String hash (replaces the old parseInt(id, 16) which only worked for hex IDs) ──
+function hashString(str) {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    hash = (Math.imul(31, hash) + str.charCodeAt(i)) | 0;
+  }
+  return Math.abs(hash);
+}
+
+// ── Deterministic RNG — still used by LossStrip for now ─────────────────
 function rng(seed) {
   let s = (seed | 0) || 1;
   return () => {
@@ -18,111 +23,142 @@ function rng(seed) {
   };
 }
 
-// ── Algorithms / env presets ─────────────────────────────────────────
-const ALGS = ['ppo', 'sac', 'dqn', 'rainbow', 'impala'];
-
-// ── Runs ─────────────────────────────────────────────────────────────
-const RAW_RUNS = [
-  // Walker family (focal)
-  { name: 'ppo-walker-v37', id: 'a4f2', alg: 'ppo', env: 'walker2d-v4', status: 'running', steps: 3.2e6,  reward: 842,  ago: '12m',  tags: ['locomotion','ppo','lr-sweep'] },
-  { name: 'ppo-walker-v36', id: 'a4ee', alg: 'ppo', env: 'walker2d-v4', status: 'done',    steps: 10e6,  reward: 811,  ago: '4h 22m', tags: ['locomotion','ppo','baseline'], note: 'entropy collapsed at ~3M, recovered after lr warmup' },
-  { name: 'ppo-walker-v35', id: 'a4ec', alg: 'ppo', env: 'walker2d-v4', status: 'done',    steps: 10e6,  reward: 774,  ago: '1d',     tags: ['locomotion','ppo'] },
-  { name: 'ppo-walker-v34', id: 'a4e9', alg: 'ppo', env: 'walker2d-v4', status: 'failed',  steps: 1.1e6, reward: null, ago: '1d 4h', tags: ['locomotion','ppo','crashed'], note: 'NaN gradients at 1.1M' },
-  { name: 'ppo-walker-v33', id: 'a4e6', alg: 'ppo', env: 'walker2d-v4', status: 'done',    steps: 10e6,  reward: 712,  ago: '2d',     tags: ['locomotion','ppo'] },
-  { name: 'ppo-walker-v32', id: 'a4e3', alg: 'ppo', env: 'walker2d-v4', status: 'done',    steps: 10e6,  reward: 688,  ago: '2d',     tags: ['locomotion','ppo'] },
-  // Ant family
-  { name: 'sac-ant-tuned-3', id: 'b201', alg: 'sac',     env: 'ant-v4',    status: 'running', steps: 6.7e6,  reward: 1218,  ago: '40m', tags: ['locomotion','sac'] },
-  { name: 'sac-ant-tuned-2', id: 'b200', alg: 'sac',     env: 'ant-v4',    status: 'done',    steps: 10e6,   reward: 1102,  ago: '1d',  tags: ['locomotion','sac'] },
-  { name: 'sac-ant-tuned-1', id: 'b1ff', alg: 'sac',     env: 'ant-v4',    status: 'done',    steps: 10e6,   reward: 1004,  ago: '3d',  tags: ['locomotion','sac'] },
-  { name: 'sac-ant-base',    id: 'b1fc', alg: 'sac',     env: 'ant-v4',    status: 'done',    steps: 10e6,   reward: 894,   ago: '5d',  tags: ['locomotion','sac','baseline'] },
-  // Atari family
-  { name: 'dqn-breakout-v9', id: 'c012', alg: 'dqn',     env: 'Breakout',  status: 'done',    steps: 50e6,   reward: 312,   ago: '1d',  tags: ['atari','dqn'] },
-  { name: 'dqn-breakout-v8', id: 'c011', alg: 'dqn',     env: 'Breakout',  status: 'done',    steps: 50e6,   reward: 289,   ago: '4d',  tags: ['atari','dqn'] },
-  { name: 'dqn-breakout-v7', id: 'c010', alg: 'dqn',     env: 'Breakout',  status: 'done',    steps: 50e6,   reward: 241,   ago: '6d',  tags: ['atari','dqn'] },
-  { name: 'rainbow-pong-v2', id: 'c104', alg: 'rainbow', env: 'Pong',      status: 'done',    steps: 20e6,   reward: 21,    ago: '7d',  tags: ['atari','rainbow'] },
-  { name: 'rainbow-pong-v1', id: 'c103', alg: 'rainbow', env: 'Pong',      status: 'done',    steps: 20e6,   reward: 19,    ago: '7d',  tags: ['atari','rainbow'] },
-  { name: 'impala-mujoco-1', id: 'd044', alg: 'impala',  env: 'humanoid-v4', status: 'done',  steps: 30e6,   reward: 602,   ago: '9d',  tags: ['locomotion','impala'] },
-];
-
-// ── Hyperparams (focal + relatives) ──────────────────────────────────
-const HP_DEFAULTS = {
-  ppo: { lr: '3e-4', lr_warmup: '—', gamma: '0.99', gae_lambda: '0.95', clip: '0.2', entropy_c: '0.005', batch: '2048', minibatch: '64', epochs: '10', vf_coef: '0.5', n_envs: '16', max_grad: '0.5' },
-  sac: { lr: '3e-4', tau: '0.005', gamma: '0.99', alpha: '0.2', batch: '256', buffer: '1M', target_freq: '1', n_envs: '8' },
-  dqn: { lr: '6.25e-5', gamma: '0.99', batch: '32', buffer: '1M', eps_start: '1.0', eps_end: '0.01', target_freq: '8000', n_envs: '1' },
-  rainbow: { lr: '6.25e-5', gamma: '0.99', batch: '32', buffer: '1M', noisy: 'true', n_atoms: '51', n_step: '3', n_envs: '1' },
-  impala: { lr: '6e-4', gamma: '0.99', entropy_c: '0.01', batch: '32', n_envs: '256', unroll: '20' },
-};
-
-// Per-run hp overrides (where they differ from algo default)
-const HP_OVERRIDES = {
-  'a4f2': { lr: '1e-4', n_envs: '32' },                                          // v37
-  'a4ee': { lr: '3e-4', lr_warmup: '50k', entropy_c: '0.01', n_envs: '32' },     // v36 — focal
-  'a4ec': { lr: '1e-4', entropy_c: '0.005', n_envs: '16' },                      // v35 — baseline
-  'a4e9': { lr: '3e-3', n_envs: '32' },                                          // v34 — failed
-  'a4e6': { lr: '1e-4', n_envs: '16' },                                          // v33
-  'b201': { lr: '5e-4' },
-};
-
-// ── Checkpoints per run ──────────────────────────────────────────────
-// 13 ckpts spanning 0.5M → 10M for finished walker runs, fewer for in-progress.
-// Each ckpt holds 5 rollouts: best, q3, median, q1, worst.
-function genCheckpoints(run) {
-  const r = rng(parseInt(run.id, 16));
-  const totalSteps = run.steps;
-  const baselineMax = run.reward != null ? run.reward * 1.08 : 100;
-  const ckptCount = run.status === 'failed' ? 2 : (run.status === 'running' ? Math.max(3, Math.floor(totalSteps / 1e6) + 1) : 13);
-  const ckpts = [];
-  for (let i = 0; i < ckptCount; i++) {
-    const tFrac = (i + 1) / ckptCount;
-    const step = Math.round(totalSteps * tFrac / 1e5) * 1e5;
-    // Sigmoid-ish growth toward baselineMax
-    const base = baselineMax * (1 - Math.exp(-3.2 * tFrac));
-    // Inject one entropy-collapse dip for the focal run (v36, i=5)
-    const isDip = run.id === 'a4ee' && i === 5;
-    const dipMul = isDip ? 0.55 : 1;
-    const mean = Math.round(base * dipMul + (r() - 0.5) * baselineMax * 0.05);
-    const std = Math.round(Math.max(20, baselineMax * 0.05 + (r() * 30)));
-    const rollouts = ['best','q3','median','q1','worst'].map((kind, j) => {
-      const k = [1.18, 1.04, 0.96, 0.86, 0.78][j];
-      const ret = Math.round(mean * k);
-      const len = Math.round(1200 + (k - 0.78) * 600 + r() * 80); // best is longer
-      return { kind, return: ret, length: len, idx: j };
-    });
-    ckpts.push({ step, mean, std, best: rollouts[0].return, median: rollouts[2].return, worst: rollouts[4].return, rollouts, isDip });
-  }
-  return ckpts;
+// ── Format helpers (unchanged — still used by the UI) ───────────────────
+function fmtStep(s) {
+  if (s >= 1e6) return `${(s / 1e6).toFixed(s % 1e6 === 0 ? 0 : 2)}M`;
+  if (s >= 1e3) return `${(s / 1e3).toFixed(0)}k`;
+  return `${s}`;
+}
+function fmtReward(r) { return r == null ? '—' : (r >= 1000 ? `+${(r / 1000).toFixed(1)}k` : `${r >= 0 ? '+' : ''}${r.toFixed(1)}`); }
+function fmtTime(secs) {
+  const m = Math.floor(secs / 60);
+  const s = Math.floor(secs % 60);
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
-// Compose runs with checkpoints
-const RUNS = RAW_RUNS.map(r => ({
-  ...r,
-  hp: { ...HP_DEFAULTS[r.alg], ...(HP_OVERRIDES[r.id] || {}) },
-  checkpoints: genCheckpoints(r),
-}));
+// ── Compute how long ago a timestamp was (like "2h" or "3d") ────────────
+// This replaces the hardcoded "ago" strings in the old synthetic data.
+function computeAgo(isoString) {
+  const diffMs = Date.now() - new Date(isoString).getTime();
+  const mins = Math.floor(diffMs / 60000);
+  if (mins < 60) return `${mins}m`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ${mins % 60}m`;
+  return `${Math.floor(hours / 24)}d`;
+}
 
-// ── Per-frame signal synthesis ───────────────────────────────────────
-// Cache keyed by `${runId}-${step}-${rolloutKind}-${metric}`.
+// ── Parse a .jsonl file (one JSON object per line) ───────────────────────
+// Equivalent to: [json.loads(line) for line in open(file)]
+async function fetchJsonl(url) {
+  const text = await fetch(url).then(r => r.text());
+  return text.trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
+}
+
+// ── Load one run from its files ──────────────────────────────────────────
+async function loadRun(id) {
+  // 1. Load the main metadata file (run.json)
+  const runDoc = await fetch(`/runs/${id}/run.json`).then(r => r.json());
+
+  // 2. Load the list of checkpoints (checkpoints.jsonl)
+  //    Each line is one checkpoint event with return statistics.
+  let ckptEvents = [];
+  try {
+    ckptEvents = await fetchJsonl(`/runs/${id}/checkpoints.jsonl`);
+  } catch {
+    // Some runs may not have any checkpoints yet — that's fine
+  }
+
+  // 3. For each checkpoint event, fetch checkpoint.json to get rollout details
+  const checkpoints = await Promise.all(
+    ckptEvents.map(async (evt) => {
+      let rollouts = [];
+      try {
+        const ckptDoc = await fetch(`/runs/${id}/${evt.checkpoint_dir}/checkpoint.json`).then(r => r.json());
+
+        // Map rollout entries to the shape the UI expects.
+        // "idx" is used internally for seeding the synthetic signal fallback.
+        rollouts = ckptDoc.rollouts.map((r) => ({
+          kind:   r.kind,
+          return: r.return,
+          length: r.length,
+          idx:    ['best', 'median', 'worst'].indexOf(r.kind),
+          // Full URL path so the browser can fetch signals/video later (Steps 4 & 5)
+          dir: `/runs/${id}/${evt.checkpoint_dir}/${r.dir}`,
+        }));
+      } catch {
+        // No checkpoint.json or no rollouts — leave rollouts empty
+      }
+
+      // Rename fields from real schema → what the UI expects
+      return {
+        step:     evt.step,
+        mean:     evt.mean_return,
+        std:      evt.std_return,
+        best:     evt.best_return,
+        median:   evt.median_return,
+        worst:    evt.worst_return,
+        rollouts,
+        isDip:    false,
+      };
+    })
+  );
+
+  // 4. Derive a few summary fields the UI shows in the left rail
+  const lastStep    = checkpoints.length > 0 ? checkpoints[checkpoints.length - 1].step : 0;
+  const allBests    = checkpoints.map(c => c.best).filter(v => v != null);
+  const bestReward  = allBests.length > 0 ? Math.max(...allBests) : null;
+
+  // Convert hparam values to strings — the UI renders them as text
+  const hp = {};
+  for (const [k, v] of Object.entries(runDoc.hparams || {})) {
+    hp[k] = String(v);
+  }
+
+  return {
+    id:           runDoc.run_id,
+    name:         runDoc.name,
+    alg:          runDoc.algorithm,
+    env:          runDoc.env_id,
+    status:       runDoc.status,
+    steps:        lastStep,
+    reward:       bestReward != null ? Math.round(bestReward * 10) / 10 : null,
+    ago:          computeAgo(runDoc.created_at),
+    tags:         [runDoc.algorithm, runDoc.env_id].filter(Boolean),
+    hp,
+    capabilities: runDoc.capabilities || { signals: [] },
+    checkpoints,
+  };
+}
+
+// ── Load all runs ────────────────────────────────────────────────────────
+async function loadAllRuns() {
+  const runIds = await fetch('/runs/index.json').then(r => r.json());
+  console.log('Loading runs:', runIds);
+  const runs = await Promise.all(runIds.map(loadRun));
+  console.log('All runs loaded:', runs);
+  return runs;
+}
+
+// ── Per-frame signal synthesis ───────────────────────────────────────────
+// Still used as a fallback for signals not present in the real .npz files.
+// Step 4 will replace this with real data for runs that have signals.npz.
 const FRAME_CACHE = new Map();
 
 function frameKey(runId, step, kind, metric) {
   return `${runId}-${step}-${kind}-${metric}`;
 }
 
-const N_ACTIONS = 8;
-
-// Returns Float32Array of length = rolloutLen for one metric
 function frameSignal(run, ckpt, rollout, metric) {
   const key = frameKey(run.id, ckpt.step, rollout.kind, metric);
   if (FRAME_CACHE.has(key)) return FRAME_CACHE.get(key);
 
   const len = rollout.length;
   const arr = new Float32Array(len);
-  const seed = (parseInt(run.id, 16) * 31 + ckpt.step / 1e5 + rollout.idx * 7 + metric.length) | 0;
+  // Use hashString instead of parseInt(id, 16) so non-hex IDs work
+  const seed = (hashString(run.id) * 31 + ckpt.step / 1e5 + rollout.idx * 7 + metric.length) | 0;
   const r = rng(seed);
 
-  // mean per-step reward such that sum ≈ rollout.return
   const meanR = rollout.return / len;
-  // Locate a "stumble" event (negative-reward spike) somewhere in second half
   const stumbleAt = Math.floor(len * (0.35 + r() * 0.45));
   const stumbleWidth = 8 + Math.floor(r() * 8);
 
@@ -161,11 +197,8 @@ function frameSignal(run, ckpt, rollout, metric) {
       arr[i] = a;
     }
   } else if (metric === 'action_logp') {
-    for (let i = 0; i < len; i++) {
-      arr[i] = -0.5 - r() * 0.8;
-    }
+    for (let i = 0; i < len; i++) arr[i] = -0.5 - r() * 0.8;
   } else if (metric === 'entropy') {
-    // Action entropy — decays over rollout, with noise
     for (let i = 0; i < len; i++) {
       const decay = 0.7 - (i / len) * 0.2;
       arr[i] = decay + (r() - 0.5) * 0.1;
@@ -178,34 +211,28 @@ function frameSignal(run, ckpt, rollout, metric) {
   return arr;
 }
 
-// Look up run by id
-function getRun(id) { return RUNS.find(r => r.id === id); }
-function getCheckpoint(run, step) { return run.checkpoints.find(c => c.step === step) || run.checkpoints[run.checkpoints.length - 1]; }
-function getRollout(ckpt, kind) { return ckpt.rollouts.find(r => r.kind === kind) || ckpt.rollouts[0]; }
-
-// Format helpers
-function fmtStep(s) {
-  if (s >= 1e6) return `${(s / 1e6).toFixed(s % 1e6 === 0 ? 0 : 2)}M`;
-  if (s >= 1e3) return `${(s / 1e3).toFixed(0)}k`;
-  return `${s}`;
+// ── Lookup helpers (unchanged) ───────────────────────────────────────────
+function getRun(id) { return D.RUNS.find(r => r.id === id); }
+function getCheckpoint(run, step) {
+  if (!run || !run.checkpoints.length) return null;
+  return run.checkpoints.find(c => c.step === step) || run.checkpoints[run.checkpoints.length - 1];
 }
-function fmtReward(r) { return r == null ? '—' : (r >= 1000 ? `+${(r / 1000).toFixed(1)}k` : `+${r}`); }
-function fmtTime(secs) {
-  const m = Math.floor(secs / 60);
-  const s = Math.floor(secs % 60);
-  return `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+function getRollout(ckpt, kind) {
+  if (!ckpt || !ckpt.rollouts.length) return null;
+  return ckpt.rollouts.find(r => r.kind === kind) || ckpt.rollouts[0];
 }
 
-D.RUNS = RUNS;
-D.ALGS = ALGS;
-D.N_ACTIONS = N_ACTIONS;
-D.frameSignal = frameSignal;
-D.getRun = getRun;
-D.getCheckpoint = getCheckpoint;
-D.getRollout = getRollout;
-D.fmtStep = fmtStep;
-D.fmtReward = fmtReward;
-D.fmtTime = fmtTime;
-D.rng = rng;
+// ── Bootstrap ────────────────────────────────────────────────────────────
+D.RUNS = [];  // starts empty; populated when D.ready resolves
+D.ready = loadAllRuns().then(runs => { D.RUNS = runs; });
+
+D.frameSignal    = frameSignal;
+D.getRun         = getRun;
+D.getCheckpoint  = getCheckpoint;
+D.getRollout     = getRollout;
+D.fmtStep        = fmtStep;
+D.fmtReward      = fmtReward;
+D.fmtTime        = fmtTime;
+D.rng            = rng;
 
 window.D = D;
