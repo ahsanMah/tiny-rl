@@ -40,7 +40,7 @@ function App() {
 
   // Apply theme to document
   uE(() => {
-    document.documentElement.classList.toggle('light-medium-contrast', !darkMode);
+    document.documentElement.classList.toggle('dark', darkMode);
 
     try { localStorage.setItem('rl-dark-mode', String(darkMode)); } catch {}
   }, [darkMode]);
