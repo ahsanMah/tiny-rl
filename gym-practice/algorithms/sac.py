@@ -18,7 +18,7 @@ np.set_printoptions(precision=3, suppress=True)
 
 
 class TinyLinearNet(nn.Module):
-    def __init__(self, input_dim=4, hidden_dim=32, output_dim=2):
+    def __init__(self, input_dim=4, hidden_dim=128, output_dim=2):
         super().__init__()
         self.fc1 = nn.Linear(input_dim, hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, output_dim)
@@ -131,7 +131,7 @@ class Buffer:
         return len(self.history)
 
     def _append(self, event):
-        event = tuple(map(self._convert_to_mlx, event))
+        # event = tuple(map(self._convert_to_mlx, event))
         if len(self.history) < self.max_size:
             self.history.append(event)
             return
@@ -141,16 +141,14 @@ class Buffer:
         self.pointer = (self.pointer + 1) % self.max_size
 
     def _convert_to_mlx(self, x):
-        x = mx.asarray(x)
-        if x.ndim <= 1:
-            x = x.reshape(1, -1)
-        return x
+        x = [mx.array(arr).reshape(1, -1) for arr in x]
+        return mx.contiguous(mx.concat(x))
 
     def append(self, batch):
         # batch = tuple(map(self._convert_to_mlx, batch))
         num_samples = len(batch[0])
         for i in range(num_samples):
-            event = tuple(e[i] for e in batch)
+            event = list(e[i] for e in batch)
             self._append(event)
 
     def __getitem__(self, index) -> list[mx.array] | mx.array:
@@ -166,8 +164,8 @@ class Buffer:
         elif isinstance(index, Iterable):
             batch = [self.history[i] for i in index]
 
-        batched_dimensions: list[tuple[mx.array]] = list(zip(*batch))
-        return list(map(lambda x: mx.contiguous(mx.concat(x)), batched_dimensions))
+        batched_dimensions: list[list[mx.array]] = list(zip(*batch))
+        return list(map(self._convert_to_mlx, batched_dimensions))
 
     def _format_value(self, value) -> str:
         if isinstance(value, Iterable):
@@ -188,8 +186,8 @@ class Buffer:
 
 
 def rollout(env: gym.Env, policy, buffer, num_iters, global_step, start_step=5000):
-    state, _ = env.reset()
     entropy = 0.0
+    state, _ = env.reset()
     for _ in range(num_iters):
         # Grab random actions in the beginning for improved exploration
         action = (
@@ -272,6 +270,9 @@ def policy_loss_fn(
     return loss
 
 
+policy_grad_fn = mx.value_and_grad(policy_loss_fn)
+
+
 def policy_update_step(
     policy: SquashedGaussianDistribution,
     optimizer: optim.Optimizer,
@@ -279,7 +280,6 @@ def policy_update_step(
     double_q_fn_ema: tuple[EMA, EMA],
     alpha: float,
 ) -> tuple[float, float]:
-    policy_grad_fn = mx.value_and_grad(policy_loss_fn)
     loss, grads = policy_grad_fn(policy, state, double_q_fn_ema, alpha)
     clipped_grads, total_grad_norm = optim.clip_grad_norm(grads, max_norm=2.0)
     optimizer.update(policy, clipped_grads)
@@ -287,25 +287,28 @@ def policy_update_step(
 
 
 def run(
-    gamma=0.975,
+    gamma=0.99,
     alpha=0.2,
     num_epochs=20,
     num_updates_per_epoch=1000,
     batch_size=256,
     num_rollouts_per_epoch=1000,
     env_name="Pendulum-v1",
+    num_parallel_envs=4,
     record_eval_videos=False,
+    eval_log_dir="eval-logs/sac/",
 ):
-    env = gym.make_vec(env_name, num_envs=4, max_episode_steps=200)
+
+    env = gym.make_vec(env_name, num_envs=num_parallel_envs, max_episode_steps=200)
     obs_space = env.single_observation_space.shape[0]
     action_dim = env.single_action_space.shape[0]
     action_space_limit = env.single_action_space.high
     print(f"{obs_space = } - {action_dim = }")
 
-    eval_log_dir = "eval_logs/sac/"
-    eval_video_logger = VideoLogger(
-        env_name=env_name, exp_folder=f"{eval_log_dir}/test"
-    )
+    if record_eval_videos:
+        eval_video_logger = VideoLogger(
+            env_name=env_name, exp_folder=f"{eval_log_dir}/videos"
+        )
 
     buffer = Buffer(max_size=100_000)
     policy = SquashedGaussianDistribution(
@@ -320,9 +323,9 @@ def run(
     q1_ema = EMA(q1, decay=0.999)
     q2_ema = EMA(q2, decay=0.999)
 
-    policy_optimizer = optim.AdamW(learning_rate=1e-3)
-    q1_optimizer = optim.AdamW(learning_rate=1e-3)
-    q2_optimizer = optim.AdamW(learning_rate=1e-3)
+    policy_optimizer = optim.AdamW(learning_rate=3e-4)
+    q1_optimizer = optim.AdamW(learning_rate=3e-4)
+    q2_optimizer = optim.AdamW(learning_rate=3e-4)
 
     for i in range(num_epochs):
         entropy = rollout(env, policy, buffer, num_rollouts_per_epoch, global_step)
@@ -369,10 +372,12 @@ def run(
             f"step {global_step}: {entropy = :<5.3f} - {policy_loss = :<5.3f} - {q1_loss = :<5.3f} - {q2_loss = :<5.3f} "
         )
         if (i + 1) % 5 == 0:
-            eval_video_logger.record_evaluation(policy, global_step)
             print(
                 f"{policy_grad_norm = :.3f} {q1_grad_norm = :.3f} - {q2_grad_norm = :.3f}"
             )
+            if record_eval_videos:
+                eval_video_logger.record_evaluation(policy, global_step)
+            mx.clear_cache()
 
 
 if __name__ == "__main__":
