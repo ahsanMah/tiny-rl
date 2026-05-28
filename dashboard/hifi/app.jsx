@@ -31,7 +31,7 @@ function App() {
   const [frame, setFrame] = uS(init.frame || 0);
   const [playing, setPlaying] = uS(false);
   const [speed, setSpeed] = uS(1);
-  const [overlay, setOverlay] = uS(TWEAK_DEFAULTS.playerOverlay);
+  const [overlay, setOverlay] = uS('none');
   const [metric, setMetric] = uS(init.metric || 'value');
   const [query, setQuery] = uS('');
   const [darkMode, setDarkMode] = uS(() => {
