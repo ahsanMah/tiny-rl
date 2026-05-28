@@ -34,7 +34,7 @@ function ChartTooltip({ lines, hoverFrame, hoverX }) {
   return (
     <div style={{
       position: 'absolute', top: 8, pointerEvents: 'none', zIndex: 20,
-      background: 'var(--paper-warm)', border: '1px solid var(--hairline)',
+      background: 'var(--surface)', border: '1px solid var(--hairline)',
       borderRadius: 6, padding: '6px 10px', minWidth: 150,
       boxShadow: '0 3px 14px rgba(0,0,0,0.30)',
       ...anchor,
@@ -223,30 +223,10 @@ function FrameLevelChart({
               </g>
             );
           })}
-          {/* Focal — area fill then line */}
-          {lines.filter(l => l.isFocal).map((ln) => {
-            const baseline = padT + innerH;
-            const pts = [];
-            for (let i = 0; i < ln.values.length; i += 2) {
-              pts.push([xScale(i), yScale(ln.values[i])]);
-            }
-            const lastI = ln.values.length - 1;
-            if (lastI % 2 !== 0) pts.push([xScale(lastI), yScale(ln.values[lastI])]);
-            const areaD = pts.length === 0 ? '' :
-              `M ${pts[0][0].toFixed(1)},${baseline} L ${pts.map(p => `${p[0].toFixed(1)},${p[1].toFixed(2)}`).join(' L ')} L ${pts[pts.length-1][0].toFixed(1)},${baseline} Z`;
-            return (
-              <g key={ln.runId}>
-                <defs>
-                  <linearGradient id="focalFill" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%"   stopColor="var(--accent)" stopOpacity="0.22" />
-                    <stop offset="100%" stopColor="var(--accent)" stopOpacity="0" />
-                  </linearGradient>
-                </defs>
-                <path d={areaD} fill="url(#focalFill)" />
-                <path d={buildPath(ln.values, xScale, yScale, 2)} className="focal" />
-              </g>
-            );
-          })}
+          {/* Focal line */}
+          {lines.filter(l => l.isFocal).map((ln) => (
+            <path key={ln.runId} d={buildPath(ln.values, xScale, yScale, 2)} className="focal" />
+          ))}
 
           {/* Hover crosshair */}
           {hover != null && (
