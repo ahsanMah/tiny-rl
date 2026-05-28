@@ -186,7 +186,7 @@ function FrameLevelChart({
           }}
           onMouseMove={onHover}
           onMouseLeave={() => setHover(null)}
-          style={{ cursor: 'col-resize', display: 'block', height: 'clamp(148px, calc(13vw + 55px), 280px)' }}
+          style={{ cursor: 'col-resize', display: 'block', height: 'clamp(160px, calc(13vw + 55px), 320px)' }}
         >
           {/* Y gridlines + labels */}
           {yTicks.map((v, i) => (

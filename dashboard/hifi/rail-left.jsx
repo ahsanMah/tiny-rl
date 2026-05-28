@@ -93,7 +93,7 @@ function RailLeft({ runs, focusedId, pinnedIds, onFocus, onTogglePin, query, set
   return (
     <div className="col" style={{ width: 'clamp(150px, 30vw, 340px)', flexShrink: 0, background: 'var(--paper-cool)', borderRight: '1px solid var(--hairline)', height: '100%' }}>
       {/* Header */}
-      <div className="col" style={{ padding: '16px 14px 12px', gap: 10, borderBottom: '1px solid var(--hairline)' }}>
+      <div className="col" style={{ padding: '22px 16px 16px', gap: 12, borderBottom: '1px solid var(--hairline)' }}>
         <div className="row" style={{ gap: 8 }}>
           <span className="display" style={{ fontSize: 15, fontWeight: 700 }}>tracker</span>
           <span className="muted" style={{ fontSize: 11 }}>/ 247 runs</span>
@@ -128,7 +128,7 @@ function RailLeft({ runs, focusedId, pinnedIds, onFocus, onTogglePin, query, set
       <div className="scroll grow">
         {/* Pinned section */}
         <div className="col">
-          <div className="row" style={{ padding: '14px 14px 6px', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 }}>
+          <div className="row" style={{ padding: '20px 16px 8px', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 }}>
             <span className="label-eyebrow">Pinned · {pinned.length}</span>
           </div>
           {pinned.length === 0 && (
@@ -150,7 +150,7 @@ function RailLeft({ runs, focusedId, pinnedIds, onFocus, onTogglePin, query, set
         {/* Groups */}
         {grouped.map(([groupName, groupRuns]) => (
           <div key={groupName} className="col">
-            <div className="row" style={{ padding: '14px 14px 6px', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 }}>
+            <div className="row" style={{ padding: '20px 16px 8px', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 }}>
               <span className="label-eyebrow">{groupName} · {groupRuns.length}</span>
               <span className="muted" style={{ fontSize: 10, whiteSpace: 'nowrap' }}>↕ recent</span>
             </div>
@@ -171,7 +171,7 @@ function RailLeft({ runs, focusedId, pinnedIds, onFocus, onTogglePin, query, set
       </div>
 
       {/* Footer */}
-      <div className="row" style={{ padding: '10px 14px', borderTop: '1px solid var(--hairline)', fontSize: 10.5, color: 'var(--ink-3)' }}>
+      <div className="row" style={{ padding: '14px 16px', borderTop: '1px solid var(--hairline)', fontSize: 10.5, color: 'var(--ink-3)' }}>
         <span>{filtered.length} of {runs.length}</span>
       </div>
     </div>
