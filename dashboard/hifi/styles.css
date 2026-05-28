@@ -111,12 +111,12 @@ html {
   --chart-zero-stroke:  color-mix(in srgb, var(--md-sys-color-on-surface) 16%, transparent);
 
   /* ── Type scale ────────────────────────────────────────────────── */
-  --t-xs:  12px;
-  --t-sm:  13px;
-  --t-md:  15px;
-  --t-lg:  17px;
-  --t-xl:  20px;
-  --t-xxl: 25px;
+  --t-xs:  12.5px;
+  --t-sm:  14px;
+  --t-md:  15.5px;
+  --t-lg:  18px;
+  --t-xl:  21px;
+  --t-xxl: 26px;
   --t-display: 36px;
 
   /* ── Spacing ───────────────────────────────────────────────────── */
