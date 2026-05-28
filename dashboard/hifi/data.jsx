@@ -114,6 +114,21 @@ async function loadRun(id) {
     hp[k] = String(v);
   }
 
+  // Load training metrics (loss curves, sps, etc.) for the LossStrip.
+  // Group all events by metric name: { policy_loss: [{step, value}, ...], ... }
+  let trainMetrics = {};
+  try {
+    const tmEvents = await fetchJsonl(`/runs/${id}/train_metrics.jsonl`);
+    for (const evt of tmEvents) {
+      for (const [key, val] of Object.entries(evt.metrics || {})) {
+        if (!trainMetrics[key]) trainMetrics[key] = [];
+        trainMetrics[key].push({ step: evt.step, value: val });
+      }
+    }
+  } catch {
+    // Not all runs have train_metrics.jsonl — fine to skip
+  }
+
   return {
     id:           runDoc.run_id,
     name:         runDoc.name,
@@ -125,7 +140,8 @@ async function loadRun(id) {
     ago:          computeAgo(runDoc.created_at),
     tags:         [runDoc.algorithm, runDoc.env_id].filter(Boolean),
     hp,
-    capabilities: runDoc.capabilities || { signals: [] },
+    capabilities:  runDoc.capabilities || { signals: [] },
+    trainMetrics,
     checkpoints,
   };
 }
@@ -299,6 +315,7 @@ D.ready = loadAllRuns().then(runs => { D.RUNS = runs; });
 
 D.frameSignal    = frameSignal;
 D.loadSignals    = loadSignals;
+D.hashString     = hashString;
 D.getRun         = getRun;
 D.getCheckpoint  = getCheckpoint;
 D.getRollout     = getRollout;
