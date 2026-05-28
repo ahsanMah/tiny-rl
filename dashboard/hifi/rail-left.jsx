@@ -30,7 +30,7 @@ function RunRow({ run, isFocused, isPinned, onFocus, onTogglePin, lineSlot }) {
         title={isPinned ? 'unpin' : 'pin'}
         style={{
           border: 'none', background: 'transparent', padding: 0, cursor: 'pointer',
-          color: isPinned ? 'var(--tertiary)' : 'var(--ink-4)',
+          color: isPinned ? 'var(--green)' : 'var(--ink-4)',
           width: 16, height: 16, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
         }}
       >
@@ -91,7 +91,7 @@ function RailLeft({ runs, focusedId, pinnedIds, onFocus, onTogglePin, query, set
   })();
 
   return (
-    <div className="col" style={{ width: 'clamp(150px, 30vw, 340px)', flexShrink: 0, background: 'var(--paper-cool)', borderRight: '1px solid var(--hairline)', height: '100%' }}>
+    <div className="col" style={{ width: 'clamp(150px, 30vw, 340px)', flexShrink: 0, background: 'color-mix(in srgb, var(--accent) 7%, var(--surface))', borderRight: '1px solid var(--hairline)', height: '100%' }}>
       {/* Header */}
       <div className="col" style={{ padding: '22px 16px 16px', gap: 12, borderBottom: '1px solid var(--hairline)' }}>
         <div className="row" style={{ gap: 8 }}>
