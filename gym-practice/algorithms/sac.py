@@ -2,6 +2,7 @@ import copy
 import math
 import os
 import sys
+import time
 from typing import Iterable
 
 import gymnasium as gym
@@ -12,7 +13,7 @@ import mlx.utils as mlx_utils
 import numpy as np
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from logger_utils import VideoLogger
+from logger_utils import RLLogger, VideoLogger
 
 np.set_printoptions(precision=3, suppress=True)
 
@@ -295,6 +296,7 @@ def run(
     num_rollouts_per_epoch=1000,
     env_name="Pendulum-v1",
     num_parallel_envs=4,
+    log_dir="./tb-logs/",
     record_eval_videos=False,
     eval_log_dir="eval-logs/sac/",
 ):
@@ -304,6 +306,25 @@ def run(
     action_dim = env.single_action_space.shape[0]
     action_space_limit = env.single_action_space.high
     print(f"{obs_space = } - {action_dim = }")
+
+    metrics_logger = RLLogger(
+        log_dir,
+        exp_name=f"{env_name}-sac",
+        dashboard_run_metadata={"algorithm": "sac", "env_id": env_name},
+        dashboard_hparams={
+            "gamma": gamma,
+            "alpha": alpha,
+            "num_epochs": num_epochs,
+            "num_updates_per_epoch": num_updates_per_epoch,
+            "batch_size": batch_size,
+            "num_rollouts_per_epoch": num_rollouts_per_epoch,
+            "num_parallel_envs": num_parallel_envs,
+        },
+        dashboard_capabilities={
+            "signals": ["step_reward"],
+            "value_estimate_kind": "action_value",
+        },
+    )
 
     if record_eval_videos:
         eval_video_logger = VideoLogger(
@@ -317,6 +338,7 @@ def run(
 
     # First evaluation pass
     global_step = 0
+    start_time = time.time()
 
     q1 = TinyLinearNet(input_dim=obs_space + action_dim, output_dim=1)
     q2 = TinyLinearNet(input_dim=obs_space + action_dim, output_dim=1)
@@ -329,6 +351,8 @@ def run(
 
     for i in range(num_epochs):
         entropy = rollout(env, policy, buffer, num_rollouts_per_epoch, global_step)
+        policy_loss = q1_loss = q2_loss = 0.0
+        policy_grad_norm = q1_grad_norm = q2_grad_norm = 0.0
 
         for j in range(num_updates_per_epoch):
             global_step += 1
@@ -368,6 +392,21 @@ def run(
                 alpha=alpha,
             )
 
+        train_metrics = {
+            "entropy": float(entropy),
+            "policy_loss": float(policy_loss),
+            "q1_loss": float(q1_loss),
+            "q2_loss": float(q2_loss),
+            "policy_grad_norm": float(policy_grad_norm),
+            "q1_grad_norm": float(q1_grad_norm),
+            "q2_grad_norm": float(q2_grad_norm),
+            "epoch": i + 1,
+        }
+        metrics_logger.log_train_metrics(global_step, train_metrics)
+        metrics_logger.log_speed(
+            global_step, steps_done=global_step, start_time=start_time
+        )
+
         print(
             f"step {global_step}: {entropy = :<5.3f} - {policy_loss = :<5.3f} - {q1_loss = :<5.3f} - {q2_loss = :<5.3f} "
         )
@@ -377,7 +416,15 @@ def run(
             )
             if record_eval_videos:
                 eval_video_logger.record_evaluation(policy, global_step)
+                metrics_logger.log_video(
+                    global_step,
+                    eval_video_logger.exp_folder,
+                    eval_video_logger.num_eval_episodes,
+                )
             mx.clear_cache()
+
+    env.close()
+    metrics_logger.close()
 
 
 if __name__ == "__main__":

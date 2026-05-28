@@ -602,13 +602,13 @@ class RLLogger:
                 episode_length = int(_coerce_scalar(episode_length))
 
             video_path = summary_ep.get("video_path") or base_video_path
-            if video_path and not os.path.isabs(video_path):
+            if video_path and not os.path.isabs(video_path) and not os.path.exists(video_path):
                 video_path = os.path.join(video_exp_folder, video_path)
             if video_path and not os.path.exists(video_path):
                 video_path = None
 
             signals_path = summary_ep.get("signals_path")
-            if signals_path and not os.path.isabs(signals_path):
+            if signals_path and not os.path.isabs(signals_path) and not os.path.exists(signals_path):
                 signals_path = os.path.join(video_exp_folder, signals_path)
             if signals_path and not os.path.exists(signals_path):
                 signals_path = None
