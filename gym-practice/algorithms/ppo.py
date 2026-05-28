@@ -496,7 +496,36 @@ def run(
         else CategoricalDistribution(net)
     )
 
-    metrics_logger = RLLogger(log_dir, exp_name=f"{env_name}-ppo")
+    metrics_logger = RLLogger(
+        log_dir,
+        exp_name=f"{env_name}-ppo",
+        dashboard_run_metadata={
+            "algorithm": "ppo",
+            "env_id": env_name,
+            "seed": seed,
+        },
+        dashboard_hparams={
+            "num_parallel_envs": num_parallel_envs,
+            "num_timesteps_per_epoch": num_timesteps_per_epoch,
+            "hidden_dim": hidden_dim,
+            "init_scale": init_scale,
+            "init_scale_final": init_scale_final,
+            "value_init_scale": value_init_scale,
+            "value_init_scale_final": value_init_scale_final,
+            "policy_lr": policy_lr,
+            "value_lr": value_lr,
+            "grad_clip": grad_clip,
+            "num_epochs": num_epochs,
+            "value_batch_size": value_batch_size,
+            "state_normalization": state_normalization,
+            "discount": discount,
+            "ema": ema,
+        },
+        dashboard_capabilities={
+            "signals": ["step_reward"],
+            "value_estimate_kind": "state_value",
+        },
+    )
     eval_video_logger = VideoLogger(
         env_name=env_name, exp_folder=f"{eval_log_dir}/{metrics_logger.run_name}"
     )
