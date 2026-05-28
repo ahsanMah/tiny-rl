@@ -323,8 +323,12 @@ def run(
             "hidden_dim": hidden_dim,
         },
         dashboard_capabilities={
-            "signals": ["step_reward"],
-            "value_estimate_kind": "action_value",
+            "signals": ["step_reward", "cumulative_return", "action_value"],
+            "signal_semantics": {
+                "step_reward": {"unit": "reward"},
+                "cumulative_return": {"unit": "return"},
+                "action_value": {"unit": "return"},
+            },
         },
     )
 
@@ -347,6 +351,31 @@ def run(
     q2 = TinyLinearNet(input_dim=obs_space + action_dim, output_dim=1)
     q1_ema = EMA(q1, decay=0.999)
     q2_ema = EMA(q2, decay=0.999)
+
+    eval_signal_semantics = {
+        "action_value": {"unit": "return"},
+    }
+
+    def _eval_action_value(obs, action):
+        obs_arr = mx.asarray(obs, dtype=mx.float32)
+        if obs_arr.ndim == 1:
+            obs_arr = obs_arr[None, :]
+
+        action_arr = mx.asarray(action, dtype=mx.float32)
+        if action_arr.ndim == 0:
+            action_arr = action_arr.reshape(1, 1)
+        elif action_arr.ndim == 1:
+            action_arr = action_arr[None, :]
+
+        if action_arr.shape[1] < action_dim:
+            pad = mx.zeros((action_arr.shape[0], action_dim - action_arr.shape[1]))
+            action_arr = mx.concatenate([action_arr, pad], axis=1)
+        elif action_arr.shape[1] > action_dim:
+            action_arr = action_arr[:, :action_dim]
+
+        state_action_pair = mx.concatenate([obs_arr, action_arr], axis=1)
+        q_estimate = mx.minimum(q1_ema(state_action_pair), q2_ema(state_action_pair))
+        return float(q_estimate.item())
 
     policy_optimizer = optim.AdamW(learning_rate=3e-4)
     q1_optimizer = optim.AdamW(learning_rate=3e-4)
@@ -418,7 +447,12 @@ def run(
                 f"{policy_grad_norm = :.3f} {q1_grad_norm = :.3f} - {q2_grad_norm = :.3f}"
             )
             if record_eval_videos:
-                eval_video_logger.record_evaluation(policy, global_step)
+                eval_video_logger.record_evaluation(
+                    policy,
+                    global_step,
+                    extra_signal_fns={"action_value": _eval_action_value},
+                    signal_semantics=eval_signal_semantics,
+                )
                 metrics_logger.log_video(
                     global_step,
                     eval_video_logger.exp_folder,

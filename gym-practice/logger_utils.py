@@ -3,7 +3,7 @@ import os
 import shutil
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Callable, Dict, Iterable, Optional
 
 import cv2
 import gymnasium as gym
@@ -692,7 +692,21 @@ class VideoLogger:
         self.exp_folder = exp_folder
         os.makedirs(self.exp_folder, exist_ok=True)
 
-    def record_evaluation(self, policy, global_step: int = 0):
+    def record_evaluation(
+        self,
+        policy,
+        global_step: int = 0,
+        extra_signal_fns: Optional[Dict[str, Callable[..., Any]]] = None,
+        signal_semantics: Optional[Dict[str, Dict[str, Any]]] = None,
+    ):
+
+        extra_signal_fns = extra_signal_fns or {}
+        merged_signal_semantics: Dict[str, Dict[str, Any]] = {
+            "step_reward": {"unit": "reward"},
+            "cumulative_return": {"unit": "return"},
+        }
+        if signal_semantics:
+            merged_signal_semantics.update(signal_semantics)
 
         # Create environment with recording capabilities
         env = gym.make(
@@ -714,17 +728,41 @@ class VideoLogger:
         logger.info(f"Videos will be saved to: {self.exp_folder}/")
 
         episode_summaries: list[Dict[str, Any]] = []
+        warned_signals: set[str] = set()
 
         for episode_num in range(self.num_eval_episodes):
             obs, info = env.reset()
             episode_reward = 0.0
             step_count = 0
             step_rewards: list[float] = []
+            extra_signal_series: Dict[str, list[float]] = {
+                signal_name: [] for signal_name in extra_signal_fns
+            }
 
             episode_over = False
             while not episode_over:
-                # Replace this with your trained agent's policy
                 action = policy.get_action(obs, sample=False)
+
+                for signal_name, signal_fn in extra_signal_fns.items():
+                    signal_value = np.nan
+                    try:
+                        try:
+                            signal_value = signal_fn(
+                                obs=obs,
+                                action=action,
+                                step=step_count,
+                                episode=episode_num,
+                            )
+                        except TypeError:
+                            signal_value = signal_fn(obs, action)
+                        signal_value = float(_coerce_scalar(signal_value))
+                    except Exception as exc:
+                        if signal_name not in warned_signals:
+                            logger.warning(
+                                f"Failed to compute eval signal '{signal_name}' at step={global_step}: {exc}"
+                            )
+                            warned_signals.add(signal_name)
+                    extra_signal_series[signal_name].append(signal_value)
 
                 obs, reward, terminated, truncated, info = env.step(action)
                 reward_f = float(_coerce_scalar(reward))
@@ -734,13 +772,32 @@ class VideoLogger:
 
                 episode_over = terminated or truncated
 
+            step_reward_arr = np.asarray(step_rewards, dtype=np.float32)
+            signals_payload: Dict[str, np.ndarray] = {
+                "step_reward": step_reward_arr,
+                "cumulative_return": np.cumsum(step_reward_arr, dtype=np.float32),
+            }
+            for signal_name, series in extra_signal_series.items():
+                if not series:
+                    continue
+                arr = np.asarray(series)
+                if arr.dtype.kind in {"O", "U", "S"}:
+                    continue
+                if arr.dtype.kind in {"f", "i", "u", "b"}:
+                    arr = arr.astype(np.float32)
+                signals_payload[signal_name] = arr
+
             signals_path = VideoLogger.get_signals_filename(
                 self.exp_folder, global_step, episode_num
             )
-            np.savez_compressed(
-                signals_path,
-                step_reward=np.asarray(step_rewards, dtype=np.float32),
-            )
+            np.savez_compressed(signals_path, **signals_payload)
+
+            available_signals = sorted(signals_payload.keys())
+            episode_signal_semantics = {
+                key: value
+                for key, value in merged_signal_semantics.items()
+                if key in signals_payload
+            }
 
             video_path = VideoLogger.get_video_filename(
                 self.exp_folder, global_step, episode_num
@@ -751,8 +808,8 @@ class VideoLogger:
                 "length": step_count,
                 "video_path": video_path,
                 "signals_path": signals_path,
-                "available_signals": ["step_reward"],
-                "signal_semantics": {},
+                "available_signals": available_signals,
+                "signal_semantics": episode_signal_semantics,
             }
             episode_summaries.append(summary)
 
