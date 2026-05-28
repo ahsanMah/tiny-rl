@@ -209,7 +209,9 @@ class DashboardRunWriter:
 
         _append_jsonl(self.episodes_path, event)
 
-    def _select_rollouts(self, episodes: list[Dict[str, Any]]) -> list[tuple[str, Dict[str, Any]]]:
+    def _select_rollouts(
+        self, episodes: list[Dict[str, Any]]
+    ) -> list[tuple[str, Dict[str, Any]]]:
         if not episodes:
             return []
 
@@ -448,7 +450,8 @@ class RLLogger:
                 If omitted, the logger checks RL_DASHBOARD_LOG_DIR env var.
         """
         # Append a timestamp so multiple runs of the same experiment don't overwrite each other
-        self.run_name = f"{exp_name}_{int(time.time())}"
+        date_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        self.run_name = f"{exp_name}_{date_str}"
         self.writer = SummaryWriter(os.path.join(log_dir, self.run_name))
         print(f"Logging to {self.writer.logdir}")
 
@@ -662,7 +665,9 @@ class VideoLogger:
         return os.path.join(exp_folder, f"step-{global_step:05d}-summary.json")
 
     @staticmethod
-    def load_eval_summary(exp_folder: str, global_step: int) -> Optional[Dict[str, Any]]:
+    def load_eval_summary(
+        exp_folder: str, global_step: int
+    ) -> Optional[Dict[str, Any]]:
         summary_path = VideoLogger.get_eval_summary_filename(exp_folder, global_step)
         if not os.path.exists(summary_path):
             return None
@@ -758,8 +763,12 @@ class VideoLogger:
         # Forces videos to be saved
         env.close()
 
-        returns = np.asarray([ep["return"] for ep in episode_summaries], dtype=np.float32)
-        lengths = np.asarray([ep["length"] for ep in episode_summaries], dtype=np.float32)
+        returns = np.asarray(
+            [ep["return"] for ep in episode_summaries], dtype=np.float32
+        )
+        lengths = np.asarray(
+            [ep["length"] for ep in episode_summaries], dtype=np.float32
+        )
 
         # Print summary statistics
         logger.info("\nEvaluation Summary:")
