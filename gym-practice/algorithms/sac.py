@@ -288,17 +288,18 @@ def policy_update_step(
 
 
 def run(
+    env_name="Pendulum-v1",
     gamma=0.99,
     alpha=0.2,
     num_epochs=20,
     num_updates_per_epoch=1000,
     batch_size=256,
     num_rollouts_per_epoch=1000,
-    env_name="Pendulum-v1",
     num_parallel_envs=4,
     log_dir="./tb-logs/",
     record_eval_videos=False,
     eval_log_dir="eval-logs/sac/",
+    hidden_dim=64,
 ):
 
     env = gym.make_vec(env_name, num_envs=num_parallel_envs, max_episode_steps=200)
@@ -319,6 +320,7 @@ def run(
             "batch_size": batch_size,
             "num_rollouts_per_epoch": num_rollouts_per_epoch,
             "num_parallel_envs": num_parallel_envs,
+            "hidden_dim": hidden_dim,
         },
         dashboard_capabilities={
             "signals": ["step_reward"],
@@ -328,7 +330,8 @@ def run(
 
     if record_eval_videos:
         eval_video_logger = VideoLogger(
-            env_name=env_name, exp_folder=f"{eval_log_dir}/videos"
+            env_name=env_name,
+            exp_folder=f"{eval_log_dir}/{metrics_logger.run_name}",
         )
 
     buffer = Buffer(max_size=100_000)

@@ -710,6 +710,14 @@ def run(
         logger.info(f"Policy Loss: {policy_loss:.2f}")
         # logger.info(f"Avg Policy Gradient Norm: {avg_grad_norms:.2f}")
 
+        if epoch % 5 == 0 and record_eval_videos:
+            eval_video_logger.record_evaluation(policy, global_step)
+            metrics_logger.log_video(
+                global_step,
+                eval_video_logger.exp_folder,
+                eval_video_logger.num_eval_episodes,
+            )
+
     env.close()
 
     # Final evaluation pass
