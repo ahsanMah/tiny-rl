@@ -81,6 +81,14 @@ function App() {
     setFrame(f => Math.min(f, rollout.length - 1));
   }, [rollout]);
 
+  // Load real signals when rollout changes, then bump signalVersion so charts redraw.
+  // signalVersion is passed to FrameChartPair and used as a useMemo dependency.
+  const [signalVersion, setSignalVersion] = uS(0);
+  uE(() => {
+    if (!rollout) return;
+    D.loadSignals(rollout).then(() => setSignalVersion(v => v + 1));
+  }, [rollout]);
+
   const baselineRun = uM(() => D.RUNS.find(r => r.name === diffBaselineName) || null, [diffBaselineName]);
   const pinnedRuns = uM(() => D.RUNS.filter(r => pinnedIds.includes(r.id)), [pinnedIds]);
 
@@ -207,6 +215,7 @@ function App() {
               setFrame={setFrame}
               pinnedRuns={pinnedRuns}
               metric={metric} setMetric={setMetric}
+              signalVersion={signalVersion}
             />
 
             <LossStrip run={focusedRun} ckpt={ckpt} />

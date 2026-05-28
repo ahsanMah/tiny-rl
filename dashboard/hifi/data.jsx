@@ -164,10 +164,48 @@ function parseNpy(buffer) {
   }
 }
 
+// Fetch and parse a rollout's signals.npz.
+// Returns an object like { step_reward: Float32Array, cumulative_return: Float32Array }.
+// Returns {} if the file doesn't exist (e.g. PPO runs have no signals.npz).
+async function loadSignals(rollout) {
+  if (!rollout || !rollout.dir) return {};
+  if (SIGNAL_CACHE.has(rollout.dir)) return SIGNAL_CACHE.get(rollout.dir);
+
+  try {
+    const response = await fetch(`${rollout.dir}/signals.npz`);
+    if (!response.ok) throw new Error('no signals.npz');
+
+    const buffer   = await response.arrayBuffer();
+    const zip      = await JSZip.loadAsync(buffer);
+    const signals  = {};
+
+    // Each file in the zip is one signal array, e.g. "step_reward.npy"
+    for (const filename of Object.keys(zip.files)) {
+      const signalName = filename.replace('.npy', '');
+      const npyBuffer  = await zip.files[filename].async('arraybuffer');
+      signals[signalName] = parseNpy(npyBuffer);
+    }
+
+    // Derive cumulative_return by summing step_reward — it's not stored directly
+    if (signals.step_reward) {
+      const sr  = signals.step_reward;
+      const cum = new Float32Array(sr.length);
+      let total = 0;
+      for (let i = 0; i < sr.length; i++) { total += sr[i]; cum[i] = total; }
+      signals.cumulative_return = cum;
+    }
+
+    console.log(`Loaded signals for ${rollout.dir}:`, Object.keys(signals));
+    SIGNAL_CACHE.set(rollout.dir, signals);
+    return signals;
+  } catch {
+    // Not an error — just means this rollout has no signal file (e.g. PPO runs)
+    SIGNAL_CACHE.set(rollout.dir, {});
+    return {};
+  }
+}
 
 // ── Per-frame signal synthesis ───────────────────────────────────────────
-// Still used as a fallback for signals not present in the real .npz files.
-// Step 4 will replace this with real data for runs that have signals.npz.
 const FRAME_CACHE = new Map();
 
 function frameKey(runId, step, kind, metric) {
@@ -175,7 +213,14 @@ function frameKey(runId, step, kind, metric) {
 }
 
 function frameSignal(run, ckpt, rollout, metric) {
-    const key = frameKey(run.id, ckpt.step, rollout.kind, metric);
+  // If real signals are already loaded for this rollout, use them
+  if (rollout.dir) {
+    const real = SIGNAL_CACHE.get(rollout.dir);
+    if (real && real[metric] !== undefined) return real[metric];
+  }
+
+  // Otherwise fall back to the synthetic generator (cached to avoid recomputing)
+  const key = frameKey(run.id, ckpt.step, rollout.kind, metric);
   if (FRAME_CACHE.has(key)) return FRAME_CACHE.get(key);
 
   const len = rollout.length;
@@ -253,6 +298,7 @@ D.RUNS = [];  // starts empty; populated when D.ready resolves
 D.ready = loadAllRuns().then(runs => { D.RUNS = runs; });
 
 D.frameSignal    = frameSignal;
+D.loadSignals    = loadSignals;
 D.getRun         = getRun;
 D.getCheckpoint  = getCheckpoint;
 D.getRollout     = getRollout;
