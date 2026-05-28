@@ -202,7 +202,14 @@ function FrameChartPair({ focalRun, focalCkpt, focalRollout, frame, setFrame, pi
             </span>
           )}
           <select className="dropdown" value={metric} onChange={(e) => setMetric(e.target.value)}>
-            {METRIC_OPTIONS.map(o => <option key={o.key} value={o.key}>{o.label}</option>)}
+            {METRIC_OPTIONS
+              .filter(o => {
+                const realSignals = focalRun.capabilities?.signals || [];
+                // If the run has real signals, only show those + cumulative_return (always derived).
+                // If no real signals (pure synthetic run), show everything.
+                return realSignals.length === 0 || realSignals.includes(o.key) || o.key === 'cumulative_return';
+              })
+              .map(o => <option key={o.key} value={o.key}>{o.label}</option>)}
           </select>
         </div>
         {/* Reuse FrameLevelChart minus its own header (we built the header above) */}
@@ -352,7 +359,7 @@ function LossStrip({ run, ckpt }) {
   const totalSteps = run.steps;
   const ckptStepFrac = ckpt.step / totalSteps;
 
-  // Synthesize a per-training-step loss curve for the focal run
+// Synthesize a per-training-step loss curve for the focal run
   const losses = useM(() => {
     function gen(seed, opts) {
       const { floor = 0.1, samples = 200 } = opts;
@@ -365,7 +372,7 @@ function LossStrip({ run, ckpt }) {
       }
       return out;
     }
-    return {
+        return {
       policy_loss: gen(parseInt(run.id, 16) * 7, { floor: 0.08, samples: 200 }),
       value_loss:  gen(parseInt(run.id, 16) * 11, { floor: 0.12, samples: 200 }),
       entropy:     gen(parseInt(run.id, 16) * 13, { floor: 0.40, samples: 200 }),
@@ -375,15 +382,15 @@ function LossStrip({ run, ckpt }) {
   const valAt = (arr) => {
     const idx = Math.floor(ckptStepFrac * (arr.length - 1));
     return arr[idx];
-  };
+};
 
   return (
     <div className="col border-t" style={{ flex: '0 0 auto', padding: '0 22px' }}>
       <div className="row" style={{ alignItems: 'stretch' }}>
         <LossChart title="policy_loss" values={losses.policy_loss} atCkptValue={valAt(losses.policy_loss).toFixed(3)} width={300} height={120} ckptStepFrac={ckptStepFrac} />
         <div className="hr-v" />
-        <LossChart title="value_loss" values={losses.value_loss} atCkptValue={valAt(losses.value_loss).toFixed(3)} width={300} height={120} ckptStepFrac={ckptStepFrac} />
-        <div className="hr-v" />
+            <LossChart title="value_loss" values={losses.value_loss} atCkptValue={valAt(losses.value_loss).toFixed(3)} width={300} height={120} ckptStepFrac={ckptStepFrac} />
+          <div className="hr-v" />
         <LossChart title="entropy" values={losses.entropy} atCkptValue={valAt(losses.entropy).toFixed(3)} width={300} height={120} ckptStepFrac={ckptStepFrac} />
       </div>
     </div>
