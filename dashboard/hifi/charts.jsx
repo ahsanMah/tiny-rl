@@ -404,86 +404,11 @@ function Sparkline({ values, width = 64, height = 16, color = 'var(--ink-2)', st
   );
 }
 
-// ── Action distribution bars ─────────────────────────────────────────
-function ActionBars({ probs, labels, width = 246, height = 64 }) {
-  const w = width;
-  const h = height;
-  const n = probs.length;
-  const gap = 3;
-  const bw = (w - gap * (n - 1)) / n;
-  const max = Math.max(...probs);
-  return (
-    <svg width="100%" height={h} viewBox={`0 0 ${w} ${h}`} style={{ display: 'block' }}>
-      {probs.map((p, i) => {
-        const bh = (p / max) * (h - 14);
-        return (
-          <g key={i}>
-            <rect x={i * (bw + gap)} y={h - 12 - bh} width={bw} height={bh}
-                  fill={i === probs.indexOf(max) ? 'var(--accent)' : 'var(--ink)'} />
-            <text x={i * (bw + gap) + bw / 2 - 4} y={h - 2}
-                  style={{ font: '11px var(--mono)', fill: 'var(--ink-3)' }}>{labels[i]}</text>
-          </g>
-        );
-      })}
-    </svg>
-  );
-}
-
-// ── TD-error strip (1-row heatmap synced to frame) ───────────────────
-function TdErrorStrip({ values, frame, totalFrames, width = 246, height = 38 }) {
-  const w = width;
-  const h = height;
-  const cols = Math.min(64, values.length);
-  const cw = (w - 2) / cols;
-  // Bin the values to columns
-  const binned = useMemo(() => {
-    const out = new Array(cols).fill(0);
-    const binSize = Math.ceil(values.length / cols);
-    for (let i = 0; i < cols; i++) {
-      let max = 0;
-      for (let j = i * binSize; j < Math.min(values.length, (i + 1) * binSize); j++) {
-        const v = Math.abs(values[j]);
-        if (v > max) max = v;
-      }
-      out[i] = max;
-    }
-    return out;
-  }, [values, cols]);
-  const maxV = Math.max(...binned, 0.01);
-  const activeCol = Math.floor((frame / (totalFrames || 1)) * cols);
-  return (
-    <svg width="100%" height={h} viewBox={`0 0 ${w} ${h}`} style={{ display: 'block' }}>
-      {binned.map((v, i) => {
-        const alpha = Math.min(1, v / maxV);
-        return (
-          <rect key={i}
-            x={1 + i * cw}
-            y={2}
-            width={cw - 0.5}
-            height={h - 4}
-            fill={`rgba(237,232,223,${(alpha * 0.75).toFixed(2)})`}
-          />
-        );
-      })}
-      {/* Frame indicator */}
-      <line
-        x1={1 + activeCol * cw + cw / 2}
-        y1={0}
-        x2={1 + activeCol * cw + cw / 2}
-        y2={h}
-        stroke="var(--accent)" strokeWidth="1"
-      />
-    </svg>
-  );
-}
-
 window.ChartTooltip = ChartTooltip;
 window.FrameLevelChart = FrameLevelChart;
 window.LossChart = LossChart;
 window.CheckpointSparkbar = CheckpointSparkbar;
 window.Sparkline = Sparkline;
-window.ActionBars = ActionBars;
-window.TdErrorStrip = TdErrorStrip;
 window.buildPath = buildPath;
 window.RUN_LINE_STYLES = RUN_LINE_STYLES;
 window.RUN_LINE_DEFAULT = RUN_LINE_DEFAULT;

@@ -36,13 +36,6 @@ function RailRight({ run, ckpt, rollout, frame, baselineRun, allRuns }) {
   const hpKeys = Object.keys(run.hp);
   const changes = hpKeys.filter(k => baselineRun && baseHp[k] !== run.hp[k]);
 
-  // Action probs at current frame
-  // const probs = D.actionProbs(run, ckpt, rollout, frame);
-  // const labels = D.ACTION_LABELS[run.env] || ['0','1','2','3','4','5','6','7'];
-
-  // TD-error for this rollout
-  const tdValues = D.frameSignal(run, ckpt, rollout, 'td_error');
-
   return (
     <div className="col scroll" style={{ width: 'clamp(190px, 15vw, 280px)', flexShrink: 0, background: 'var(--paper)', borderLeft: '1px solid var(--hairline)', height: '100%' }}>
 
