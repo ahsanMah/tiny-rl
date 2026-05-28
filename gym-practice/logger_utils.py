@@ -40,20 +40,16 @@ def _coerce_scalar(value: Any) -> Any:
     return value
 
 
-def _to_jsonable(value: Any) -> Any:
-    value = _coerce_scalar(value)
-
-    if isinstance(value, (str, int, float, bool)) or value is None:
-        return value
+def _json_default(value: Any) -> Any:
+    coerced = _coerce_scalar(value)
+    if coerced is not value:
+        return coerced
 
     if isinstance(value, np.ndarray):
         return value.tolist()
 
-    if isinstance(value, dict):
-        return {str(k): _to_jsonable(v) for k, v in value.items()}
-
-    if isinstance(value, (list, tuple, set)):
-        return [_to_jsonable(v) for v in value]
+    if isinstance(value, set):
+        return list(value)
 
     return str(value)
 
@@ -61,31 +57,14 @@ def _to_jsonable(value: Any) -> Any:
 def _write_json(path: str, payload: Dict[str, Any]) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(_to_jsonable(payload), f, indent=2)
+        json.dump(payload, f, indent=2, default=_json_default)
 
 
 def _append_jsonl(path: str, payload: Dict[str, Any]) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(_to_jsonable(payload), separators=(",", ":")))
+        f.write(json.dumps(payload, separators=(",", ":"), default=_json_default))
         f.write("\n")
-
-
-def _infer_env_and_algorithm(exp_name: str) -> tuple[Optional[str], Optional[str]]:
-    # Best-effort parser for names shaped like "<env>-<algo>".
-    known_algo_suffixes = (
-        "ppo-jax",
-        "vpg-gae",
-        "vectorized-gae",
-        "ppo",
-        "sac",
-    )
-    for suffix in known_algo_suffixes:
-        marker = f"-{suffix}"
-        if exp_name.endswith(marker):
-            env_id = exp_name[: -len(marker)]
-            return env_id, suffix
-    return None, None
 
 
 class DashboardRunWriter:
@@ -139,7 +118,7 @@ class DashboardRunWriter:
         }
 
         if extra_metadata:
-            self.run_doc.update(_to_jsonable(extra_metadata))
+            self.run_doc.update(extra_metadata)
 
         self._flush_run_doc()
 
@@ -174,7 +153,7 @@ class DashboardRunWriter:
         if signal_semantics:
             cap = self.run_doc.setdefault("capabilities", {})
             semantics = cap.setdefault("signal_semantics", {})
-            semantics.update(_to_jsonable(signal_semantics))
+            semantics.update(signal_semantics)
             changed = True
 
         if changed:
@@ -188,11 +167,12 @@ class DashboardRunWriter:
         epoch: Optional[int] = None,
         wall_time_s: Optional[float] = None,
     ) -> None:
-        metric_values = {
-            str(k): _coerce_scalar(v)
-            for k, v in metrics.items()
-            if _coerce_scalar(v) is not None
-        }
+        metric_values = {}
+        for key, value in metrics.items():
+            coerced = _coerce_scalar(value)
+            if coerced is None:
+                continue
+            metric_values[str(key)] = coerced
         if not metric_values:
             return
 
@@ -339,7 +319,7 @@ class DashboardRunWriter:
             "signals_file": signals_file,
             "available_signals": sorted(available_signals),
             "signal_shapes": signal_shapes,
-            "signal_semantics": _to_jsonable(signal_semantics or {}),
+            "signal_semantics": signal_semantics or {},
         }
         _write_json(os.path.join(rollout_dir, "meta.json"), rollout_meta)
 
@@ -475,14 +455,13 @@ class RLLogger:
         self.dashboard_writer: Optional[DashboardRunWriter] = None
         dashboard_root = dashboard_log_dir or os.environ.get("RL_DASHBOARD_LOG_DIR")
         if dashboard_root:
-            env_guess, algo_guess = _infer_env_and_algorithm(exp_name)
             metadata = dashboard_run_metadata or {}
             self.dashboard_writer = DashboardRunWriter(
                 base_dir=dashboard_root,
                 run_id=self.run_name,
                 name=metadata.get("name", self.run_name),
-                algorithm=metadata.get("algorithm", algo_guess),
-                env_id=metadata.get("env_id", env_guess),
+                algorithm=metadata.get("algorithm"),
+                env_id=metadata.get("env_id"),
                 seed=metadata.get("seed"),
                 hparams=dashboard_hparams or metadata.get("hparams"),
                 capabilities=dashboard_capabilities or metadata.get("capabilities"),
@@ -590,7 +569,12 @@ class RLLogger:
 
         rollout_entries: list[Dict[str, Any]] = []
         for ep in candidate_indices:
-            base_video_path = VideoLogger.get_video_filename(video_exp_folder, global_step, ep)
+            base_video_path = VideoLogger.get_video_filename(
+                video_exp_folder, global_step, ep
+            )
+            base_signals_path = VideoLogger.get_signals_filename(
+                video_exp_folder, global_step, ep
+            )
             summary_ep = by_episode.get(ep, {})
 
             episode_return = summary_ep.get("return")
@@ -601,15 +585,11 @@ class RLLogger:
             if episode_length is not None:
                 episode_length = int(_coerce_scalar(episode_length))
 
-            video_path = summary_ep.get("video_path") or base_video_path
-            if video_path and not os.path.isabs(video_path) and not os.path.exists(video_path):
-                video_path = os.path.join(video_exp_folder, video_path)
+            video_path = summary_ep.get("video_path", base_video_path)
             if video_path and not os.path.exists(video_path):
                 video_path = None
 
-            signals_path = summary_ep.get("signals_path")
-            if signals_path and not os.path.isabs(signals_path) and not os.path.exists(signals_path):
-                signals_path = os.path.join(video_exp_folder, signals_path)
+            signals_path = summary_ep.get("signals_path", base_signals_path)
             if signals_path and not os.path.exists(signals_path):
                 signals_path = None
 
