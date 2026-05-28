@@ -73,9 +73,9 @@ html {
   --ink-4: var(--md-sys-color-outline-variant);
 
   /* ── Hairlines — opacity layers over outline ───────────────────── */
-  --hairline:        color-mix(in srgb, var(--md-sys-color-outline) 22%, transparent);
-  --hairline-strong: color-mix(in srgb, var(--md-sys-color-outline) 42%, transparent);
-  --hairline-dashed: color-mix(in srgb, var(--md-sys-color-outline) 55%, transparent);
+  --hairline:        color-mix(in srgb, var(--md-sys-color-outline) 16%, transparent);
+  --hairline-strong: color-mix(in srgb, var(--md-sys-color-outline) 32%, transparent);
+  --hairline-dashed: color-mix(in srgb, var(--md-sys-color-outline) 45%, transparent);
 
   /* ── Accent (golden amber) ─────────────────────────────────────── */
   --accent:      var(--md-sys-color-primary);
@@ -120,11 +120,11 @@ html {
   --t-display: 36px;
 
   /* ── Spacing ───────────────────────────────────────────────────── */
-  --sp-1: 5px;  --sp-2: 10px; --sp-3: 14px; --sp-4: 18px;
-  --sp-5: 24px; --sp-6: 30px; --sp-7: 40px;
+  --sp-1: 6px;  --sp-2: 12px; --sp-3: 18px; --sp-4: 24px;
+  --sp-5: 32px; --sp-6: 44px; --sp-7: 56px;
 
-  --radius-sm: 3px;
-  --radius-md: 6px;
+  --radius-sm: 4px;
+  --radius-md: 8px;
 }
 
 
@@ -140,7 +140,7 @@ html, body {
   color: var(--ink);
   font-family: var(--ui);
   font-size: var(--t-md);
-  line-height: 1.4;
+  line-height: 1.6;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   font-feature-settings: "ss01", "cv11";
@@ -291,7 +291,7 @@ html, body {
   display: grid;
   grid-template-columns: auto 1fr;
   column-gap: var(--sp-4);
-  row-gap: 6px;
+  row-gap: 10px;
   font-size: var(--t-sm);
 }
 .kv .k { color: var(--ink-3); font-family: var(--ui); white-space: nowrap; }
@@ -344,7 +344,7 @@ html, body {
 /* Eyebrow rule: hairline + small caps title for sections */
 .eyebrow-rule {
   display: flex; align-items: center; gap: var(--sp-2);
-  padding: var(--sp-3) var(--sp-4) var(--sp-1);
+  padding: var(--sp-4) var(--sp-4) var(--sp-2);
 }
 .eyebrow-rule::after { content: ''; flex: 1; height: 1px; background: var(--hairline); }
 

@@ -21,7 +21,7 @@ function saveSession(state) {
 // ── Tweak defaults — EDITMODE block lets the host persist tweaks ─────
 const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
   "accent": "#f1be6d",
-  "density": "regular",
+  "density": "spacious",
   "paperTone": "warm",
   "playerOverlay": "none"
 }/*EDITMODE-END*/;
@@ -46,10 +46,10 @@ function ThemeInject({ tweaks, darkMode }) {
         --t-md:  13px;
         --t-lg:  15px;
       ` : tweaks.density === 'spacious' ? `
-        --t-xs:  12px;
-        --t-sm:  13.5px;
-        --t-md:  15px;
-        --t-lg:  17px;
+        --t-xs:  12.5px;
+        --t-sm:  14px;
+        --t-md:  15.5px;
+        --t-lg:  18px;
       ` : ''}
     }
   `;
@@ -225,7 +225,7 @@ function App() {
 
           {/* Scrollable body */}
           <div className="scroll col grow" style={{ minHeight: 0 }}>
-            <div className="col" style={{ padding: '18px 16px 12px', gap: 14, flex: '0 0 auto' }}>
+            <div className="col" style={{ padding: '28px 20px 20px', gap: 20, flex: '0 0 auto' }}>
               <WalkerPlayer
                 run={focusedRun} ckpt={ckpt} rollout={rollout}
                 frame={frame} setFrame={setFrame}
