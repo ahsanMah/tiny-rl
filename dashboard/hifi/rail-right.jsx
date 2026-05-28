@@ -2,12 +2,12 @@
 
 function HpRow({ k, v, base, changed }) {
   return (
-    <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', minHeight: 32 }}>
+    <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline', gap: 8 }}>
       <span className="muted" style={{ fontSize: 11 }}>{k}</span>
       <span style={{ display: 'flex', gap: 6, alignItems: 'baseline' }}>
         {changed && base !== undefined && (
           <span className="muted-soft" style={{ fontFamily: 'var(--mono)', fontSize: 10, textDecoration: 'line-through' }}>{base}</span>
-        )}
+          )}
         <span className="num" style={{ fontWeight: changed ? 600 : 400, color: changed ? 'var(--accent)' : 'var(--ink)' }}>
           {v}
         </span>
@@ -18,8 +18,8 @@ function HpRow({ k, v, base, changed }) {
 
 function Section({ title, right, children }) {
   return (
-    <div className="col" style={{ padding: '22px 20px', borderBottom: '1px solid var(--hairline)' }}>
-      <div className="row" style={{ alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 16, gap: 8 }}>
+    <div className="col" style={{ padding: '16px 18px', borderBottom: '1px solid var(--hairline)' }}>
+      <div className="row" style={{ alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 12, gap: 8 }}>
         <span className="label-eyebrow" style={{ flex: '1 1 auto', minWidth: 0 }}>{title}</span>
         {right && <span style={{ fontSize: 10.5, color: 'var(--ink-3)', whiteSpace: 'nowrap', flex: '0 0 auto' }}>{right}</span>}
       </div>
