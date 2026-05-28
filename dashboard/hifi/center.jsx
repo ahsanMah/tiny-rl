@@ -145,7 +145,7 @@ const METRIC_OPTIONS = [
   { key: 'entropy',     label: 'entropy' },
 ];
 
-function FrameChartPair({ focalRun, focalCkpt, focalRollout, frame, setFrame, pinnedRuns, metric, setMetric }) {
+function FrameChartPair({ focalRun, focalCkpt, focalRollout, frame, setFrame, pinnedRuns, metric, setMetric, signalVersion }) {
   // ── Line builder — shared helper adds name/strokeColor/dash for tooltip ──
   const buildLines = (sig) => {
     const out = [];
@@ -170,8 +170,8 @@ function FrameChartPair({ focalRun, focalCkpt, focalRollout, frame, setFrame, pi
     return out;
   };
 
-  const cumLines    = useM(() => buildLines('cumulative_return'), [focalRun, focalCkpt, focalRollout, pinnedRuns]);
-  const metricLines = useM(() => buildLines(metric),              [focalRun, focalCkpt, focalRollout, pinnedRuns, metric]);
+  const cumLines    = useM(() => buildLines('cumulative_return'), [focalRun, focalCkpt, focalRollout, pinnedRuns, signalVersion]);
+  const metricLines = useM(() => buildLines(metric),              [focalRun, focalCkpt, focalRollout, pinnedRuns, metric, signalVersion]);
 
   const cumAtCursor   = cumLines[0]?.values?.[Math.min(frame, cumLines[0].values.length - 1)];
   const metricAtCursor = metricLines[0]?.values?.[Math.min(frame, metricLines[0].values.length - 1)];
