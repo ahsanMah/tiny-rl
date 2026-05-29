@@ -265,8 +265,30 @@ function WalkerPlayer({
   overlay = 'none', setOverlay,
 }) {
   const canvasRef = useRef(null);
+  const videoRef  = useRef(null);
   const rafRef = useRef(null);
   const lastTimeRef = useRef(0);
+
+  // Video support: show real mp4 when available, fall back to canvas on error.
+  const [videoFailed, setVideoFailed] = useState(false);
+  useEffect(() => { setVideoFailed(false); }, [rollout?.dir]); // reset when rollout changes
+
+  const videoUrl  = rollout.dir ? `${rollout.dir}/video.mp4` : null;
+  const showVideo = videoUrl && !videoFailed;
+
+  // Sync video position to frame (fraction-based so we don't need to know fps)
+  useEffect(() => {
+    if (!showVideo || !videoRef.current) return;
+    const video = videoRef.current;
+    const onLoaded = () => {
+      const targetTime = (frame / Math.max(1, rollout.length - 1)) * video.duration;
+      if (Math.abs(video.currentTime - targetTime) > 0.04) {
+        video.currentTime = targetTime;
+      }
+    };
+    if (video.readyState >= 1) onLoaded();
+    else video.addEventListener('loadedmetadata', onLoaded, { once: true });
+  }, [frame, showVideo, rollout.length]);
 
   // DPR-aware canvas sizing
   useEffect(() => {
@@ -338,16 +360,25 @@ function WalkerPlayer({
 
   return (
     <div className="col" style={{ width: '100%', gap: 8 }}>
-      {/* Canvas player */}
+      {/* Player: real video when available, animated canvas otherwise */}
       <div className="player" style={{ aspectRatio: '16/9', borderRadius: 4, maxHeight: 'clamp(260px, calc(21vw + 140px), 520px)' }}>
-        <canvas
-          ref={canvasRef}
-          style={{ width: '100%', height: '100%' }}
-          onMouseDown={(e) => { dragRef.current = true; onScrub(e); }}
-          onMouseMove={(e) => { if (dragRef.current) onScrub(e); }}
-          onMouseUp={() => { dragRef.current = false; }}
-          onMouseLeave={() => { dragRef.current = false; }}
-        />
+        {showVideo ? (
+          <video
+            ref={videoRef}
+            src={videoUrl}
+            onError={() => setVideoFailed(true)}
+            style={{ width: '100%', height: '100%', objectFit: 'contain', background: '#000' }}
+          />
+        ) : (
+          <canvas
+            ref={canvasRef}
+            style={{ width: '100%', height: '100%' }}
+            onMouseDown={(e) => { dragRef.current = true; onScrub(e); }}
+            onMouseMove={(e) => { if (dragRef.current) onScrub(e); }}
+            onMouseUp={() => { dragRef.current = false; }}
+            onMouseLeave={() => { dragRef.current = false; }}
+          />
+        )}
         {/* Top-left corner caption */}
         <div style={{ position: 'absolute', top: 8, left: 10, color: 'rgba(244,241,234,.85)', font: '500 11px var(--mono)', textShadow: '0 1px 2px rgba(0,0,0,.6)' }}>
           {run.env}  ·  ckpt {D.fmtStep(ckpt.step)}  ·  {rollout.kind} ep  ·  r {rollout.return}

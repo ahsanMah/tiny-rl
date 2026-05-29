@@ -22,11 +22,18 @@ function saveSession(state) {
 function App() {
   const init = uM(loadSession, []);
 
+  // ── Loading state — wait for D.ready before rendering ──────────
+  const [loaded, setLoaded] = uS(false);
+  uE(() => { D.ready.then(() => setLoaded(true)); }, []);
+
   // ── State (with localStorage restore) ──────────────────────────
-  const [focusedId, setFocusedId] = uS(init.focusedId || 'a4ee');
-  const [pinnedIds, setPinnedIds] = uS(init.pinnedIds || ['a4f2', 'a4ee', 'a4ec']);
-  const [diffBaselineName, setDiffBaselineName] = uS(init.diffBaselineName ?? 'ppo-walker-v35');
-  const [ckptStep, setCkptStep] = uS(init.ckptStep || 3500000);
+  // Default IDs now point to the real runs. If localStorage has old
+  // synthetic IDs from a previous session, they won't match any real
+  // run — the focusedRun guard below will fall back to the first run.
+  const [focusedId, setFocusedId] = uS(init.focusedId || 'BipedalWalker-v3-sac_1779998141');
+  const [pinnedIds, setPinnedIds] = uS(init.pinnedIds || ['BipedalWalker-v3-sac_1779998141', 'BipedalWalker-v3-ppo_2026-05-28_16-14']);
+  const [diffBaselineName, setDiffBaselineName] = uS(init.diffBaselineName ?? 'BipedalWalker-v3-ppo_2026-05-28_16-14');
+  const [ckptStep, setCkptStep] = uS(init.ckptStep || 0);
   const [episodeKind, setEpisodeKind] = uS(init.episodeKind || 'best');
   const [frame, setFrame] = uS(init.frame || 0);
   const [playing, setPlaying] = uS(false);
@@ -48,7 +55,7 @@ function App() {
   const toggleDark = uCB(() => setDarkMode(d => !d), []);
 
   // ── Derived ────────────────────────────────────────────────────
-  const focusedRun = uM(() => D.RUNS.find(r => r.id === focusedId), [focusedId]);
+  const focusedRun = uM(() => D.RUNS.find(r => r.id === focusedId) || D.RUNS[0], [focusedId, loaded]);
 
   // Snap ckptStep to nearest available checkpoint when run changes
   uE(() => {
@@ -72,6 +79,14 @@ function App() {
   uE(() => {
     if (!rollout) return;
     setFrame(f => Math.min(f, rollout.length - 1));
+  }, [rollout]);
+
+  // Load real signals when rollout changes, then bump signalVersion so charts redraw.
+  // signalVersion is passed to FrameChartPair and used as a useMemo dependency.
+  const [signalVersion, setSignalVersion] = uS(0);
+  uE(() => {
+    if (!rollout) return;
+    D.loadSignals(rollout).then(() => setSignalVersion(v => v + 1));
   }, [rollout]);
 
   const baselineRun = uM(() => D.RUNS.find(r => r.name === diffBaselineName) || null, [diffBaselineName]);
@@ -139,8 +154,8 @@ function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, [rollout, focusedRun, ckptStep]);
 
-  if (!focusedRun || !ckpt || !rollout) {
-    return <div style={{ padding: 40 }}>Loading…</div>;
+  if (!loaded || !focusedRun || !ckpt || !rollout) {
+    return <div style={{ padding: 40 }}>Loading runs…</div>;
   }
 
   return (
@@ -200,6 +215,7 @@ function App() {
               setFrame={setFrame}
               pinnedRuns={pinnedRuns}
               metric={metric} setMetric={setMetric}
+              signalVersion={signalVersion}
             />
 
             <LossStrip run={focusedRun} ckpt={ckpt} />

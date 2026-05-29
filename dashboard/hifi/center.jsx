@@ -73,9 +73,9 @@ function CkptNav({ run, ckpt, onSelectCkpt }) {
   const prev = () => idx > 0 && onSelectCkpt(run.checkpoints[idx - 1].step);
   const next = () => idx < total - 1 && onSelectCkpt(run.checkpoints[idx + 1].step);
   return (
-    <div className="row border-b" style={{ padding: '18px 22px', gap: 14, flex: '0 0 auto', background: 'var(--surface)' }}>
+    <div className="row border-b" style={{ padding: '11px 22px', gap: 14, flex: '0 0 auto', background: 'var(--surface)' }}>
       <span className="label-eyebrow">Checkpoint</span>
-      <span className="num strong" style={{ fontSize: 15, fontFamily: 'var(--mono)' }}>{D.fmtStep(ckpt.step)}</span>
+      <span className="num strong" style={{ fontSize: 15, fontFamily: 'var(--mono)', minWidth: '4.5ch', display: 'inline-block' }}>{D.fmtStep(ckpt.step)}</span>
       <span className="muted" style={{ fontSize: 11, whiteSpace: 'nowrap' }}>step {idx + 1} of {total}</span>
       <div className="row gap-1">
         <button className="btn icon" onClick={prev} disabled={idx === 0} title="previous (J)">◀</button>
@@ -145,7 +145,7 @@ const METRIC_OPTIONS = [
   { key: 'entropy',     label: 'entropy' },
 ];
 
-function FrameChartPair({ focalRun, focalCkpt, focalRollout, frame, setFrame, pinnedRuns, metric, setMetric }) {
+function FrameChartPair({ focalRun, focalCkpt, focalRollout, frame, setFrame, pinnedRuns, metric, setMetric, signalVersion }) {
   // ── Line builder — shared helper adds name/strokeColor/dash for tooltip ──
   const buildLines = (sig) => {
     const out = [];
@@ -170,8 +170,8 @@ function FrameChartPair({ focalRun, focalCkpt, focalRollout, frame, setFrame, pi
     return out;
   };
 
-  const cumLines    = useM(() => buildLines('cumulative_return'), [focalRun, focalCkpt, focalRollout, pinnedRuns]);
-  const metricLines = useM(() => buildLines(metric),              [focalRun, focalCkpt, focalRollout, pinnedRuns, metric]);
+  const cumLines    = useM(() => buildLines('cumulative_return'), [focalRun, focalCkpt, focalRollout, pinnedRuns, signalVersion]);
+  const metricLines = useM(() => buildLines(metric),              [focalRun, focalCkpt, focalRollout, pinnedRuns, metric, signalVersion]);
 
   const cumAtCursor   = cumLines[0]?.values?.[Math.min(frame, cumLines[0].values.length - 1)];
   const metricAtCursor = metricLines[0]?.values?.[Math.min(frame, metricLines[0].values.length - 1)];
@@ -202,7 +202,14 @@ function FrameChartPair({ focalRun, focalCkpt, focalRollout, frame, setFrame, pi
             </span>
           )}
           <select className="dropdown" value={metric} onChange={(e) => setMetric(e.target.value)}>
-            {METRIC_OPTIONS.map(o => <option key={o.key} value={o.key}>{o.label}</option>)}
+            {METRIC_OPTIONS
+              .filter(o => {
+                const realSignals = focalRun.capabilities?.signals || [];
+                // If the run has real signals, only show those + cumulative_return (always derived).
+                // If no real signals (pure synthetic run), show everything.
+                return realSignals.length === 0 || realSignals.includes(o.key) || o.key === 'cumulative_return';
+              })
+              .map(o => <option key={o.key} value={o.key}>{o.label}</option>)}
           </select>
         </div>
         {/* Reuse FrameLevelChart minus its own header (we built the header above) */}
@@ -350,41 +357,63 @@ function FrameLevelChartBare({ lines, frame, focalLength, setFrame, height = 160
 // ── Loss strip (3 small charts) ─────────────────────────────────────
 function LossStrip({ run, ckpt }) {
   const totalSteps = run.steps;
-  const ckptStepFrac = ckpt.step / totalSteps;
+  const ckptStepFrac = totalSteps > 0 ? ckpt.step / totalSteps : 1;
 
-  // Synthesize a per-training-step loss curve for the focal run
   const losses = useM(() => {
-    function gen(seed, opts) {
+    const tm = run.trainMetrics;
+
+    // Use real train_metrics.jsonl data when available
+    if (tm && Object.keys(tm).length > 0) {
+      // Skip non-loss metrics; prefer the most informative ones
+      const skip = new Set(['sps', 'epoch', 'wall_time_s']);
+      const preferred = ['policy_loss', 'value_loss', 'entropy', 'q1_loss', 'q2_loss'];
+      const available = Object.keys(tm).filter(k => !skip.has(k));
+      const ordered = [
+        ...preferred.filter(k => available.includes(k)),
+        ...available.filter(k => !preferred.includes(k)),
+      ].slice(0, 3);
+
+      const result = {};
+      for (const key of ordered) {
+        const entries = tm[key];
+        const arr = new Float32Array(entries.length);
+        entries.forEach((e, i) => { arr[i] = e.value; });
+        result[key] = arr;
+      }
+      return result;
+    }
+
+    // Fallback: synthetic curves (for runs with no train_metrics.jsonl)
+    function gen(seed, opts = {}) {
       const { floor = 0.1, samples = 200 } = opts;
       const r = D.rng(seed);
       const out = new Float32Array(samples);
       for (let i = 0; i < samples; i++) {
         const t = i / (samples - 1);
-        const base = floor + (1 - floor) * Math.exp(-2.8 * t);
-        out[i] = base + (r() - 0.5) * 0.05;
+        out[i] = floor + (1 - floor) * Math.exp(-2.8 * t) + (r() - 0.5) * 0.05;
       }
       return out;
     }
+    const h = D.hashString(run.id);
     return {
-      policy_loss: gen(parseInt(run.id, 16) * 7, { floor: 0.08, samples: 200 }),
-      value_loss:  gen(parseInt(run.id, 16) * 11, { floor: 0.12, samples: 200 }),
-      entropy:     gen(parseInt(run.id, 16) * 13, { floor: 0.40, samples: 200 }),
+      policy_loss: gen(h * 7,  { floor: 0.08 }),
+      value_loss:  gen(h * 11, { floor: 0.12 }),
+      entropy:     gen(h * 13, { floor: 0.40 }),
     };
   }, [run]);
 
-  const valAt = (arr) => {
-    const idx = Math.floor(ckptStepFrac * (arr.length - 1));
-    return arr[idx];
-  };
+  const metricKeys = Object.keys(losses);
+  const valAt = (arr) => arr[Math.min(Math.floor(ckptStepFrac * (arr.length - 1)), arr.length - 1)];
 
   return (
     <div className="col border-t" style={{ flex: '0 0 auto', padding: '0 22px' }}>
       <div className="row" style={{ alignItems: 'stretch' }}>
-        <LossChart title="policy_loss" values={losses.policy_loss} atCkptValue={valAt(losses.policy_loss).toFixed(3)} width={300} height={120} ckptStepFrac={ckptStepFrac} />
-        <div className="hr-v" />
-        <LossChart title="value_loss" values={losses.value_loss} atCkptValue={valAt(losses.value_loss).toFixed(3)} width={300} height={120} ckptStepFrac={ckptStepFrac} />
-        <div className="hr-v" />
-        <LossChart title="entropy" values={losses.entropy} atCkptValue={valAt(losses.entropy).toFixed(3)} width={300} height={120} ckptStepFrac={ckptStepFrac} />
+        {metricKeys.map((key, i) => (
+          <React.Fragment key={key}>
+            {i > 0 && <div className="hr-v" />}
+            <LossChart title={key} values={losses[key]} atCkptValue={valAt(losses[key]).toFixed(3)} width={300} height={120} ckptStepFrac={ckptStepFrac} />
+          </React.Fragment>
+        ))}
       </div>
     </div>
   );
