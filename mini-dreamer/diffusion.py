@@ -121,7 +121,7 @@ class FlowMatchingTrainer:
         self.logit_norm_scale = logit_norm_scale
 
         # The state that will be captured as input and output
-        state = [self.model.state, self.optimizer.state]
+        state = [self.model.state,mx.random.state, self.optimizer.state]
         self.compiled_train_step = mx.compile(
             lambda batch, actions: self.train_step(batch, actions),
             inputs=state,
@@ -129,6 +129,8 @@ class FlowMatchingTrainer:
         )
         self.eval_loss_by_timestep = mx.compile(
             lambda batch, actions, timesteps: self._eval_loss_by_timestep(batch, actions, timesteps),
+            inputs=state[:-1], # dont need optimizer
+            outputs=state[:-1],
         )
 
     def _loss_at_t(
@@ -479,30 +481,20 @@ def train_on_dataset(
         val_conditioning_clips = val_videos[:sample_count]
         val_conditioning_actions = val_actions[:sample_count]
 
-    losses: list[float] = []
     val_timesteps = (0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0)
-
+    avg_loss = 0.0
     start = time.time()
     for step in range(1, train_config.train_steps + 1):
         tic = time.perf_counter()
         batch, batch_actions = sample_batch(
             train_videos, train_actions, train_config.batch_size
         )
-        print(f"sampling step {step} took {(time.perf_counter() - tic)*1e3:.2f}ms")
-
-        tic = time.perf_counter()
         loss = trainer.compiled_train_step(batch, batch_actions)
+        loss = float(loss)
+        avg_loss += loss
+        ema_update(trainer.ema_model, trainer.model, trainer.ema_decay)
         time_per_train_step = time.perf_counter() - tic
         print(f"train step {step} took {time_per_train_step*1e3:.2f}ms")
-
-        tic = time.perf_counter()
-        loss = float(loss)
-        losses.append(loss)
-        print(f"loss append {step} took {(time.perf_counter() - tic)*1e3:.2f}ms")
-
-        tic = time.perf_counter()
-        ema_update(trainer.ema_model, trainer.model, trainer.ema_decay)
-        print(f"ema update {step} took {(time.perf_counter() - tic)*1e3:.2f}ms")
 
         if (
             step == 1
@@ -510,14 +502,12 @@ def train_on_dataset(
             or step == train_config.train_steps
         ):
             elapsed = time.time() - start
-            avg_loss = sum(losses[-train_config.log_every :]) / min(
-                train_config.log_every, len(losses)
-            )
+            avg_loss /= train_config.log_every
             steps_per_sec = step / max(elapsed, 1e-8)
             val_batch, val_batch_actions = sample_batch(
                 val_videos,
                 val_actions,
-                min(train_config.batch_size, int(val_videos.shape[0])),
+                min(train_config.batch_size * 4, int(val_videos.shape[0])),
             )
 
             tic = time.perf_counter()
@@ -563,6 +553,8 @@ def train_on_dataset(
                     save_path,
                     config={"step": step, **asdict(train_config), **full_model_config},
                 )
+
+            avg_loss = 0.0
 
     if train_config.save_dir is not None:
         samples = sample_euler(
