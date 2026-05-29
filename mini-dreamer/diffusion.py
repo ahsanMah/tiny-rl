@@ -113,13 +113,23 @@ class FlowMatchingTrainer:
             learning_rate=learning_rate, weight_decay=weight_decay
         )
         self.max_grad_norm = max_grad_norm
-        self.loss_and_grad = nn.value_and_grad(model, self.loss)
-
+        # self.loss_and_grad = nn.value_and_grad(self.model, self.loss)
         self.sampling_fn = lambda x: sample_noise(
             x, sampling_distribution, logit_norm_mu, logit_norm_scale
         )
         self.logit_norm_mu = logit_norm_mu
         self.logit_norm_scale = logit_norm_scale
+
+        # The state that will be captured as input and output
+        state = [self.model.state, self.optimizer.state]
+        self.compiled_train_step = mx.compile(
+            lambda batch, actions: self.train_step(batch, actions),
+            inputs=state,
+            outputs=state,
+        )
+        self.eval_loss_by_timestep = mx.compile(
+            lambda batch, actions, timesteps: self._eval_loss_by_timestep(batch, actions, timesteps),
+        )
 
     def _loss_at_t(
         self,
@@ -157,11 +167,7 @@ class FlowMatchingTrainer:
         r2 = 1.0 - loss / mx.maximum(target_var, 1e-12)
         return loss, recon_mse, x1_pred, r2
 
-    def loss(self, model: UNet3D, x1: mx.array, actions: mx.array) -> mx.array:
-        t = mx.random.uniform(shape=(x1.shape[0],), low=0.0, high=1.0)
-        return self._loss_at_t(model, x1, actions, t)
-
-    def eval_loss_by_timestep(
+    def _eval_loss_by_timestep(
         self,
         batch: mx.array,
         actions: mx.array,
@@ -190,29 +196,24 @@ class FlowMatchingTrainer:
                 self.model, batch, actions, t, return_eval_aux=True
             )
             psnr = log10_max - 10.0 * mx.log10(mx.maximum(recon_mse, 1e-12))
-            mx.eval(loss, psnr, r2, x1_pred)
-            losses[timestep] = float(loss)
-            psnrs[timestep] = float(psnr)
-            r2s[timestep] = float(r2)
+            # mx.eval(loss, psnr, r2, x1_pred)
+            losses[timestep] = loss
+            psnrs[timestep] = psnr
+            r2s[timestep] = r2
             preds[timestep] = x1_pred
         return losses, psnrs, r2s, preds
 
     def train_step(self, batch: mx.array, actions: mx.array) -> float:
-        loss, grads = self.loss_and_grad(self.model, batch, actions)
-
+        def _loss(batch, actions):
+            t = mx.random.uniform(shape=(batch.shape[0],), low=0.0, high=1.0)
+            return self._loss_at_t(self.model, batch, actions, t)
+        loss_and_grad_fn = nn.value_and_grad(self.model, _loss)
+        loss, grads = loss_and_grad_fn(batch, actions)
         clipped_grads, total_norm = optim.clip_grad_norm(
             grads, max_norm=self.max_grad_norm
         )
         self.optimizer.update(self.model, clipped_grads)
-        ema_update(self.ema_model, self.model, self.ema_decay)
-
-        mx.eval(
-            loss,
-            self.model.parameters(),
-            self.ema_model.parameters(),
-            self.optimizer.state,
-        )
-        return float(loss)
+        return loss
 
 
 def sample_batch(
@@ -478,16 +479,30 @@ def train_on_dataset(
         val_conditioning_clips = val_videos[:sample_count]
         val_conditioning_actions = val_actions[:sample_count]
 
-    start = time.time()
     losses: list[float] = []
     val_timesteps = (0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0)
 
+    start = time.time()
     for step in range(1, train_config.train_steps + 1):
+        tic = time.perf_counter()
         batch, batch_actions = sample_batch(
             train_videos, train_actions, train_config.batch_size
         )
-        loss = trainer.train_step(batch, batch_actions)
+        print(f"sampling step {step} took {(time.perf_counter() - tic)*1e3:.2f}ms")
+
+        tic = time.perf_counter()
+        loss = trainer.compiled_train_step(batch, batch_actions)
+        time_per_train_step = time.perf_counter() - tic
+        print(f"train step {step} took {time_per_train_step*1e3:.2f}ms")
+
+        tic = time.perf_counter()
+        loss = float(loss)
         losses.append(loss)
+        print(f"loss append {step} took {(time.perf_counter() - tic)*1e3:.2f}ms")
+
+        tic = time.perf_counter()
+        ema_update(trainer.ema_model, trainer.model, trainer.ema_decay)
+        print(f"ema update {step} took {(time.perf_counter() - tic)*1e3:.2f}ms")
 
         if (
             step == 1
@@ -502,11 +517,16 @@ def train_on_dataset(
             val_batch, val_batch_actions = sample_batch(
                 val_videos,
                 val_actions,
-                min(train_config.batch_size * 4, int(val_videos.shape[0])),
+                min(train_config.batch_size, int(val_videos.shape[0])),
             )
+
+            tic = time.perf_counter()
             val_losses, val_psnrs, val_r2s, val_preds = trainer.eval_loss_by_timestep(
                 val_batch, val_batch_actions, val_timesteps
             )
+            time_per_train_step = time.perf_counter() - tic
+            print(f"eval step {step} took {time_per_train_step*1e3:.2f}ms")
+
             avg_val_loss = sum(val_losses.values()) / len(val_losses)
             avg_val_psnr = sum(val_psnrs.values()) / len(val_psnrs)
             avg_val_r2 = sum(val_r2s.values()) / len(val_r2s)
@@ -542,7 +562,6 @@ def train_on_dataset(
                     model,
                     save_path,
                     config={"step": step, **asdict(train_config), **full_model_config},
-                    ema_model=trainer.ema_model,
                 )
 
     if train_config.save_dir is not None:
