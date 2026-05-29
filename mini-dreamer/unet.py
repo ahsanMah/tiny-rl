@@ -284,6 +284,42 @@ class TransformerBlock(nn.Module):
         return self.ff(x)
 
 
+class WaveletDownsample(nn.Module):
+    """2D Haar DWT on (H, W) dims of (B, T, H, W, C).
+    Packs LL/LH/HL/HH subbands as channels → (B, T, H/2, W/2, 4C).
+    """
+
+    def __call__(self, x: mx.array) -> mx.array:
+        B, T, H, W, C = x.shape
+        x = x.reshape(B * T, H, W, C)
+        lo = (x[:, 0::2] + x[:, 1::2]) * 0.5
+        hi = (x[:, 0::2] - x[:, 1::2]) * 0.5
+        ll = (lo[:, :, 0::2] + lo[:, :, 1::2]) * 0.5
+        lh = (lo[:, :, 0::2] - lo[:, :, 1::2]) * 0.5
+        hl = (hi[:, :, 0::2] + hi[:, :, 1::2]) * 0.5
+        hh = (hi[:, :, 0::2] - hi[:, :, 1::2]) * 0.5
+        out = mx.concatenate([ll, lh, hl, hh], axis=-1)
+        return out.reshape(B, T, H // 2, W // 2, C * 4)
+
+
+class WaveletUpsample(nn.Module):
+    """Inverse 2D Haar DWT: (B, T, H/2, W/2, 4C) → (B, T, H, W, C)."""
+
+    def __call__(self, x: mx.array) -> mx.array:
+        B, T, Hh, Wh, C4 = x.shape
+        C = C4 // 4
+        x = x.reshape(B * T, Hh, Wh, C4)
+        ll, lh, hl, hh = x[..., :C], x[..., C : 2 * C], x[..., 2 * C : 3 * C], x[..., 3 * C :]
+
+        # Inverse along W: recover lo and hi rows
+        lo = mx.stack([ll + lh, ll - lh], axis=3).reshape(B * T, Hh, Wh * 2, C)
+        hi = mx.stack([hl + hh, hl - hh], axis=3).reshape(B * T, Hh, Wh * 2, C)
+
+        # Inverse along H: recover original rows
+        out = mx.stack([lo + hi, lo - hi], axis=2).reshape(B * T, Hh * 2, Wh * 2, C)
+        return out.reshape(B, T, Hh * 2, Wh * 2, C)
+
+
 class UNet3D(nn.Module):
     def __init__(
         self,
@@ -294,14 +330,22 @@ class UNet3D(nn.Module):
         max_context_size: int = 3,
         base_channels: int = 16,
         num_transformer_blocks: int = 2,
+        use_wavelet: bool = False,
         **kwargs,
     ):
         super().__init__()
         time_embed_dim = base_channels * 4
         self.max_context_size = max_context_size
+        self.use_wavelet = use_wavelet
         self.time_embed = TimeEmbedding(time_embed_dim)
         self.context_embed = ActionEmbedding(time_embed_dim, num_actions=num_actions)
         conv_block: nn.Module = ConvResBlock3D
+
+        if use_wavelet:
+            self.prepool = WaveletDownsample()
+            self.unpool = WaveletUpsample()
+            in_channels = in_channels * 4
+            out_channels = out_channels * 4
 
         self.res1 = conv_block(
             in_channels, base_channels, time_embed_dim=time_embed_dim
@@ -345,6 +389,8 @@ class UNet3D(nn.Module):
         self.out_conv = nn.Conv3d(base_channels, out_channels, kernel_size=1)
 
     def __call__(self, x: mx.array, t: mx.array, context: mx.array) -> mx.array:
+        if self.use_wavelet:
+            x = self.prepool(x)
 
         if t.ndim == 0:
             t = mx.broadcast_to(t, (x.shape[0],))
@@ -371,47 +417,49 @@ class UNet3D(nn.Module):
         x = self.up2(xmid, x2, time_context)
         x = self.up1(x, x1, time_context)
 
-        return self.out_conv(x)
+        out = self.out_conv(x)
+        if self.use_wavelet:
+            out = self.unpool(out)
+        return out
 
 
-if __name__ == "__main__":
-    model = UNet3D(in_channels=1, out_channels=2, base_channels=16, num_actions=3)
+def _bench(model, x, t, a, num_runs: int = 20) -> None:
     print_param_table(model)
-    x = mx.random.normal((8, 4, 32, 32, 1))
-    t = mx.ones((8, 1))
-    a = mx.ones((8, 4), dtype=mx.uint8)
-    print(f"Testing forward pass with input shape {x.shape}")
-
     y = model(x, t, a)
     mx.eval(y)
-    print("input:", x.shape, "output:", y.shape)
+    print(f"input: {x.shape}  output: {y.shape}")
 
-    num_runs = 20
     for _ in range(5):
-        y = model(x, t, a)
-        mx.eval(y)
-    print("warmup complete...")
-
-    # quick timing (includes compute sync with mx.eval)
-    start = time.perf_counter()
-    for _ in range(num_runs):
-        y = model(x, t, a)
-        mx.eval(y)
-    elapsed = time.perf_counter() - start
-    print(f"avg forward time over {num_runs} runs: {elapsed * 1000 / num_runs:.2f} ms")
-
-    print("compiling model...")
-    model = mx.compile(model)
-    for _ in range(5):
-        y = model(x, t, a)
-        mx.eval(y)
+        mx.eval(model(x, t, a))
     print("warmup complete")
 
     start = time.perf_counter()
     for _ in range(num_runs):
-        y = model(x, t, a)
-        mx.eval(y)
+        mx.eval(model(x, t, a))
     elapsed = time.perf_counter() - start
-    print(
-        f"avg compiled forward time over {num_runs} runs: {elapsed * 1000 / num_runs:.2f} ms"
-    )
+    print(f"eager:    {elapsed * 1000 / num_runs:.2f} ms/run")
+
+    compiled = mx.compile(model)
+    for _ in range(5):
+        mx.eval(compiled(x, t, a))
+
+    start = time.perf_counter()
+    for _ in range(num_runs):
+        mx.eval(compiled(x, t, a))
+    elapsed = time.perf_counter() - start
+    print(f"compiled: {elapsed * 1000 / num_runs:.2f} ms/run")
+
+
+if __name__ == "__main__":
+    x = mx.random.normal((8, 4, 32, 32, 1))
+    t = mx.ones((8, 1))
+    a = mx.ones((8, 4), dtype=mx.uint8)
+
+    for use_wavelet in (False, True):
+        label = "wavelet" if use_wavelet else "no wavelet"
+        print(f"\n{'=' * 40}\n{label}\n{'=' * 40}")
+        model = UNet3D(
+            in_channels=1, out_channels=2, base_channels=16, num_actions=3,
+            use_wavelet=use_wavelet,
+        )
+        _bench(model, x, t, a)
