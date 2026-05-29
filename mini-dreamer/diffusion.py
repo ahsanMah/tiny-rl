@@ -308,23 +308,42 @@ def sample_euler_to_mp4(
     save_diffusion_mp4(conditioning_clips, intermediates, output_path, fps=fps)
 
 
-def save_model(model: UNet3D, save_dir: str | Path, *, config: dict) -> None:
-    """Save model weights (`model.safetensors`) and constructor config (`config.json`).
+def save_model(
+    model: UNet3D,
+    save_dir: str | Path,
+    *,
+    config: dict,
+    ema_model: UNet3D | None = None,
+) -> None:
+    """Save model weights and config.
 
-    `config` must contain exactly the kwargs needed to re-instantiate `UNet3D`.
+    Writes:
+    - `model.safetensors` (always; the non-EMA model)
+    - `ema_model.safetensors` (optional; when `ema_model` is provided)
+    - `config.json` (written exactly as provided; useful for resume metadata)
     """
     save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
     model.save_weights(str(save_dir / "model.safetensors"))
+    if ema_model is not None:
+        ema_model.save_weights(str(save_dir / "ema_model.safetensors"))
     (save_dir / "config.json").write_text(json.dumps(config, indent=2))
 
 
-def load_model(save_dir: str | Path) -> UNet3D:
-    """Load a `UNet3D` previously saved via `save_model`."""
+def load_model(save_dir: str | Path, *, prefer_ema: bool = True) -> UNet3D:
+    """Load a `UNet3D` previously saved via `save_model`.
+
+    If `prefer_ema` is True and `ema_model.safetensors` exists, EMA weights are
+    loaded. Otherwise `model.safetensors` is loaded.
+    """
     save_dir = Path(save_dir)
     config = json.loads((save_dir / "config.json").read_text())
     model = UNet3D(**config)
-    model.load_weights(str(save_dir / "model.safetensors"))
+
+    model_path = save_dir / "model.safetensors"
+    ema_path = save_dir / "ema_model.safetensors"
+    weights_path = ema_path if prefer_ema and ema_path.exists() else model_path
+    model.load_weights(str(weights_path))
     return model
 
 
@@ -523,6 +542,7 @@ def train_on_dataset(
                     model,
                     save_path,
                     config={"step": step, **asdict(train_config), **full_model_config},
+                    ema_model=trainer.ema_model,
                 )
 
     if train_config.save_dir is not None:
@@ -540,7 +560,7 @@ def train_on_dataset(
         )
         print(f"saved samples to: {train_config.save_dir}")
 
-    return trainer.ema_model, full_model_config
+    return trainer.model, trainer.ema_model, full_model_config
 
 
 def train_overfit_random_noise(

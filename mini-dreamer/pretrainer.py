@@ -201,8 +201,8 @@ def generate_minigrid_video(
     )
     sample_euler_to_mp4(
         model,
-        conditioning_clips=initial_clip,  # (B, L, H, W, C)
-        actions=full_actions,  # (B, L+1)
+        conditioning_clips=initial_clip[:, : model.max_context_size],  # (B, L, H, W, C)
+        actions=full_actions[:, : model.max_context_size + 1],  # (B, L+1)
         output_path=f"{save_dir}/denoising.mp4",
         num_steps=num_steps,
         fps=num_steps / 4.0,  # always 8 seconds
@@ -372,7 +372,7 @@ def train_cmd(ctx: click.Context, **kwargs) -> None:
     num_actions = int(env.action_space.n)
     save_path = Path(train_config.save_dir)
 
-    model, full_model_config = train_on_dataset(
+    model, ema_model, full_model_config = train_on_dataset(
         clips,
         actions=action_clips,
         num_env_actions=num_actions,
@@ -381,8 +381,8 @@ def train_cmd(ctx: click.Context, **kwargs) -> None:
         sample_fps=dataset_config.preview_fps,
     )
 
-    save_model(model, save_path, config=full_model_config)
-    print(f"saved model to: {save_path}")
+    save_model(model, save_path, config=full_model_config, ema_model=ema_model)
+    print(f"saved models to: {save_path}")
 
 
 @cli.command(name="generate")
@@ -397,6 +397,9 @@ def generate_cmd(ctx: click.Context, **kwargs) -> None:
 
     if generate_config.load_dir is None:
         raise click.UsageError("Missing option '--load-dir'.")
+
+    if generate_config.save_dir is None:
+        raise click.UsageError("Missing option '--save-dir'.")
 
     env = gym.make(env_config.env_id)
     clips, action_clips = make_minigrid_dataset(
@@ -417,9 +420,7 @@ def generate_cmd(ctx: click.Context, **kwargs) -> None:
 
     out_dir = (
         Path(generate_config.save_dir)
-        if generate_config.save_dir is not None
-        else Path(generate_config.load_dir)
-        / f"generated-{generate_config.generate_new_frames}f-{generate_config.generate_num_steps}s"
+        / f"{generate_config.generate_new_frames}f-{generate_config.generate_num_steps}s"
     )
     sample_count = min(generate_config.num_samples, int(clips.shape[0]))
     generate_minigrid_video(
