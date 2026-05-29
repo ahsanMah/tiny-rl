@@ -84,7 +84,6 @@ def frames_to_clips(
     *,
     clip_length: int,
     clip_stride: int | None = None,
-    max_clips: int | None = None,
 ) -> mx.array:
     if frames.ndim != 4:
         raise ValueError(f"Expected frames with shape (T, H, W, C), got {frames.shape}")
@@ -100,8 +99,6 @@ def frames_to_clips(
     clips = []
     for start in range(0, frames.shape[0] - clip_length + 1, clip_stride):
         clips.append(frames[start : start + clip_length])
-        if max_clips is not None and len(clips) >= max_clips:
-            break
 
     if not clips:
         raise ValueError("No clips could be formed from the loaded video")
@@ -127,7 +124,6 @@ def load_video_dataset(
         frames,
         clip_length=clip_length,
         clip_stride=clip_stride,
-        max_clips=max_clips,
     )
     info["num_clips"] = int(clips.shape[0])
     info["clip_length"] = int(clips.shape[1])
@@ -205,12 +201,16 @@ def save_diffusion_mp4(
     video_frames: list[np.ndarray] = []
     for step_x in intermediates:
         gen_np = to_uint8_video(np.asarray(step_x))  # (B, 1, H, W, C)
-        gen_rgb = _to_rgb(gen_np[:, 0])              # (B, H, W, 3)
+        gen_rgb = _to_rgb(gen_np[:, 0])  # (B, H, W, 3)
 
         rows: list[np.ndarray] = []
         for b in range(B):
-            ctx_strip = np.concatenate([ctx_rgb[b, i] for i in range(L)], axis=1)  # (H, L*W, 3)
-            row = np.concatenate([ctx_strip, sep, gen_rgb[b]], axis=1)  # (H, L*W+2+W, 3)
+            ctx_strip = np.concatenate(
+                [ctx_rgb[b, i] for i in range(L)], axis=1
+            )  # (H, L*W, 3)
+            row = np.concatenate(
+                [ctx_strip, sep, gen_rgb[b]], axis=1
+            )  # (H, L*W+2+W, 3)
             rows.append(row)
 
         video_frames.append(np.concatenate(rows, axis=0))  # (B*H, total_W, 3)
