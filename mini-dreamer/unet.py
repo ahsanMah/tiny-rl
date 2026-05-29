@@ -280,20 +280,21 @@ class TransformerBlock(nn.Module):
 
     def __call__(self, x: mx.array, context: mx.array) -> mx.array:
         x = self.self_attn(x, context=x)
-        if context is not None:
-            x = self.cross_attn(x, context=context)
+        x = self.cross_attn(x, context=context)
         return self.ff(x)
 
 
 class UNet3D(nn.Module):
     def __init__(
         self,
+        *,
         in_channels: int = 1,
         out_channels: int = 1,
-        base_channels: int = 16,
         num_actions: int = 1,
         max_context_size: int = 3,
+        base_channels: int = 16,
         num_transformer_blocks: int = 2,
+        **kwargs,
     ):
         super().__init__()
         time_embed_dim = base_channels * 4
@@ -385,11 +386,32 @@ if __name__ == "__main__":
     mx.eval(y)
     print("input:", x.shape, "output:", y.shape)
 
-    # quick timing (includes compute sync with mx.eval)
     num_runs = 20
+    for _ in range(5):
+        y = model(x, t, a)
+        mx.eval(y)
+    print("warmup complete...")
+
+    # quick timing (includes compute sync with mx.eval)
     start = time.perf_counter()
     for _ in range(num_runs):
         y = model(x, t, a)
         mx.eval(y)
     elapsed = time.perf_counter() - start
     print(f"avg forward time over {num_runs} runs: {elapsed * 1000 / num_runs:.2f} ms")
+
+    print("compiling model...")
+    model = mx.compile(model)
+    for _ in range(5):
+        y = model(x, t, a)
+        mx.eval(y)
+    print("warmup complete")
+
+    start = time.perf_counter()
+    for _ in range(num_runs):
+        y = model(x, t, a)
+        mx.eval(y)
+    elapsed = time.perf_counter() - start
+    print(
+        f"avg compiled forward time over {num_runs} runs: {elapsed * 1000 / num_runs:.2f} ms"
+    )
