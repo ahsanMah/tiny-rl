@@ -57,6 +57,7 @@ def rollout_box2d_frames(
     *,
     num_steps: int = 256,
     seed: int = 0,
+    warmup_steps: int = 50,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Roll out random discrete actions in a Box2D env and capture RGB frames.
 
@@ -64,7 +65,13 @@ def rollout_box2d_frames(
         frames: (num_steps, H, W, 3) float32 in [-1, 1].
         actions: (num_steps,) int32.
     """
-    obs, _ = env.reset(seed=seed)
+
+    def _warmup():
+        for _ in range(warmup_steps):
+            env.step(env.action_space.sample())
+
+    env.reset(seed=seed)
+    _warmup()
 
     frames: list[np.ndarray] = []
     actions: list[int] = []
@@ -75,7 +82,8 @@ def rollout_box2d_frames(
         obs, _, terminated, truncated, _ = env.step(action)
         frames.append(np.asarray(obs))
         if terminated or truncated:
-            obs, _ = env.reset()
+            env.reset()
+            _warmup()
 
     env.close()
 
