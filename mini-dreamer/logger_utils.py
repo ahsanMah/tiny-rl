@@ -37,20 +37,20 @@ class RLLogger:
         Metrics will automatically be grouped under the 'train/' prefix in TensorBoard.
         """
         for key, value in metrics.items():
-            self.writer.add_scalar(f"train/{key}", value, global_step)
+            self.writer.add_scalar(f"train/{key}", float(value), global_step)
 
     def log_validation_steps(self, global_step: int, metrics: Dict[float, Any]):
         """Logs validation losses keyed by diffusion timestep."""
         for timestep, value in metrics.items():
             self.writer.add_scalar(
-                f"val_loss/t={float(timestep):.2f}", value, global_step
+                f"val_loss/t={float(timestep):.2f}", float(value), global_step
             )
 
     def log_validation_psnrs(self, global_step: int, metrics: Dict[float, Any]):
         """Logs validation x1-prediction PSNRs (dB) keyed by diffusion timestep."""
         for timestep, value in metrics.items():
             self.writer.add_scalar(
-                f"val_psnr/t={float(timestep):.2f}", value, global_step
+                f"val_psnr/t={float(timestep):.2f}", float(value), global_step
             )
 
     def log_validation_r2s(self, global_step: int, metrics: Dict[float, Any]):
@@ -58,14 +58,11 @@ class RLLogger:
         keyed by diffusion timestep."""
         for timestep, value in metrics.items():
             self.writer.add_scalar(
-                f"val_r2/t={float(timestep):.2f}", value, global_step
+                f"val_r2/t={float(timestep):.2f}", float(value), global_step
             )
 
     def log_reconstructions(
-        self,
-        global_step: int,
-        x_true,
-        x_preds: Dict[float, Any],
+        self, global_step: int, x_true, x_preds: Dict[float, Any], num_cols: int = 8
     ) -> None:
         """Log ground-truth and x1-prediction images to TensorBoard.
 
@@ -76,21 +73,30 @@ class RLLogger:
             x1_true: ``(B, H, W, C)`` ground-truth frames in ``[-1, 1]``.
             x1_preds: ``{timestep: (B, H, W, C)}`` one-step x1 predictions in
                 ``[-1, 1]``, keyed by the diffusion timestep they were evaluated at.
+            num_cols: Number of columns to use in the grid layout.
         """
 
         def _to_tb(arr) -> np.ndarray:
-            """Array-like ``(B, H, W, C)`` in ``[-1, 1]`` → ``(B, C, H, W)`` in ``[0, 1]``."""
+            """Array-like ``(B, H, W, C)`` in ``[-1, 1]`` → ``(C, rows*H, num_cols*W)``
+            in ``[0, 1]``: a single grid image with ``rows = B // num_cols`` rows of
+            ``num_cols`` source images each."""
             arr = np.asarray(arr)
             arr = np.clip((arr + 1.0) / 2.0, 0.0, 1.0).astype(np.float32)
             if arr.shape[-1] == 1:
                 arr = np.repeat(arr, 3, axis=-1)  # broadcast grayscale → RGB
-            return arr.transpose(0, 3, 1, 2)  # (B, C, H, W)
+            b, h, w, c = arr.shape
+            rows = b // num_cols
+            arr = arr[: rows * num_cols]
+            # (rows, num_cols, H, W, C) → (rows, H, num_cols, W, C) → (rows*H, num_cols*W, C)
+            arr = arr.reshape(rows, num_cols, h, w, c)
+            arr = arr.transpose(0, 2, 1, 3, 4).reshape(rows * h, num_cols * w, c)
+            return arr.transpose(2, 0, 1)  # (C, H, W)
 
-        self.writer.add_images(
+        self.writer.add_image(
             "reconstruction/ground_truth", _to_tb(x_true), global_step
         )
         for t, pred in sorted(x_preds.items()):
-            self.writer.add_images(
+            self.writer.add_image(
                 f"reconstruction/pred_t={t:.2f}", _to_tb(pred), global_step
             )
 
