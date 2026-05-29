@@ -284,21 +284,34 @@ class TransformerBlock(nn.Module):
         return self.ff(x)
 
 
-class WaveletDownsample(nn.Module):
-    """2D Haar DWT on (H, W) dims of (B, T, H, W, C).
-    Packs LL/LH/HL/HH subbands as channels → (B, T, H/2, W/2, 4C).
-    """
+class WaveletDownsampleConv(nn.Module):
+    """Conv2d-based 2D Haar DWT. Grouped depthwise 2×2 strided conv variant of WaveletDownsample."""
+
+    def __init__(self, in_channels: int):
+        super().__init__()
+        base = mx.array(
+            [
+                [[0.25, 0.25], [0.25, 0.25]],  # LL
+                [[0.25, -0.25], [0.25, -0.25]],  # LH
+                [[0.25, 0.25], [-0.25, -0.25]],  # HL
+                [[0.25, -0.25], [-0.25, 0.25]],  # HH
+            ]
+        )[:, :, :, None]  # (4, 2, 2, 1)
+        # (4*C, 2, 2, 1) — same 4 filters tiled for each input channel
+        self.weight = mx.concatenate([base] * in_channels, axis=0)
+        self._groups = in_channels
 
     def __call__(self, x: mx.array) -> mx.array:
         B, T, H, W, C = x.shape
-        x = x.reshape(B * T, H, W, C)
-        lo = (x[:, 0::2] + x[:, 1::2]) * 0.5
-        hi = (x[:, 0::2] - x[:, 1::2]) * 0.5
-        ll = (lo[:, :, 0::2] + lo[:, :, 1::2]) * 0.5
-        lh = (lo[:, :, 0::2] - lo[:, :, 1::2]) * 0.5
-        hl = (hi[:, :, 0::2] + hi[:, :, 1::2]) * 0.5
-        hh = (hi[:, :, 0::2] - hi[:, :, 1::2]) * 0.5
-        out = mx.concatenate([ll, lh, hl, hh], axis=-1)
+        out = mx.conv2d(
+            x.reshape(B * T, H, W, C), self.weight, stride=2, groups=self._groups
+        )
+        # conv outputs (C, 4) interleaved per spatial position; transpose to (4, C) to match WaveletUpsample
+        out = (
+            out.reshape(B * T, H // 2, W // 2, C, 4)
+            .transpose(0, 1, 2, 4, 3)
+            .reshape(B * T, H // 2, W // 2, C * 4)
+        )
         return out.reshape(B, T, H // 2, W // 2, C * 4)
 
 
@@ -309,7 +322,12 @@ class WaveletUpsample(nn.Module):
         B, T, Hh, Wh, C4 = x.shape
         C = C4 // 4
         x = x.reshape(B * T, Hh, Wh, C4)
-        ll, lh, hl, hh = x[..., :C], x[..., C : 2 * C], x[..., 2 * C : 3 * C], x[..., 3 * C :]
+        ll, lh, hl, hh = (
+            x[..., :C],
+            x[..., C : 2 * C],
+            x[..., 2 * C : 3 * C],
+            x[..., 3 * C :],
+        )
 
         # Inverse along W: recover lo and hi rows
         lo = mx.stack([ll + lh, ll - lh], axis=3).reshape(B * T, Hh, Wh * 2, C)
@@ -342,7 +360,7 @@ class UNet3D(nn.Module):
         conv_block: nn.Module = ConvResBlock3D
 
         if use_wavelet:
-            self.prepool = WaveletDownsample()
+            self.prepool = WaveletDownsampleConv(in_channels)
             self.unpool = WaveletUpsample()
             in_channels = in_channels * 4
             out_channels = out_channels * 4
@@ -424,7 +442,6 @@ class UNet3D(nn.Module):
 
 
 def _bench(model, x, t, a, num_runs: int = 20) -> None:
-    print_param_table(model)
     y = model(x, t, a)
     mx.eval(y)
     print(f"input: {x.shape}  output: {y.shape}")
@@ -451,7 +468,7 @@ def _bench(model, x, t, a, num_runs: int = 20) -> None:
 
 
 if __name__ == "__main__":
-    x = mx.random.normal((8, 4, 32, 32, 1))
+    x = mx.random.normal((8, 4, 96, 96, 1))
     t = mx.ones((8, 1))
     a = mx.ones((8, 4), dtype=mx.uint8)
 
@@ -459,7 +476,12 @@ if __name__ == "__main__":
         label = "wavelet" if use_wavelet else "no wavelet"
         print(f"\n{'=' * 40}\n{label}\n{'=' * 40}")
         model = UNet3D(
-            in_channels=1, out_channels=2, base_channels=16, num_actions=3,
+            in_channels=1,
+            out_channels=2,
+            base_channels=16,
+            num_actions=3,
             use_wavelet=use_wavelet,
         )
         _bench(model, x, t, a)
+
+    print_param_table(model)
