@@ -31,6 +31,7 @@ class ModelConfig:
     base_channels: int = 16
     max_context_size: int = 3
     num_transformer_blocks: int = 2
+    use_wavelet: bool = False
 
 
 @dataclass(frozen=True)
@@ -224,6 +225,7 @@ class FlowMatchingTrainer:
         def _loss(batch, actions):
             t = mx.random.uniform(shape=(batch.shape[0],), low=0.0, high=1.0)
             return self._loss_at_t(self.model, batch, actions, t)
+
         loss_and_grad_fn = nn.value_and_grad(self.model, _loss)
         loss, grads = loss_and_grad_fn(batch, actions)
         clipped_grads, total_norm = optim.clip_grad_norm(

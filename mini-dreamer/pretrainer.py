@@ -5,6 +5,7 @@ import types
 import typing
 from dataclasses import MISSING, asdict, dataclass, fields
 from pathlib import Path
+from pprint import pprint
 from typing import Any
 
 import click
@@ -39,6 +40,7 @@ class DatasetConfig:
     rollout_steps: int = 32
     preview_dir: str | None = None
     preview_clips: int = 4
+    frame_skip: int = 1
 
 
 @dataclass(frozen=True)
@@ -209,6 +211,8 @@ def train_cmd(ctx: click.Context, **kwargs) -> None:
         ctx.params
     )
 
+    print("Using data config:")
+    pprint(dataset_config)
     env = _make_env(env_config.env_id)
     clips, action_clips = make_dataset(
         env=env,
