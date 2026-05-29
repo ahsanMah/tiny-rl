@@ -120,17 +120,32 @@ class FlowMatchingTrainer:
         self.logit_norm_mu = logit_norm_mu
         self.logit_norm_scale = logit_norm_scale
 
-        # The state that will be captured as input and output
-        state = [self.model.state,mx.random.state, self.optimizer.state]
+        # State captured as input and output of the compiled step. Must list
+        # every piece of mutable state the step reads or writes, or compile
+        # freezes it to its first-traced value: model + optimizer (updated by
+        # the step), the EMA shadow weights (updated in-step so their graph
+        # stays evaluated rather than accumulating across steps), and the RNG
+        # state (otherwise `t`/noise are identical every step).
+        train_state = [
+            self.model.state,
+            self.optimizer.state,
+            self.ema_model.state,
+            mx.random.state,
+        ]
         self.compiled_train_step = mx.compile(
             lambda batch, actions: self.train_step(batch, actions),
-            inputs=state,
-            outputs=state,
+            inputs=train_state,
+            outputs=train_state,
         )
+        # Eval only reads the online model and advances the RNG (for the noise
+        # draw); it must not capture optimizer/EMA state.
+        eval_state = [self.model.state, mx.random.state]
         self.eval_loss_by_timestep = mx.compile(
-            lambda batch, actions, timesteps: self._eval_loss_by_timestep(batch, actions, timesteps),
-            inputs=state[:-1], # dont need optimizer
-            outputs=state[:-1],
+            lambda batch, actions, timesteps: self._eval_loss_by_timestep(
+                batch, actions, timesteps
+            ),
+            inputs=eval_state,
+            outputs=eval_state,
         )
 
     def _loss_at_t(
@@ -215,6 +230,7 @@ class FlowMatchingTrainer:
             grads, max_norm=self.max_grad_norm
         )
         self.optimizer.update(self.model, clipped_grads)
+        ema_update(self.ema_model, self.model, self.ema_decay)
         return loss
 
 
@@ -490,11 +506,10 @@ def train_on_dataset(
             train_videos, train_actions, train_config.batch_size
         )
         loss = trainer.compiled_train_step(batch, batch_actions)
-        loss = float(loss)
+        loss = float(loss)  # also flushes the compiled step's state updates
         avg_loss += loss
-        ema_update(trainer.ema_model, trainer.model, trainer.ema_decay)
-        time_per_train_step = time.perf_counter() - tic
-        print(f"train step {step} took {time_per_train_step*1e3:.2f}ms")
+        # time_per_train_step = time.perf_counter() - tic
+        # print(f"train step {step} took {time_per_train_step*1e3:.2f}ms")
 
         if (
             step == 1
@@ -510,12 +525,12 @@ def train_on_dataset(
                 min(train_config.batch_size * 4, int(val_videos.shape[0])),
             )
 
-            tic = time.perf_counter()
+            # tic = time.perf_counter()
             val_losses, val_psnrs, val_r2s, val_preds = trainer.eval_loss_by_timestep(
                 val_batch, val_batch_actions, val_timesteps
             )
-            time_per_train_step = time.perf_counter() - tic
-            print(f"eval step {step} took {time_per_train_step*1e3:.2f}ms")
+            # time_per_train_step = time.perf_counter() - tic
+            # print(f"eval step {step} took {time_per_train_step*1e3:.2f}ms")
 
             avg_val_loss = sum(val_losses.values()) / len(val_losses)
             avg_val_psnr = sum(val_psnrs.values()) / len(val_psnrs)
@@ -555,6 +570,7 @@ def train_on_dataset(
                 )
 
             avg_loss = 0.0
+            mx.clear_cache()
 
     if train_config.save_dir is not None:
         samples = sample_euler(
