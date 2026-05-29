@@ -73,9 +73,9 @@ function CkptNav({ run, ckpt, onSelectCkpt }) {
   const prev = () => idx > 0 && onSelectCkpt(run.checkpoints[idx - 1].step);
   const next = () => idx < total - 1 && onSelectCkpt(run.checkpoints[idx + 1].step);
   return (
-    <div className="row border-b" style={{ padding: '18px 22px', gap: 14, flex: '0 0 auto', background: 'var(--surface)' }}>
+    <div className="row border-b" style={{ padding: '11px 22px', gap: 14, flex: '0 0 auto', background: 'var(--surface)' }}>
       <span className="label-eyebrow">Checkpoint</span>
-      <span className="num strong" style={{ fontSize: 15, fontFamily: 'var(--mono)' }}>{D.fmtStep(ckpt.step)}</span>
+      <span className="num strong" style={{ fontSize: 15, fontFamily: 'var(--mono)', minWidth: '4.5ch', display: 'inline-block' }}>{D.fmtStep(ckpt.step)}</span>
       <span className="muted" style={{ fontSize: 11, whiteSpace: 'nowrap' }}>step {idx + 1} of {total}</span>
       <div className="row gap-1">
         <button className="btn icon" onClick={prev} disabled={idx === 0} title="previous (J)">◀</button>
