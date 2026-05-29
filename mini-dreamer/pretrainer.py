@@ -11,7 +11,7 @@ import click
 import gymnasium as gym
 import minigrid  # noqa: F401  # registers MiniGrid envs in gymnasium
 
-from data import generate_minigrid_video, make_minigrid_dataset
+from data import generate_minigrid_video, make_dataset
 from diffusion import (
     ModelConfig,
     TrainConfig,
@@ -61,6 +61,16 @@ CONFIG_SCHEMA = {
     section: {f.name for f in fields(cls)}
     for section, cls in _SECTION_DATACLASSES.items()
 }
+
+
+def _is_minigrid(env_id: str) -> bool:
+    return "MiniGrid" in env_id
+
+
+def _make_env(env_id: str) -> gym.Env:
+    if _is_minigrid(env_id):
+        return gym.make(env_id)
+    return gym.make(env_id, continuous=False)
 
 
 @click.group()
@@ -199,8 +209,8 @@ def train_cmd(ctx: click.Context, **kwargs) -> None:
         ctx.params
     )
 
-    env = gym.make(env_config.env_id)
-    clips, action_clips = make_minigrid_dataset(
+    env = _make_env(env_config.env_id)
+    clips, action_clips = make_dataset(
         env=env,
         num_steps=dataset_config.rollout_steps,
         tile_size=dataset_config.tile_size,
@@ -253,20 +263,20 @@ def generate_cmd(ctx: click.Context, **kwargs) -> None:
     if generate_config.save_dir is None:
         raise click.UsageError("Missing option '--save-dir'.")
 
-    env = gym.make(env_config.env_id)
-    clips, action_clips = make_minigrid_dataset(
+    env = _make_env(env_config.env_id)
+    max_action_idx = 3 if _is_minigrid(env_config.env_id) else -1
+    clips, action_clips = make_dataset(
         env=env,
         num_steps=generate_config.num_samples * dataset_config.clip_length,
         tile_size=dataset_config.tile_size,
         seed=dataset_config.seed,
         clip_length=dataset_config.clip_length - 1,  # only grab context clips
         clip_stride=dataset_config.clip_stride,
-        max_action_idx=3,
+        max_action_idx=max_action_idx,
     )
+    num_actions = 3 if _is_minigrid(env_config.env_id) else int(env.action_space.n)
     print(f"env: {env_config.env_id}")
     print(f"clips shape: {tuple(clips.shape)}")
-
-    num_actions = 3  # int(env.action_space.n)
     model = load_model(generate_config.load_dir)
     print(f"loaded model from: {generate_config.load_dir}")
 

@@ -52,6 +52,38 @@ def rollout_minigrid_frames(
     return stacked, action_array
 
 
+def rollout_box2d_frames(
+    env: gym.Env,
+    *,
+    num_steps: int = 256,
+    seed: int = 0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Roll out random discrete actions in a Box2D env and capture RGB frames.
+
+    Returns:
+        frames: (num_steps, H, W, 3) float32 in [-1, 1].
+        actions: (num_steps,) int32.
+    """
+    obs, _ = env.reset(seed=seed)
+
+    frames: list[np.ndarray] = []
+    actions: list[int] = []
+
+    for _ in range(num_steps):
+        action = int(env.action_space.sample())
+        actions.append(action)
+        obs, _, terminated, truncated, _ = env.step(action)
+        frames.append(np.asarray(obs))
+        if terminated or truncated:
+            obs, _ = env.reset()
+
+    env.close()
+
+    stacked = np.stack(frames, axis=0).astype(np.float32) / 127.5 - 1.0
+    action_array = np.asarray(actions, dtype=np.int32)
+    return stacked, action_array
+
+
 def actions_to_clips(
     actions: np.ndarray,
     *,
@@ -76,32 +108,31 @@ def actions_to_clips(
     return mx.array(np.stack(clips, axis=0))
 
 
-def make_minigrid_dataset(
+def make_dataset(
     env: gym.Env,
     *,
     num_steps: int = 256,
-    tile_size: int = 8,
     seed: int = 42,
     clip_length: int = 4,
     clip_stride: int | None = None,
+    tile_size: int = 8,
     max_action_idx: int = -1,
 ) -> tuple[mx.array, mx.array]:
-    frames, actions = rollout_minigrid_frames(
-        env=env,
-        num_steps=num_steps,
-        tile_size=tile_size,
-        seed=seed,
-        max_action_idx=max_action_idx,
-    )
+    if "MiniGrid" in (env.spec.id if env.spec else ""):
+        frames, actions = rollout_minigrid_frames(
+            env=env,
+            num_steps=num_steps,
+            tile_size=tile_size,
+            seed=seed,
+            max_action_idx=max_action_idx,
+        )
+    else:
+        frames, actions = rollout_box2d_frames(env=env, num_steps=num_steps, seed=seed)
     frame_clips = frames_to_clips(
-        frames,
-        clip_length=clip_length,
-        clip_stride=clip_stride,
+        frames, clip_length=clip_length, clip_stride=clip_stride
     )
     action_clips = actions_to_clips(
-        actions,
-        clip_length=clip_length,
-        clip_stride=clip_stride,
+        actions, clip_length=clip_length, clip_stride=clip_stride
     )
     return frame_clips, action_clips
 
