@@ -355,10 +355,10 @@ function CheckpointSparkbar({ checkpoints, activeStep, onSelect, height = 32 }) 
 // Slot 0 = focused (solid ink). Slots 1-3 match ghost-1/2/3 CSS classes.
 // Used by both sparklines (left rail) and chart ghost curves.
 const RUN_LINE_STYLES = [
-  { color: 'var(--ink)',   dash: null,    width: 1.6 }, // 0 focused
-  { color: 'var(--run-2)', dash: '4 2',  width: 1.4 }, // 1 ghost-1
-  { color: 'var(--run-3)', dash: '6 3',  width: 1.4 }, // 2 ghost-2
-  { color: 'var(--run-4)', dash: '2 2',  width: 1.4 }, // 3 ghost-3
+  { color: 'var(--ink)',   dash: null, width: 1.6 }, // 0 focused
+  { color: 'var(--run-2)', dash: null, width: 1.4 }, // 1 ghost-1
+  { color: 'var(--run-3)', dash: null, width: 1.4 }, // 2 ghost-2
+  { color: 'var(--run-4)', dash: null, width: 1.4 }, // 3 ghost-3
 ];
 const RUN_LINE_DEFAULT = { color: 'var(--ink-4)', dash: null, width: 0.0 }; // unpinned
 
