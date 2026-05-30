@@ -19,20 +19,21 @@ def rollout_minigrid_frames(
     tile_size: int = 8,
     seed: int = 0,
     max_action_idx: int = -1,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, list[int]]:
     """Roll out random actions in a MiniGrid env and capture tile-rendered RGB frames.
 
     Returns:
         frames: array of shape (num_steps, H, W, 3) of float32 in [-1, 1].
         actions: array of shape (num_steps,) of int32. `actions[i]` is the
             action taken at `frames[i]` (which produced the next frame).
-    Episodes auto-reset on terminate/truncate so the frame stream is contiguous.
+        episode_ends: exclusive end indices of each episode into frames/actions.
     """
     env = RGBImgObsWrapper(env, tile_size=tile_size)
     env.reset(seed=seed)
 
     frames: list[np.ndarray] = []
     actions: list[int] = []
+    episode_ends: list[int] = []
     max_action_idx = env.action_space.n if max_action_idx == -1 else max_action_idx
 
     for _ in range(num_steps):
@@ -43,13 +44,18 @@ def rollout_minigrid_frames(
         frame = obs["image"]
         frames.append(np.asarray(frame))
         if terminated or truncated:
+            episode_ends.append(len(frames))
             env.reset()
 
     env.close()
 
+    if not episode_ends or episode_ends[-1] < len(frames):
+        episode_ends.append(len(frames))
+
     stacked = np.stack(frames, axis=0).astype(np.float32) / 127.5 - 1.0
     action_array = np.asarray(actions, dtype=np.int32)
-    return stacked, action_array
+    print(f"Collected {len(frames)} frames over {len(episode_ends)} episodes")
+    return stacked, action_array, episode_ends
 
 
 def rollout_box2d_frames(
@@ -59,12 +65,13 @@ def rollout_box2d_frames(
     seed: int = 0,
     warmup_steps: int = 50,
     frame_skip: int = 1,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, list[int]]:
     """Roll out random discrete actions in a Box2D env and capture RGB frames.
 
     Returns:
         frames: (num_steps, H, W, 3) float32 in [-1, 1].
         actions: (num_steps,) int32.
+        episode_ends: exclusive end indices of each episode into frames/actions.
     """
 
     def _warmup():
@@ -76,24 +83,37 @@ def rollout_box2d_frames(
 
     frames: list[np.ndarray] = []
     actions: list[int] = []
+    episode_ends: list[int] = []
     action = int(env.action_space.sample())
 
     for _ in range(num_steps):
+        reset_happened = False
         for _ in range(frame_skip):
             obs, _, terminated, truncated, _ = env.step(action)
             if terminated or truncated:
                 env.reset()
                 _warmup()
+                reset_happened = True
+                break
 
         actions.append(action)
         frames.append(np.asarray(obs))
+
+        if reset_happened:
+            # frames[-1] is the terminal frame - episode ends here
+            episode_ends.append(len(frames))
+
         action = int(env.action_space.sample())
 
     env.close()
 
+    if not episode_ends or episode_ends[-1] < len(frames):
+        episode_ends.append(len(frames))
+
     stacked = np.stack(frames, axis=0).astype(np.float32) / 127.5 - 1.0
     action_array = np.asarray(actions, dtype=np.int32)
-    return stacked, action_array
+    print(f"Collected {len(frames)} frames over {len(episode_ends)} episodes")
+    return stacked, action_array, episode_ends
 
 
 def actions_to_clips(
@@ -120,6 +140,38 @@ def actions_to_clips(
     return mx.array(np.stack(clips, axis=0))
 
 
+def clips_from_episodes(
+    frames: np.ndarray,
+    actions: np.ndarray,
+    episode_ends: list[int],
+    *,
+    clip_length: int,
+    clip_stride: int | None = None,
+) -> tuple[mx.array, mx.array]:
+    """Slice frames and actions into clips that never cross episode boundaries."""
+    clip_stride = 1 if clip_stride is None else clip_stride
+    if clip_stride <= 0:
+        raise ValueError(f"clip_stride must be > 0, got {clip_stride}")
+
+    frame_clips: list[np.ndarray] = []
+    action_clips: list[np.ndarray] = []
+    ep_start = 0
+    for ep_end in episode_ends:
+        ep_len = ep_end - ep_start
+        if ep_len >= clip_length:
+            for s in range(0, ep_len - clip_length + 1, clip_stride):
+                frame_clips.append(frames[ep_start + s : ep_start + s + clip_length])
+                action_clips.append(actions[ep_start + s : ep_start + s + clip_length])
+        ep_start = ep_end
+
+    if not frame_clips:
+        raise ValueError(
+            f"No clips formed: all episodes shorter than clip_length={clip_length}"
+        )
+
+    return mx.array(np.stack(frame_clips)), mx.array(np.stack(action_clips))
+
+
 def make_dataset(
     env: gym.Env,
     *,
@@ -131,7 +183,7 @@ def make_dataset(
     max_action_idx: int = -1,
 ) -> tuple[mx.array, mx.array]:
     if "MiniGrid" in (env.spec.id if env.spec else ""):
-        frames, actions = rollout_minigrid_frames(
+        frames, actions, episode_ends = rollout_minigrid_frames(
             env=env,
             num_steps=num_steps,
             tile_size=tile_size,
@@ -139,14 +191,12 @@ def make_dataset(
             max_action_idx=max_action_idx,
         )
     else:
-        frames, actions = rollout_box2d_frames(env=env, num_steps=num_steps, seed=seed)
-    frame_clips = frames_to_clips(
-        frames, clip_length=clip_length, clip_stride=clip_stride
+        frames, actions, episode_ends = rollout_box2d_frames(
+            env=env, num_steps=num_steps, seed=seed
+        )
+    return clips_from_episodes(
+        frames, actions, episode_ends, clip_length=clip_length, clip_stride=clip_stride
     )
-    action_clips = actions_to_clips(
-        actions, clip_length=clip_length, clip_stride=clip_stride
-    )
-    return frame_clips, action_clips
 
 
 def generate_minigrid_video(
