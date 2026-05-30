@@ -50,6 +50,7 @@ class GenerateConfig:
     generate_new_frames: int = 32
     generate_num_steps: int = 32
     num_samples: int = 1
+    not_use_ema: bool = False
 
 
 _SECTION_DATACLASSES = {
@@ -281,7 +282,9 @@ def generate_cmd(ctx: click.Context, **kwargs) -> None:
     num_actions = 3 if _is_minigrid(env_config.env_id) else int(env.action_space.n)
     print(f"env: {env_config.env_id}")
     print(f"clips shape: {tuple(clips.shape)}")
-    model = load_model(generate_config.load_dir)
+    model = load_model(
+        generate_config.load_dir, prefer_ema=generate_config.not_use_ema == False
+    )
     print(f"loaded model from: {generate_config.load_dir}")
 
     out_dir = (
