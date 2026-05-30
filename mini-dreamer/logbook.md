@@ -2,6 +2,19 @@
 
 ---
 
+## 05/29
+
+- Debugging why thew training is slow led to avery interesting finding
+```bash
+sampling step 8 took 0.02ms
+train step 8 took 0.73ms
+loss append 8 took 181.60ms
+ema update 8 took 0.91ms
+```
+
+The naive loss append is 181ms! Its almost a 100x slower than all functions related to training combined! But thats because the graph execution had not hit until we did a `float(loss)` (which is implcitly an `mx.eval`) so we were in fact measuring the train + sampling execution.
+
+
 ## 05/27 - Dataclass-First CLI, Denoising MP4 Exports, and Better Validation Signals
 
 The 05/27 work focused on making experiment configuration and training diagnostics much harder to

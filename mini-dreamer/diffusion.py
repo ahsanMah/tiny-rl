@@ -23,7 +23,7 @@ from video_utils import (
     save_diffusion_mp4,
 )
 
-NoiseDistribution = Literal["uniform", "logitnorm"]
+NoiseDistribution = Literal["uniform", "logitnorm", "normal"]
 
 
 @dataclass(frozen=True)
@@ -82,15 +82,24 @@ def sample_t_logit_normal(
 
 
 def sample_noise(
-    x: mx.array,
+    shape: tuple[int, ...],
     noise_distribution: NoiseDistribution,
     mu: float = 0.0,
     s: float = 1.0,
+    dtype: mx.Dtype = mx.float32,
 ):
-    if noise_distribution == "logitnorm":
-        return sample_t_logit_normal(x.shape, mu, s).astype(x.dtype)
+    match noise_distribution:
+        case "logitnorm":
+            return sample_t_logit_normal(shape, mu, s)
 
-    return mx.random.normal(x.shape, dtype=x.dtype)
+        case "normal":
+            return mx.random.normal(shape=shape, dtype=dtype)
+
+        case "uniform":
+            return mx.random.uniform(shape=shape, dtype=dtype)
+
+        case _:
+            raise ValueError(f"Unknown noise distribution: {noise_distribution}")
 
 
 class FlowMatchingTrainer:
@@ -115,7 +124,7 @@ class FlowMatchingTrainer:
         )
         self.max_grad_norm = max_grad_norm
         # self.loss_and_grad = nn.value_and_grad(self.model, self.loss)
-        self.sampling_fn = lambda x: sample_noise(
+        self.sampling_fn_for_t = lambda x: sample_noise(
             x, sampling_distribution, logit_norm_mu, logit_norm_scale
         )
         self.logit_norm_mu = logit_norm_mu
@@ -140,14 +149,15 @@ class FlowMatchingTrainer:
         )
         # Eval only reads the online model and advances the RNG (for the noise
         # draw); it must not capture optimizer/EMA state.
-        eval_state = [self.model.state, mx.random.state]
-        self.eval_loss_by_timestep = mx.compile(
-            lambda batch, actions, timesteps: self._eval_loss_by_timestep(
-                batch, actions, timesteps
-            ),
-            inputs=eval_state,
-            outputs=eval_state,
-        )
+        # eval_state = [self.model.state, mx.random.state]
+        # self.eval_loss_by_timestep = mx.compile(
+        #     lambda batch, actions, timesteps: self._eval_loss_by_timestep(
+        #         batch, actions, timesteps
+        #     ),
+        #     inputs=eval_state,
+        #     outputs=eval_state,
+        # )
+        self.eval_loss_by_timestep = self._eval_loss_by_timestep
 
     def _loss_at_t(
         self,
@@ -170,7 +180,7 @@ class FlowMatchingTrainer:
         Skipped by default to keep training fast.
         """
         mask = make_final_frame_mask(x1)
-        noise = self.sampling_fn(x1) * mask
+        noise = sample_noise(x1.shape, noise_distribution="normal") * mask
         t_view = mx.reshape(t, (x1.shape[0], 1, 1, 1, 1)) * mask
         xt = (1.0 - t_view) * noise + t_view * x1 + (1 - mask) * x1
         target_velocity = mask * (x1 - noise)
@@ -183,7 +193,7 @@ class FlowMatchingTrainer:
         recon_mse = mx.mean((x1_pred - x1[:, -1:]) ** 2)
         target_var = mx.mean(target_velocity[:, -1:] ** 2)
         r2 = 1.0 - loss / mx.maximum(target_var, 1e-12)
-        return loss, recon_mse, x1_pred, r2
+        return loss, recon_mse, x1_pred, r2, xt
 
     def _eval_loss_by_timestep(
         self,
@@ -208,9 +218,9 @@ class FlowMatchingTrainer:
         r2s: dict[float, float] = {}
         preds: dict[float, mx.array] = {}
         log10_max = 20.0 * float(mx.log10(mx.array(2.0)))
-        for timestep in timesteps:
+        for timestep in timesteps[::-1]:
             t = mx.full((batch.shape[0],), timestep, dtype=batch.dtype)
-            loss, recon_mse, x1_pred, r2 = self._loss_at_t(
+            loss, recon_mse, x1_pred, r2, xt = self._loss_at_t(
                 self.model, batch, actions, t, return_eval_aux=True
             )
             psnr = log10_max - 10.0 * mx.log10(mx.maximum(recon_mse, 1e-12))
@@ -219,11 +229,12 @@ class FlowMatchingTrainer:
             psnrs[timestep] = psnr
             r2s[timestep] = r2
             preds[timestep] = x1_pred
-        return losses, psnrs, r2s, preds
+        return losses, psnrs, r2s, preds, xt
 
     def train_step(self, batch: mx.array, actions: mx.array) -> float:
         def _loss(batch, actions):
-            t = mx.random.uniform(shape=(batch.shape[0],), low=0.0, high=1.0)
+            # This is where the logit norm sampling may be used
+            t = self.sampling_fn_for_t(batch.shape[:1])
             return self._loss_at_t(self.model, batch, actions, t)
 
         loss_and_grad_fn = nn.value_and_grad(self.model, _loss)
@@ -528,9 +539,14 @@ def train_on_dataset(
             )
 
             # tic = time.perf_counter()
-            val_losses, val_psnrs, val_r2s, val_preds = trainer.eval_loss_by_timestep(
-                val_batch, val_batch_actions, val_timesteps
+            val_losses, val_psnrs, val_r2s, val_preds, xt = (
+                trainer.eval_loss_by_timestep(
+                    val_batch, val_batch_actions, val_timesteps
+                )
             )
+            # breakpoint()
+            # print(xt.shape)
+            # print(xt[:, -1].mean(), val_batch[:, -1].mean())
             # time_per_train_step = time.perf_counter() - tic
             # print(f"eval step {step} took {time_per_train_step*1e3:.2f}ms")
 
@@ -560,7 +576,7 @@ def train_on_dataset(
                 train_logger.log_validation_r2s(step, val_r2s)
                 train_logger.log_reconstructions(
                     step,
-                    val_batch[:, -1],
+                    xt[:, -1],
                     {t: p[:, 0] for t, p in val_preds.items()},
                 )
 
