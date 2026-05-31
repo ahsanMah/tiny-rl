@@ -193,7 +193,7 @@ class FlowMatchingTrainer:
         recon_mse = mx.mean((x1_pred - x1[:, -1:]) ** 2)
         target_var = mx.mean(target_velocity[:, -1:] ** 2)
         r2 = 1.0 - loss / mx.maximum(target_var, 1e-12)
-        return loss, recon_mse, x1_pred, r2, xt
+        return loss, recon_mse, x1_pred, r2
 
     def _eval_loss_by_timestep(
         self,
@@ -220,7 +220,7 @@ class FlowMatchingTrainer:
         log10_max = 20.0 * float(mx.log10(mx.array(2.0)))
         for timestep in timesteps[::-1]:
             t = mx.full((batch.shape[0],), timestep, dtype=batch.dtype)
-            loss, recon_mse, x1_pred, r2, xt = self._loss_at_t(
+            loss, recon_mse, x1_pred, r2 = self._loss_at_t(
                 self.model, batch, actions, t, return_eval_aux=True
             )
             psnr = log10_max - 10.0 * mx.log10(mx.maximum(recon_mse, 1e-12))
@@ -229,7 +229,7 @@ class FlowMatchingTrainer:
             psnrs[timestep] = psnr
             r2s[timestep] = r2
             preds[timestep] = x1_pred
-        return losses, psnrs, r2s, preds, xt
+        return losses, psnrs, r2s, preds
 
     def train_step(self, batch: mx.array, actions: mx.array) -> float:
         def _loss(batch, actions):
@@ -539,17 +539,9 @@ def train_on_dataset(
             )
 
             # tic = time.perf_counter()
-            val_losses, val_psnrs, val_r2s, val_preds, xt = (
-                trainer.eval_loss_by_timestep(
-                    val_batch, val_batch_actions, val_timesteps
-                )
+            val_losses, val_psnrs, val_r2s, val_preds = trainer.eval_loss_by_timestep(
+                val_batch, val_batch_actions, val_timesteps
             )
-            # breakpoint()
-            # print(xt.shape)
-            # print(xt[:, -1].mean(), val_batch[:, -1].mean())
-            # time_per_train_step = time.perf_counter() - tic
-            # print(f"eval step {step} took {time_per_train_step*1e3:.2f}ms")
-
             avg_val_loss = sum(val_losses.values()) / len(val_losses)
             avg_val_psnr = sum(val_psnrs.values()) / len(val_psnrs)
             avg_val_r2 = sum(val_r2s.values()) / len(val_r2s)
@@ -576,7 +568,7 @@ def train_on_dataset(
                 train_logger.log_validation_r2s(step, val_r2s)
                 train_logger.log_reconstructions(
                     step,
-                    xt[:, -1],
+                    val_batch[:, -1],
                     {t: p[:, 0] for t, p in val_preds.items()},
                 )
 
