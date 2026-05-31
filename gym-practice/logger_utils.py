@@ -67,6 +67,23 @@ def _append_jsonl(path: str, payload: Dict[str, Any]) -> None:
         f.write("\n")
 
 
+def _update_runs_index(base_dir: str) -> None:
+    """Rebuild runs/index.json from the subdirectories present in runs/. Creates the file if it doesn't exist."""
+    runs_dir = os.path.join(base_dir, "runs")
+    index_path = os.path.join(runs_dir, "index.json")
+    try:
+        entries = [
+            e.name
+            for e in os.scandir(runs_dir)
+            if e.is_dir() and not e.name.startswith(".")
+        ]
+        entries.sort(key=lambda name: os.path.getmtime(os.path.join(runs_dir, name)), reverse=True)
+        with open(index_path, "w", encoding="utf-8") as f:
+            json.dump(entries, f, indent=2)
+    except Exception as exc:
+        logger.warning(f"Could not update runs index at {index_path}: {exc}")
+
+
 class DashboardRunWriter:
     """Writes dashboard-oriented run artifacts using the rl-dashboard-v1 schema."""
 
@@ -121,6 +138,7 @@ class DashboardRunWriter:
             self.run_doc.update(extra_metadata)
 
         self._flush_run_doc()
+        _update_runs_index(base_dir)
 
     def _flush_run_doc(self) -> None:
         self.run_doc["updated_at"] = _utc_now_iso()
@@ -427,6 +445,7 @@ class DashboardRunWriter:
 
     def close(self, status: str = "done") -> None:
         self.update_status(status, ended=True)
+        _update_runs_index(self.base_dir)
 
 
 class RLLogger:

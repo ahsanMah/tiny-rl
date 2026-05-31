@@ -45,11 +45,39 @@ A zero-build browser app for inspecting training runs. Reads structured JSON art
 - Best / median / worst rollout videos per checkpoint
 - Six themes (dark, light, and high/medium contrast variants)
 
+Artifact schema: [`dashboard/docs/SCHEMA.md`](dashboard/docs/SCHEMA.md)
+
+### Installation
+
+The dashboard reads run artifacts through a `runs/` symlink that points to `gym-practice/dashboard_artifacts/runs`. Run this once from the repo root:
+
 ```bash
-cd dashboard && npm start   # http://localhost:8080
+ln -s gym-practice/dashboard_artifacts/runs dashboard/runs
+cd dashboard && npm install
 ```
 
-Artifact schema: [`dashboard/docs/SCHEMA.md`](dashboard/docs/SCHEMA.md)
+
+### Starting the dashboard
+
+```bash
+cd dashboard && npm start
+# → http://localhost:8080/RL%20Tracker.html
+```
+
+[browser-sync](https://browsersync.io/) serves the files and hot-reloads `hifi/**/*` on change.
+
+### Run index
+
+The dashboard uses runs via `runs/index.json` containing the run-directory names:
+
+```json
+[
+    "BipedalWalker-v3-ppo_2026-05-28_16-14",
+    "BipedalWalker-v3-sac_1779998141"
+ ]
+```
+
+`index.json` is **rebuilt automatically** every time a `DashboardRunWriter` is created or closed in `gym-practice/logger_utils.py`. No manual editing needed; new runs appear in the sidebar after a browser refresh.
 
 ---
 
