@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import tomllib
 import types
 import typing
@@ -12,7 +10,7 @@ import click
 import gymnasium as gym
 import minigrid  # noqa: F401  # registers MiniGrid envs in gymnasium
 
-from data import generate_minigrid_video, make_dataset
+from data import generate_env_video, make_dataset
 from diffusion import (
     ModelConfig,
     TrainConfig,
@@ -287,12 +285,13 @@ def generate_cmd(ctx: click.Context, **kwargs) -> None:
     )
     print(f"loaded model from: {generate_config.load_dir}")
 
+    actions_pool = [3]
     out_dir = (
         Path(generate_config.save_dir)
         / f"{generate_config.generate_new_frames}f-{generate_config.generate_num_steps}s"
     )
     sample_count = min(generate_config.num_samples, int(clips.shape[0]))
-    generate_minigrid_video(
+    generate_env_video(
         model,
         initial_clip=clips[:sample_count, : model.max_context_size + 1],
         initial_actions=action_clips[:sample_count],
@@ -302,6 +301,7 @@ def generate_cmd(ctx: click.Context, **kwargs) -> None:
         sample_fps=dataset_config.preview_fps,
         save_dir=out_dir,
         seed=dataset_config.seed + 1,
+        actions_pool=actions_pool,
     )
 
 

@@ -199,7 +199,7 @@ def make_dataset(
     )
 
 
-def generate_minigrid_video(
+def generate_env_video(
     model: UNet3D,
     *,
     initial_clip: mx.array,
@@ -210,14 +210,18 @@ def generate_minigrid_video(
     sample_fps: float = 2.0,
     save_dir: str | Path,
     seed: int = 0,
+    actions_pool: list[int] | None = None,
 ) -> mx.array:
     """Autoregressively extend `initial_clip` using random actions for new frames."""
     rng = np.random.default_rng(seed)
     initial_actions_np = np.asarray(initial_actions)
     batch_size = int(initial_clip.shape[0])
-    extra_actions_np = rng.integers(
-        0, num_actions, size=(batch_size, num_new_frames)
-    ).astype(np.int32)
+    if actions_pool is not None:
+        extra_actions_np = rng.choice(actions_pool, size=(batch_size, num_new_frames))
+    else:
+        extra_actions_np = rng.integers(
+            0, num_actions, size=(batch_size, num_new_frames)
+        ).astype(np.int32)
     full_actions = mx.array(
         np.concatenate([initial_actions_np, extra_actions_np], axis=1)
     )
