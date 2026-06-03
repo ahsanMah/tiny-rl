@@ -50,7 +50,7 @@ function RunRow({ run, isFocused, isPinned, onFocus, onTogglePin, lineSlot }) {
   );
 }
 
-function RailLeft({ runs, focusedId, pinnedIds, onFocus, onTogglePin, query, setQuery }) {
+function RailLeft({ runs, focusedId, pinnedIds, onFocus, onTogglePin, query, setQuery, width = 260 }) {
   const [groupBy, setGroupBy] = useS('alg'); // 'alg' | 'env' | 'flat'
 
   // ── Slot map: focused run = 0, other pinned in D.RUNS order = 1, 2, 3 ──
@@ -91,7 +91,7 @@ function RailLeft({ runs, focusedId, pinnedIds, onFocus, onTogglePin, query, set
   })();
 
   return (
-    <div className="col" style={{ width: 'clamp(150px, 30vw, 340px)', flexShrink: 0, background: 'color-mix(in srgb, var(--accent) 7%, var(--surface))', borderRight: '1px solid var(--hairline)', height: '100%' }}>
+    <div className="col" style={{ width, flexShrink: 0, background: 'color-mix(in srgb, var(--accent) 7%, var(--surface))', borderRight: '1px solid var(--hairline)', height: '100%' }}>
       {/* Header */}
       <div className="col" style={{ padding: '22px 16px 16px', gap: 12, borderBottom: '1px solid var(--hairline)' }}>
         <div className="row" style={{ gap: 8 }}>

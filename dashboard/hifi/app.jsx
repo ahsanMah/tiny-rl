@@ -39,6 +39,7 @@ function App() {
   const [playing, setPlaying] = uS(false);
   const [speed, setSpeed] = uS(1);
   const [metric, setMetric] = uS(init.metric || 'value');
+  const [railWidth, setRailWidth] = uS(init.railWidth || 260);
   const [query, setQuery] = uS('');
   const [darkMode, setDarkMode] = uS(() => {
     try { return localStorage.getItem('rl-dark-mode') !== 'false'; } catch { return true; }
@@ -114,8 +115,8 @@ function App() {
 
   // ── Persist on relevant state changes ──────────────────────────
   uE(() => {
-    saveSession({ focusedId, pinnedIds, diffBaselineName, ckptStep, episodeKind, frame, metric });
-  }, [focusedId, pinnedIds, diffBaselineName, ckptStep, episodeKind, frame, metric]);
+    saveSession({ focusedId, pinnedIds, diffBaselineName, ckptStep, episodeKind, frame, metric, railWidth });
+  }, [focusedId, pinnedIds, diffBaselineName, ckptStep, episodeKind, frame, metric, railWidth]);
 
   // ── Keyboard ───────────────────────────────────────────────────
   uE(() => {
@@ -177,6 +178,17 @@ function App() {
           onFocus={handleFocus}
           onTogglePin={togglePin}
           query={query} setQuery={setQuery}
+          width={railWidth}
+        />
+
+        {/* RAIL RESIZE HANDLE */}
+        <div
+          title="drag to resize"
+          onMouseDown={(e) => startDrag(e, (ev) => {
+            setRailWidth(Math.max(180, Math.min(480, ev.clientX)));
+          }, 'col-resize')}
+          style={{ flex: '0 0 auto', width: 5, marginLeft: -2, marginRight: -2,
+                   cursor: 'col-resize', zIndex: 5 }}
         />
 
         {/* CENTER */}

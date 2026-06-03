@@ -72,6 +72,7 @@ function CkptNav({ run, ckpt, onSelectCkpt }) {
   const total = run.checkpoints.length;
   const prev = () => idx > 0 && onSelectCkpt(run.checkpoints[idx - 1].step);
   const next = () => idx < total - 1 && onSelectCkpt(run.checkpoints[idx + 1].step);
+  const f2 = (v) => (v == null || isNaN(v)) ? '–' : Number(v).toFixed(2);
   return (
     <div className="row border-b" style={{ padding: '11px 22px', gap: 14, flex: '0 0 auto', background: 'var(--surface)' }}>
       <span className="label-eyebrow">Checkpoint</span>
@@ -93,15 +94,15 @@ function CkptNav({ run, ckpt, onSelectCkpt }) {
       <div className="row gap-3" style={{ alignItems: 'baseline' }}>
         <span className="col" style={{ alignItems: 'flex-end' }}>
           <span className="label-eyebrow">μ ± σ</span>
-          <span className="num strong" style={{ fontSize: 13 }}>{ckpt.mean} <span className="muted" style={{ fontSize: 11 }}>± {ckpt.std}</span></span>
+          <span className="num strong" style={{ fontSize: 13 }}>{f2(ckpt.mean)} <span className="muted" style={{ fontSize: 11 }}>± {f2(ckpt.std)}</span></span>
         </span>
         <span className="col" style={{ alignItems: 'flex-end' }}>
           <span className="label-eyebrow">best</span>
-          <span className="num strong" style={{ fontSize: 13 }}>{ckpt.best}</span>
+          <span className="num strong" style={{ fontSize: 13 }}>{f2(ckpt.best)}</span>
         </span>
         <span className="col" style={{ alignItems: 'flex-end' }}>
           <span className="label-eyebrow">worst</span>
-          <span className="num strong" style={{ fontSize: 13 }}>{ckpt.worst}</span>
+          <span className="num strong" style={{ fontSize: 13 }}>{f2(ckpt.worst)}</span>
         </span>
       </div>
     </div>
@@ -264,17 +265,24 @@ function FrameLevelChartBare({ lines, frame, focalLength, setFrame, height = 160
   const svgRef = React.useRef(null);
   const [hover, setHover] = useSt(null); // { frame: int, pct: float 0-1 }
 
+  // Measure the real rendered size so the SVG draws at 1:1 (1 unit = 1px),
+  // avoiding the preserveAspectRatio="none" stretch that distorted text/strokes.
+  const [boxRef, size] = useMeasuredSize({ width: 480, height });
+  const clipId = useM(() => nextClipId(), []);
+
   const hasFocal = lines.some(l => l.isFocal && l.values && l.values.length);
-  const w = 480;
-  const h = height;
+  const w = size.width;
+  const h = size.height;
   const padL = 32, padR = 8, padT = 8, padB = 18;
   const innerW = w - padL - padR;
   const innerH = h - padT - padB;
 
   const xMax = useM(() => Math.max(...lines.map(l => l.values.length), focalLength || 0), [lines, focalLength]);
+  // Full scan — sampling missed extrema that the drawn path still rendered,
+  // spilling the line out of the plot box.
   const [yLo, yHi] = useM(() => {
     let lo = Infinity, hi = -Infinity;
-    for (const ln of lines) for (let i = 0; i < ln.values.length; i += 4) {
+    for (const ln of lines) for (let i = 0; i < ln.values.length; i++) {
       if (ln.values[i] < lo) lo = ln.values[i];
       if (ln.values[i] > hi) hi = ln.values[i];
     }
@@ -317,27 +325,22 @@ function FrameLevelChartBare({ lines, frame, focalLength, setFrame, height = 160
 
   return (
     <div style={{ position: 'relative' }}>
-    <div className="card" style={{ borderRadius: 3 }}>
+    <div ref={boxRef} className="card" style={{ borderRadius: 3, height: CHART_FILL }}>
       <svg
         ref={svgRef}
         className="chart-svg"
         viewBox={`0 0 ${w} ${h}`}
-        width="100%" height={h}
-        preserveAspectRatio="none"
-        style={{ cursor: 'col-resize', display: 'block', height: 'clamp(160px, calc(13vw + 55px), 320px)' }}
-        onMouseDown={(e) => {
-          onPointer(e);
-          const move = (ev) => onPointer(ev);
-          const up = () => {
-            window.removeEventListener('mousemove', move);
-            window.removeEventListener('mouseup', up);
-          };
-          window.addEventListener('mousemove', move);
-          window.addEventListener('mouseup', up);
-        }}
+        width="100%" height="100%"
+        style={{ cursor: 'col-resize', display: 'block' }}
+        onMouseDown={(e) => startDrag(e, onPointer, 'col-resize')}
         onMouseMove={onHover}
         onMouseLeave={() => setHover(null)}
       >
+        <defs>
+          <clipPath id={clipId}>
+            <rect x={padL} y={padT} width={innerW} height={innerH} />
+          </clipPath>
+        </defs>
         {yTicks.map((v, i) => (
           <g key={i}>
             <line x1={padL} y1={yScale(v)} x2={w - padR} y2={yScale(v)} className="grid" />
@@ -353,25 +356,27 @@ function FrameLevelChartBare({ lines, frame, focalLength, setFrame, height = 160
             {f >= 1000 ? `${(f / 1000).toFixed(f % 1000 === 0 ? 0 : 1)}k` : f}
           </text>
         ))}
-        {/* Ghost lines */}
-        {lines.filter(l => !l.isFocal).map((ln, i) => {
-          const cls = ['ghost-1','ghost-2','ghost-3'][i % 3];
-          return (
-            <g key={ln.runId}>
-              <path d={buildPath(ln.values, xScale, yScale, 3)} className={cls} />
-              <line
-                x1={xScale(ln.values.length - 1)}
-                y1={yScale(ln.values[ln.values.length - 1]) - 4}
-                x2={xScale(ln.values.length - 1)}
-                y2={yScale(ln.values[ln.values.length - 1]) + 4}
-                stroke="var(--ink-3)" opacity="0.6"
-              />
-            </g>
-          );
-        })}
-        {lines.filter(l => l.isFocal).map((ln) => (
-          <path key={ln.runId} d={buildPath(ln.values, xScale, yScale, 2)} className="focal" />
-        ))}
+        <g clipPath={`url(#${clipId})`}>
+          {/* Ghost lines */}
+          {lines.filter(l => !l.isFocal).map((ln, i) => {
+            const cls = ['ghost-1','ghost-2','ghost-3'][i % 3];
+            return (
+              <g key={ln.runId}>
+                <path d={buildPath(ln.values, xScale, yScale, 3)} className={cls} />
+                <line
+                  x1={xScale(ln.values.length - 1)}
+                  y1={yScale(ln.values[ln.values.length - 1]) - 4}
+                  x2={xScale(ln.values.length - 1)}
+                  y2={yScale(ln.values[ln.values.length - 1]) + 4}
+                  stroke="var(--ink-3)" opacity="0.6"
+                />
+              </g>
+            );
+          })}
+          {lines.filter(l => l.isFocal).map((ln) => (
+            <path key={ln.runId} d={buildPath(ln.values, xScale, yScale, 2)} className="focal" />
+          ))}
+        </g>
         {/* Hover crosshair */}
         {hover != null && (
           <line

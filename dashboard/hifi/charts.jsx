@@ -1,6 +1,53 @@
 // hifi/charts.jsx — interactive chart suite
 
-const { useMemo, useRef, useCallback: useCB, useState: useSt } = React;
+const { useMemo, useRef, useCallback: useCB, useState: useSt, useEffect: useEff } = React;
+
+// ── Responsive sizing ────────────────────────────────────────────────
+// Measure a container's real pixel size so SVGs can be drawn at 1:1 (1 user
+// unit = 1px). This avoids preserveAspectRatio="none", whose anisotropic
+// stretch distorts text glyphs and stroke widths. Returns [ref, {width,height}].
+let _clipSeq = 0;
+function nextClipId() { return 'clip-' + (++_clipSeq); }
+function useMeasuredSize(fallback = { width: 480, height: 160 }) {
+  const ref = useRef(null);
+  const [size, setSize] = useSt(fallback);
+  useEff(() => {
+    const el = ref.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver((entries) => {
+      const cr = entries[0].contentRect;
+      if (cr.width > 0 && cr.height > 0) {
+        setSize({ width: cr.width, height: cr.height });
+      }
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  return [ref, size];
+}
+
+// ── Drag lifecycle ───────────────────────────────────────────────────
+// Shared pointer-drag helper used by chart scrubbing and the resizable rail.
+// Suppresses text selection (and optionally forces a cursor) for the drag's
+// duration, then restores both on mouseup. `onMove` is called with each event,
+// starting with the initiating mousedown.
+function startDrag(e, onMove, cursor) {
+  e.preventDefault();
+  onMove(e);
+  const prevSelect = document.body.style.userSelect;
+  const prevCursor = document.body.style.cursor;
+  document.body.style.userSelect = 'none';
+  if (cursor) document.body.style.cursor = cursor;
+  const move = (ev) => onMove(ev);
+  const up = () => {
+    document.body.style.userSelect = prevSelect;
+    document.body.style.cursor = prevCursor;
+    window.removeEventListener('mousemove', move);
+    window.removeEventListener('mouseup', up);
+  };
+  window.addEventListener('mousemove', move);
+  window.addEventListener('mouseup', up);
+}
 
 // ── Path helpers ─────────────────────────────────────────────────────
 // Build a polyline SVG path with optional decimation for perf.
@@ -89,15 +136,19 @@ function ChartTooltip({ lines, hoverFrame, hoverX }) {
 
 // ── Loss strip (training-step x-axis, ckpt playhead) ─────────────────
 function LossChart({ title, values, atCkptValue, width, height = 80, ckptStepFrac }) {
-  const w = width;
-  const h = height;
+  // Measure the real rendered size so we can draw at 1:1 (no aspect-ratio stretch).
+  const [boxRef, size] = useMeasuredSize({ width, height });
+  const w = size.width;
+  const h = size.height;
   const padL = 4, padR = 4, padT = 6, padB = 16;
   const innerW = w - padL - padR;
   const innerH = h - padT - padB;
+  const clipId = useMemo(() => nextClipId(), []);
 
+  // Full scan so the drawn line's extrema are always within range (no overshoot).
   const [yLo, yHi] = useMemo(() => {
     let lo = Infinity, hi = -Infinity;
-    for (let i = 0; i < values.length; i += 2) {
+    for (let i = 0; i < values.length; i++) {
       if (values[i] < lo) lo = values[i];
       if (values[i] > hi) hi = values[i];
     }
@@ -114,17 +165,24 @@ function LossChart({ title, values, atCkptValue, width, height = 80, ckptStepFra
         <span className="label-eyebrow">{title}</span>
         <span className="num" style={{ fontSize: 10.5, color: 'var(--ink-2)' }}>at ckpt: {atCkptValue}</span>
       </div>
-      <svg className="chart-svg" viewBox={`0 0 ${w} ${h}`} width="100%" height={h} preserveAspectRatio="none">
-        <line x1={padL} y1={padT + innerH} x2={w - padR} y2={padT + innerH} className="axis" />
-        <path d={buildPath(values, xScale, yScale, 2)} className="focal" />
-        <line
-          x1={padL + ckptStepFrac * innerW}
-          y1={padT}
-          x2={padL + ckptStepFrac * innerW}
-          y2={padT + innerH}
-          className="playhead-soft"
-        />
-      </svg>
+      <div ref={boxRef} style={{ width: '100%', height }}>
+        <svg className="chart-svg" viewBox={`0 0 ${w} ${h}`} width="100%" height="100%">
+          <defs>
+            <clipPath id={clipId}>
+              <rect x={padL} y={padT} width={innerW} height={innerH} />
+            </clipPath>
+          </defs>
+          <line x1={padL} y1={padT + innerH} x2={w - padR} y2={padT + innerH} className="axis" />
+          <path d={buildPath(values, xScale, yScale, 2)} className="focal" clipPath={`url(#${clipId})`} />
+          <line
+            x1={padL + ckptStepFrac * innerW}
+            y1={padT}
+            x2={padL + ckptStepFrac * innerW}
+            y2={padT + innerH}
+            className="playhead-soft"
+          />
+        </svg>
+      </div>
     </div>
   );
 }
@@ -222,5 +280,8 @@ window.LossChart = LossChart;
 window.CheckpointSparkbar = CheckpointSparkbar;
 window.Sparkline = Sparkline;
 window.buildPath = buildPath;
+window.useMeasuredSize = useMeasuredSize;
+window.nextClipId = nextClipId;
+window.startDrag = startDrag;
 window.RUN_LINE_STYLES = RUN_LINE_STYLES;
 window.RUN_LINE_DEFAULT = RUN_LINE_DEFAULT;

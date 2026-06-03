@@ -121,18 +121,10 @@ function WalkerPlayer({
           <div className="track"
             onMouseDown={(e) => {
               const rect = e.currentTarget.getBoundingClientRect();
-              const t = (e.clientX - rect.left) / rect.width;
-              setFrame(Math.floor(t * (rollout.length - 1)));
-              const onMove = (ev) => {
-                const t2 = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width));
-                setFrame(Math.floor(t2 * (rollout.length - 1)));
-              };
-              const onUp = () => {
-                window.removeEventListener('mousemove', onMove);
-                window.removeEventListener('mouseup', onUp);
-              };
-              window.addEventListener('mousemove', onMove);
-              window.addEventListener('mouseup', onUp);
+              startDrag(e, (ev) => {
+                const t = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width));
+                setFrame(Math.floor(t * (rollout.length - 1)));
+              });
             }}
           >
             <div className="fill" style={{ width: `${(frame / (rollout.length - 1)) * 100}%` }} />
