@@ -1,15 +1,26 @@
-from __future__ import annotations
-
 from pathlib import Path
+from pprint import pprint
 
 import gymnasium as gym
+import minigrid  # noqa: F401  # registers MiniGrid envs in gymnasium
 import mlx.core as mx
 import numpy as np
 from minigrid.wrappers import RGBImgObsWrapper
+from vizdoom import gymnasium_wrapper
 
 from diffusion import generate_video, sample_euler_to_mp4
 from unet import UNet3D
 from video_utils import frames_to_clips, save_clip_previews
+
+
+def _is_minigrid(env_id: str) -> bool:
+    return "MiniGrid" in env_id
+
+
+def make_env(env_id: str) -> gym.Env:
+    if _is_minigrid(env_id):
+        return gym.make(env_id)
+    return gym.make(env_id, continuous=False, frame_skip=4)
 
 
 def rollout_minigrid_frames(
@@ -116,6 +127,71 @@ def rollout_box2d_frames(
     return stacked, action_array, episode_ends
 
 
+def rollout_doom(
+    env: gym.Env,
+    *,
+    num_steps: int = 256,
+    seed: int = 0,
+    warmup_steps: int = 50,
+    frame_skip: int = 1,
+) -> tuple[np.ndarray, np.ndarray, list[int]]:
+    """Roll out random discrete actions in a Box2D env and capture RGB frames.
+
+    Returns:
+        frames: (num_steps, H, W, 3) float32 in [-1, 1].
+        actions: (num_steps,) int32.
+        episode_ends: exclusive end indices of each episode into frames/actions.
+    """
+    print("Using Doom Env")
+    env.reset(seed=seed)
+    env.action_space.sample()
+    print(env.metadata)
+    pprint(env.spec)
+    warmup_steps = 5
+
+    def _warmup():
+        for _ in range(warmup_steps):
+            env.step(env.action_space.sample())
+
+    # _warmup()
+    # print(f"warmup_steps={warmup_steps}")
+
+    frames: list[np.ndarray] = []
+    actions: list[int] = []
+    episode_ends: list[int] = []
+    action = int(env.action_space.sample())
+
+    for _ in range(num_steps):
+        reset_happened = False
+        for _ in range(frame_skip):
+            obs, _, terminated, truncated, _ = env.step(action)
+            if terminated or truncated:
+                env.reset(seed=seed)
+                # print(f"reset happened at {len(frames)}")
+                # _warmup()
+                reset_happened = True
+                break
+
+        actions.append(action)
+        frames.append(np.asarray(obs["screen"]))
+
+        if reset_happened:
+            # frames[-1] is the terminal frame - episode ends here
+            episode_ends.append(len(frames))
+
+        action = int(env.action_space.sample())
+
+    env.close()
+
+    if not episode_ends or episode_ends[-1] < len(frames):
+        episode_ends.append(len(frames))
+
+    stacked = np.stack(frames, axis=0).astype(np.float32) / 127.5 - 1.0
+    action_array = np.asarray(actions, dtype=np.int32)
+    print(f"Collected {len(frames)} frames over {len(episode_ends)} episodes")
+    return stacked, action_array, episode_ends
+
+
 def actions_to_clips(
     actions: np.ndarray,
     *,
@@ -181,6 +257,7 @@ def make_dataset(
     clip_stride: int | None = None,
     tile_size: int = 8,
     max_action_idx: int = -1,
+    warmup_steps: int = 50,
 ) -> tuple[mx.array, mx.array]:
     if "MiniGrid" in (env.spec.id if env.spec else ""):
         frames, actions, episode_ends = rollout_minigrid_frames(
@@ -190,62 +267,20 @@ def make_dataset(
             seed=seed,
             max_action_idx=max_action_idx,
         )
+    elif "Vizdoom" in (env.spec.id if env.spec else ""):
+        frames, actions, episode_ends = rollout_doom(
+            env=env,
+            num_steps=num_steps,
+            seed=seed,
+            warmup_steps=warmup_steps,
+        )
     else:
         frames, actions, episode_ends = rollout_box2d_frames(
-            env=env, num_steps=num_steps, seed=seed
+            env=env,
+            num_steps=num_steps,
+            seed=seed,
+            warmup_steps=warmup_steps,
         )
     return clips_from_episodes(
         frames, actions, episode_ends, clip_length=clip_length, clip_stride=clip_stride
     )
-
-
-def generate_env_video(
-    model: UNet3D,
-    *,
-    initial_clip: mx.array,
-    initial_actions: mx.array,
-    num_actions: int,
-    num_new_frames: int,
-    num_steps: int = 32,
-    sample_fps: float = 2.0,
-    save_dir: str | Path,
-    seed: int = 0,
-    actions_pool: list[int] | None = None,
-) -> mx.array:
-    """Autoregressively extend `initial_clip` using random actions for new frames."""
-    rng = np.random.default_rng(seed)
-    initial_actions_np = np.asarray(initial_actions)
-    batch_size = int(initial_clip.shape[0])
-    if actions_pool is not None:
-        extra_actions_np = rng.choice(actions_pool, size=(batch_size, num_new_frames))
-    else:
-        extra_actions_np = rng.integers(
-            0, num_actions, size=(batch_size, num_new_frames)
-        ).astype(np.int32)
-    full_actions = mx.array(
-        np.concatenate([initial_actions_np, extra_actions_np], axis=1)
-    )
-    generated = generate_video(
-        model,
-        initial_clip=initial_clip,
-        num_new_frames=num_new_frames,
-        actions=full_actions,
-        num_steps=num_steps,
-    )
-    save_clip_previews(
-        generated,
-        save_dir,
-        max_clips=batch_size,
-        fps=sample_fps,
-        actions=full_actions,
-    )
-    sample_euler_to_mp4(
-        model,
-        conditioning_clips=initial_clip[:, : model.max_context_size],
-        actions=full_actions[:, : model.max_context_size + 1],
-        output_path=f"{save_dir}/denoising.mp4",
-        num_steps=num_steps,
-        fps=num_steps / 4.0,
-    )
-    print(f"saved generated video to: {save_dir}")
-    return generated

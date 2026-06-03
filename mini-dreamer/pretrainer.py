@@ -1,20 +1,21 @@
 import tomllib
 import types
 import typing
+import wave
 from dataclasses import MISSING, asdict, dataclass, fields
 from pathlib import Path
 from pprint import pprint
 from typing import Any
 
 import click
-import gymnasium as gym
-import minigrid  # noqa: F401  # registers MiniGrid envs in gymnasium
 
-from data import generate_env_video, make_dataset
+from data import make_dataset, make_env
 from diffusion import (
     ModelConfig,
     TrainConfig,
+    generate_env_video,
     load_model,
+    sample_batch,
     save_model,
     train_on_dataset,
 )
@@ -62,16 +63,6 @@ CONFIG_SCHEMA = {
     section: {f.name for f in fields(cls)}
     for section, cls in _SECTION_DATACLASSES.items()
 }
-
-
-def _is_minigrid(env_id: str) -> bool:
-    return "MiniGrid" in env_id
-
-
-def _make_env(env_id: str) -> gym.Env:
-    if _is_minigrid(env_id):
-        return gym.make(env_id)
-    return gym.make(env_id, continuous=False)
 
 
 @click.group()
@@ -212,7 +203,7 @@ def train_cmd(ctx: click.Context, **kwargs) -> None:
 
     print("Using data config:")
     pprint(dataset_config)
-    env = _make_env(env_config.env_id)
+    env = make_env(env_config.env_id)
     clips, action_clips = make_dataset(
         env=env,
         num_steps=dataset_config.rollout_steps,
@@ -266,35 +257,73 @@ def generate_cmd(ctx: click.Context, **kwargs) -> None:
     if generate_config.save_dir is None:
         raise click.UsageError("Missing option '--save-dir'.")
 
-    env = _make_env(env_config.env_id)
-    max_action_idx = 3 if _is_minigrid(env_config.env_id) else -1
-    clips, action_clips = make_dataset(
-        env=env,
-        num_steps=generate_config.num_samples * dataset_config.clip_length,
-        tile_size=dataset_config.tile_size,
-        seed=dataset_config.seed,
-        clip_length=dataset_config.clip_length - 1,  # only grab context clips
-        clip_stride=dataset_config.clip_stride,
-        max_action_idx=max_action_idx,
-    )
-    num_actions = 3 if _is_minigrid(env_config.env_id) else int(env.action_space.n)
-    print(f"env: {env_config.env_id}")
-    print(f"clips shape: {tuple(clips.shape)}")
     model = load_model(
         generate_config.load_dir, prefer_ema=generate_config.not_use_ema == False
     )
-    print(f"loaded model from: {generate_config.load_dir}")
+    print(
+        f"loaded {'ckpt' if generate_config.not_use_ema else 'ema'} model from: {generate_config.load_dir}"
+    )
 
-    actions_pool = [3]
+    env = make_env(env_config.env_id)
+    max_action_idx = -1
+    clip_length = model.max_context_size
+    clips, action_clips = make_dataset(
+        env=env,
+        num_steps=generate_config.num_samples * dataset_config.clip_length * 4,
+        tile_size=dataset_config.tile_size,
+        seed=dataset_config.seed,
+        clip_length=clip_length,  # only grab context clips
+        clip_stride=dataset_config.clip_stride,
+        max_action_idx=max_action_idx,
+        warmup_steps=20,
+    )
+
+    print(f"clips shape: {tuple(clips.shape)}")
+    sample_count = generate_config.num_samples
+    sample_clips, sample_action_clips = sample_batch(
+        videos=clips,
+        actions=action_clips,
+        batch_size=sample_count,
+    )
+
+    num_actions = env.action_space.n
+    print(f"{sample_clips.shape = }")
+    print(f"{sample_action_clips.shape = }")
+
+    print(f"env: {env_config.env_id}")
+
+    actions_pool = None  # [1, 2]
     out_dir = (
         Path(generate_config.save_dir)
         / f"{generate_config.generate_new_frames}f-{generate_config.generate_num_steps}s"
     )
-    sample_count = min(generate_config.num_samples, int(clips.shape[0]))
+
+    debug = True
+
+    if debug:
+        # save the wavelets
+        wavelets = model.prepool(sample_clips)
+        print(f"{wavelets.shape = }")
+        B, T, H, W, C4 = wavelets.shape  # 8, 3, 120, 160, 12
+        C = C4 // 4
+        # split last dim → (4 subbands, 3 channels)
+        wavelets = wavelets.reshape(B, T, H, W, 4, C)
+        print(f"{wavelets.shape = }")
+
+        # B, T, 4, H, W, C  (move channels next to T)
+        wavelets = wavelets.transpose(0, 1, 4, 2, 3, 5)
+        print(f"{wavelets.shape = }")
+
+        # B, 4T, H, W, C
+        wavelets = wavelets.reshape(B, T * 4, H, W, C)
+        print(f"{wavelets.shape = }")
+
+        save_clip_previews(wavelets, out_dir / "wavelets")
+
     generate_env_video(
         model,
-        initial_clip=clips[:sample_count, : model.max_context_size + 1],
-        initial_actions=action_clips[:sample_count],
+        initial_clip=sample_clips[:, : model.max_context_size + 1],
+        initial_actions=sample_action_clips,
         num_actions=num_actions,
         num_new_frames=generate_config.generate_new_frames,
         num_steps=generate_config.generate_num_steps,

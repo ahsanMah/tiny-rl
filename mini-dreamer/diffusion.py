@@ -12,6 +12,7 @@ from typing import Literal, Tuple
 import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as optim
+import numpy as np
 from mlx.utils import tree_map
 
 from logger_utils import RLLogger
@@ -405,6 +406,8 @@ def generate_video(
 
     clip_length = int(initial_clip.shape[1])
     expected = clip_length + num_new_frames
+
+    print(f"Generating {num_new_frames} frames from {clip_length} initial frames...")
     if int(actions.shape[1]) != expected:
         raise ValueError(
             f"actions must have shape (B, {expected}), got {tuple(actions.shape)}"
@@ -414,7 +417,6 @@ def generate_video(
         raise ValueError(
             f"initial_clip must contain at least 2 frames, got {clip_length}"
         )
-    print(f"Generating {num_new_frames} frames from {clip_length} initial frames...")
     print(f"Using max_context_size={model.max_context_size}")
     print(f"Using actions={actions}")
     frames = initial_clip
@@ -426,7 +428,7 @@ def generate_video(
         )
         end = frames.shape[1] + 1  # frame index being generated, + 1 inclusive
         action_window = actions[:, max(0, end - max_context_size - 1) : end]
-        print(f"Using action_window={action_window}")
+        # print(f"Using action_window={action_window}")
 
         sample = sample_euler(
             model,
@@ -438,6 +440,61 @@ def generate_video(
 
     mx.eval(frames)
     return frames
+
+
+def generate_env_video(
+    model: UNet3D,
+    *,
+    initial_clip: mx.array,
+    initial_actions: mx.array,
+    num_actions: int,
+    num_new_frames: int,
+    num_steps: int = 32,
+    sample_fps: float = 2.0,
+    save_dir: str | Path,
+    seed: int = 0,
+    actions_pool: list[int] | None = None,
+) -> mx.array:
+    """Autoregressively extend `initial_clip` using random actions for new frames."""
+    rng = np.random.default_rng(seed)
+    initial_actions_np = np.asarray(initial_actions)
+    batch_size = int(initial_clip.shape[0])
+    if actions_pool is not None:
+        extra_actions_np = rng.choice(actions_pool, size=(batch_size, num_new_frames))
+    else:
+        extra_actions_np = rng.integers(
+            0, num_actions, size=(batch_size, num_new_frames)
+        ).astype(np.int32)
+    full_actions = mx.array(
+        np.concatenate([initial_actions_np, extra_actions_np], axis=1)
+    )
+    print(
+        f"num_new_frames in genenv={num_new_frames}, initial_clip={initial_clip.shape}"
+    )
+    generated = generate_video(
+        model,
+        initial_clip=initial_clip,
+        num_new_frames=num_new_frames,
+        actions=full_actions,
+        num_steps=num_steps,
+    )
+    save_clip_previews(
+        generated,
+        save_dir,
+        max_clips=batch_size,
+        fps=sample_fps,
+        actions=full_actions,
+    )
+    sample_euler_to_mp4(
+        model,
+        conditioning_clips=initial_clip[:, : model.max_context_size],
+        actions=full_actions[:, : model.max_context_size + 1],
+        output_path=f"{save_dir}/denoising.mp4",
+        num_steps=num_steps,
+        fps=num_steps / 4.0,
+    )
+    print(f"saved generated video to: {save_dir}")
+    return generated
 
 
 def train_on_dataset(

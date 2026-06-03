@@ -15,4 +15,8 @@ dependencies = [
     "setuptools==81.0.0",
     "tensorboard>=2.20.0",
     "tensorboardx>=2.6.5",
+    "vizdoom",
 ]
+
+[tool.uv.sources]
+vizdoom = { git = "https://github.com/Farama-Foundation/ViZDoom"}
