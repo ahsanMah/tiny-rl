@@ -2,6 +2,28 @@
 
 ---
 
+## 06/03 - Episode-Safe Rollouts, Doom Support, and New Experiment Configs
+
+Rollout handling now records episode boundaries and slices clips per-episode so training data no longer
+crosses reset transitions. This fixes the earlier issue where clips could straddle terminal frames and
+mix episodes.
+
+Environment/data utilities were consolidated:
+
+- Added Vizdoom support with a Doom rollout path, plus a `make_env` helper that selects MiniGrid vs.
+  Box2D vs. Vizdoom environments.
+- Generation can optionally draw new actions from a fixed pool to debug action-conditioning
+  behavior.
+- The pretrainer now uses the shared dataset helpers for both training and generation.
+
+Experiment configuration was expanded and refreshed:
+
+- New TOML configs were added for CarRacing and Vizdoom runs.
+- The MiniGrid config was updated for longer clips, wavelet-enabled models, and new v1 log
+  directories with shorter training schedules.
+- Minor cleanup removed unused diffusion code and refreshed the UNet benchmarking harness for
+  wavelet/non-wavelet comparisons.
+
 ## 05/29
 
 - Debugging why thew training is slow led to avery interesting finding
