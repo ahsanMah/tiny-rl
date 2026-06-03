@@ -323,11 +323,10 @@ def policy_loss_fn(params, old_log_prob, action, state, advantage, clip_ratio=0.
 
     # Clipped surrogate objective
     # r_t = probability_ratio
-    r_t = mx.exp(log_prob - old_log_prob)
+    unclipped = mx.exp(log_prob - old_log_prob) * advantage
+    clipped = mx.clip(unclipped, 1 - clip_ratio, 1 + clip_ratio) * advantage
     # TODO: keep track of how many timepoints were clipped
-    r_t = mx.minimum(r_t, mx.clip(r_t, 1 - clip_ratio, 1 + clip_ratio))
-
-    loss = r_t * advantage
+    loss = mx.minimum(unclipped, clipped)
     return loss.mean()
 
 
