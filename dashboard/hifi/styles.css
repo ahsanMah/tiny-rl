@@ -345,6 +345,57 @@ html, body {
   pointer-events: none;
 }
 
+/* Missing-data / empty state ---------------------------------------- */
+/* Dashed frame = "artifact absent". We never fabricate data — when a
+   signal/metric/video is missing we say so plainly in this same vocabulary. */
+.empty-state {
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  gap: var(--sp-1);
+  padding: var(--sp-4) var(--sp-3);
+  text-align: center;
+  border: 1px dashed var(--hairline-dashed);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--ink) 2.5%, transparent);
+}
+.empty-state__mark {
+  font: 400 var(--t-xl) var(--mono);
+  color: var(--ink-4);
+  line-height: 1;
+}
+.empty-state__title { color: var(--ink-3); }
+.empty-state__detail {
+  font: 400 var(--t-xs) var(--mono);
+  color: var(--ink-4);
+  max-width: 36ch;
+  line-height: 1.5;
+}
+
+/* Missing video — a warm-dark "no signal" letterbox (theme-independent, so the
+   light overlay captions stay legible) with a faint diagonal hatch + vignette. */
+.player-missing {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  gap: var(--sp-1);
+  background:
+    repeating-linear-gradient(45deg,
+      transparent, transparent 9px,
+      rgb(255 255 255 / 0.035) 9px, rgb(255 255 255 / 0.035) 10px),
+    radial-gradient(120% 120% at 50% 38%, rgb(40 32 24) 0%, rgb(15 11 7) 100%);
+}
+.player-missing__mark {
+  font: 400 var(--t-display) var(--mono);
+  color: rgb(244 241 234 / 0.40);
+  line-height: 1;
+}
+.player-missing__title {
+  font: 500 var(--t-sm) var(--ui);
+  letter-spacing: 0.14em; text-transform: uppercase;
+  color: rgb(244 241 234 / 0.72);
+}
+.player-missing__detail { font: 400 var(--t-xs) var(--mono); color: rgb(244 241 234 / 0.5); }
+
 /* Episode picker button */
 .ep-btn {
   flex: 1;

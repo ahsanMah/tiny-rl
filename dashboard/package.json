@@ -1,8 +1,8 @@
 {
-  "name": "rl-experiment-tracker",
-  "version": "1.0.0",
-  "scripts": {
-    "prestart": "node scripts/ensure-index.js",
-    "start": "npx browser-sync start --server --port 8080 --startPath 'RL Tracker.html' --files 'hifi/**/*' --no-notify"
-  }
+    "name": "rl-experiment-tracker",
+    "version": "1.0.0",
+    "scripts": {
+        "prestart": "node scripts/ensure-index.js",
+        "start": "npx browser-sync start --server --port 8080 --startPath 'RL Tracker.html' --files 'hifi/**/*' --no-notify --no-open"
+    }
 }

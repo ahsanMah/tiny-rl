@@ -136,61 +136,95 @@ function EpisodePicker({ ckpt, selected, onSelect }) {
 }
 
 // ── Frame-level chart pair (cumulative + metric) ─────────────────────
-const METRIC_OPTIONS = [
-  { key: 'value',       label: 'V(s_t)' },
-  { key: 'step_reward', label: 'step_reward' },
-  { key: 'action_logp', label: 'action_logp' },
-  { key: 'advantage',   label: 'advantage' },
-  { key: 'td_error',    label: 'TD-error' },
-  { key: 'entropy',     label: 'entropy' },
-];
+// Pretty labels for known signal keys. Any signal present in a run's
+// signals.npz but not listed here falls back to its raw name.
+const SIGNAL_LABELS = {
+  value:          'V(s_t)',
+  value_estimate: 'V(s_t)',
+  step_reward:    'step_reward',
+  action_logp:    'action_logp',
+  advantage:      'advantage',
+  td_error:       'TD-error',
+  entropy:        'entropy',
+};
+const signalLabel = (key) => SIGNAL_LABELS[key] || key;
+// Responsive height shared by the frame charts and their empty states.
+const CHART_FILL = 'clamp(160px, calc(13vw + 55px), 320px)';
+const fmtCursor = (v) => Math.abs(v) >= 10 ? v.toFixed(0) : v.toFixed(2);
 
 function FrameChartPair({ focalRun, focalCkpt, focalRollout, frame, setFrame, pinnedRuns, metric, setMetric, signalVersion }) {
-  // ── Line builder — shared helper adds name/strokeColor/dash for tooltip ──
+  // ── Line builder — one focal line + a ghost per pinned run. Lines whose real
+  // signal is missing are omitted (we never fabricate); the ghost slot/color
+  // still advances per pinned run so colors stay aligned with the left rail. ──
   const buildLines = (sig) => {
     const out = [];
-    out.push({
-      runId: focalRun.id, name: focalRun.name,
-      values: D.frameSignal(focalRun, focalCkpt, focalRollout, sig),
-      isFocal: true, strokeColor: RUN_LINE_STYLES[0].color, dash: null, color: 'var(--ink)',
-    });
+    const focalVals = D.frameSignal(focalRun, focalCkpt, focalRollout, sig);
+    if (focalVals && focalVals.length) {
+      out.push({
+        runId: focalRun.id, name: focalRun.name, values: focalVals,
+        isFocal: true, strokeColor: RUN_LINE_STYLES[0].color, dash: null, color: 'var(--ink)',
+      });
+    }
     let gi = 0;
     for (const pr of pinnedRuns) {
       if (pr.id === focalRun.id) continue;
-      const c = pr.checkpoints[pr.checkpoints.length - 1];
-      const ro = c.rollouts.find(r => r.kind === 'best') || c.rollouts[0];
       const ls = RUN_LINE_STYLES[gi + 1] || RUN_LINE_STYLES[RUN_LINE_STYLES.length - 1];
+      gi++;
+      const c = pr.checkpoints[pr.checkpoints.length - 1];
+      const ro = c && (c.rollouts.find(r => r.kind === 'best') || c.rollouts[0]);
+      const vals = ro ? D.frameSignal(pr, c, ro, sig) : null;
+      if (!vals || !vals.length) continue;
       out.push({
-        runId: pr.id, name: pr.name,
-        values: D.frameSignal(pr, c, ro, sig),
+        runId: pr.id, name: pr.name, values: vals,
         isFocal: false, strokeColor: ls.color, dash: ls.dash, color: '',
       });
-      gi++;
     }
     return out;
   };
 
+  // Dropdown reflects what's actually in this run's signals.npz (capabilities.signals),
+  // minus cumulative_return which has its own dedicated chart on the left.
+  const metricOptions = useM(
+    () => (focalRun.capabilities?.signals || []).filter(k => k !== 'cumulative_return'),
+    [focalRun]
+  );
+  // The globally-selected metric may not exist for this run — fall back to the first.
+  const activeMetric = metricOptions.includes(metric) ? metric : metricOptions[0];
+
   const cumLines    = useM(() => buildLines('cumulative_return'), [focalRun, focalCkpt, focalRollout, pinnedRuns, signalVersion]);
-  const metricLines = useM(() => buildLines(metric),              [focalRun, focalCkpt, focalRollout, pinnedRuns, metric, signalVersion]);
+  const metricLines = useM(() => buildLines(activeMetric),        [focalRun, focalCkpt, focalRollout, pinnedRuns, activeMetric, signalVersion]);
 
-  const cumAtCursor   = cumLines[0]?.values?.[Math.min(frame, cumLines[0].values.length - 1)];
-  const metricAtCursor = metricLines[0]?.values?.[Math.min(frame, metricLines[0].values.length - 1)];
+  const cumFocal    = cumLines.find(l => l.isFocal);
+  const metricFocal = metricLines.find(l => l.isFocal);
+  const cumAtCursor    = cumFocal && cumFocal.values[Math.min(frame, cumFocal.values.length - 1)];
+  const metricAtCursor = metricFocal && metricFocal.values[Math.min(frame, metricFocal.values.length - 1)];
 
-  const metricLabel = METRIC_OPTIONS.find(m => m.key === metric)?.label || metric;
-  const ghostsCount = cumLines.length - 1;
+  const metricLabel = activeMetric ? signalLabel(activeMetric) : 'per-frame signal';
 
   return (
     <div className="row gap-3" style={{ padding: '20px 22px 16px' }}>
-      <FrameLevelChart
-        title="cumulative_return"
-        label={`- ${cumLines.length} pinned runs`}
-        lines={cumLines}
-        frame={frame}
-        focalLength={focalRollout.length}
-        setFrame={setFrame}
-        height={160}
-        valueAtCursor={cumAtCursor}
-      />
+      {/* cumulative_return (left) — its own dedicated chart */}
+      <div className="col" style={{ minWidth: 0, flex: 1 }}>
+        <div className="row" style={{ alignItems: 'baseline', gap: 8, marginBottom: 4, height: 22 }}>
+          <span className="display" style={{ fontSize: 13, fontWeight: 600 }}>cumulative_return</span>
+          <span className="muted" style={{ fontSize: 11 }}>{cumLines.length} run{cumLines.length === 1 ? '' : 's'}</span>
+          <span className="grow" />
+          {cumAtCursor != null && (
+            <span className="num" style={{ fontSize: 11.5, color: 'var(--accent)' }}>@{frame}: {fmtCursor(cumAtCursor)}</span>
+          )}
+        </div>
+        <FrameLevelChartBare
+          lines={cumLines}
+          frame={frame}
+          focalLength={focalRollout.length}
+          setFrame={setFrame}
+          height={160}
+          emptyTitle="cumulative_return unavailable"
+          emptyDetail="This rollout has no step-level signals (signals.npz absent)."
+        />
+      </div>
+
+      {/* selectable per-frame metric (right) */}
       <div className="col" style={{ flex: 1, minWidth: 0 }}>
         <div className="row" style={{ alignItems: 'baseline', gap: 8, marginBottom: 4, height: 22 }}>
           <span className="display" style={{ fontSize: 13, fontWeight: 600 }}>{metricLabel}</span>
@@ -198,37 +232,39 @@ function FrameChartPair({ focalRun, focalCkpt, focalRollout, frame, setFrame, pi
           <span className="grow" />
           {metricAtCursor != null && (
             <span className="num" style={{ fontSize: 11.5, color: 'var(--accent)' }}>
-              @{frame}: {Math.abs(metricAtCursor) >= 10 ? metricAtCursor.toFixed(0) : metricAtCursor.toFixed(2)}
+              @{frame}: {fmtCursor(metricAtCursor)}
             </span>
           )}
-          <select className="dropdown" value={metric} onChange={(e) => setMetric(e.target.value)}>
-            {METRIC_OPTIONS
-              .filter(o => {
-                const realSignals = focalRun.capabilities?.signals || [];
-                // If the run has real signals, only show those + cumulative_return (always derived).
-                // If no real signals (pure synthetic run), show everything.
-                return realSignals.length === 0 || realSignals.includes(o.key) || o.key === 'cumulative_return';
-              })
-              .map(o => <option key={o.key} value={o.key}>{o.label}</option>)}
-          </select>
+          {metricOptions.length > 0 && (
+            <select className="dropdown" value={activeMetric} onChange={(e) => setMetric(e.target.value)}>
+              {metricOptions.map(k => <option key={k} value={k}>{signalLabel(k)}</option>)}
+            </select>
+          )}
         </div>
-        {/* Reuse FrameLevelChart minus its own header (we built the header above) */}
         <FrameLevelChartBare
           lines={metricLines}
           frame={frame}
           focalLength={focalRollout.length}
           setFrame={setFrame}
           height={160}
+          emptyTitle={activeMetric ? `${signalLabel(activeMetric)} unavailable` : 'no per-frame signals'}
+          emptyDetail={activeMetric
+            ? 'This rollout has no signals.npz, or it omits this signal.'
+            : 'This run logged no per-frame signals (signals.npz absent).'}
         />
       </div>
     </div>
   );
 }
 
-// Bare version (no header) — used when the parent renders its own title row
-function FrameLevelChartBare({ lines, frame, focalLength, setFrame, height = 160 }) {
+// Bare version (no header) — used when the parent renders its own title row.
+// Renders a missing-data placeholder when there's no focal signal to draw,
+// rather than fabricating a curve.
+function FrameLevelChartBare({ lines, frame, focalLength, setFrame, height = 160, emptyTitle = 'no signal data', emptyDetail }) {
   const svgRef = React.useRef(null);
   const [hover, setHover] = useSt(null); // { frame: int, pct: float 0-1 }
+
+  const hasFocal = lines.some(l => l.isFocal && l.values && l.values.length);
   const w = 480;
   const h = height;
   const padL = 32, padR = 8, padT = 8, padB = 18;
@@ -246,6 +282,12 @@ function FrameLevelChartBare({ lines, frame, focalLength, setFrame, height = 160
     const pad = (hi - lo) * 0.08;
     return [lo - pad, hi + pad];
   }, [lines]);
+
+  // No focal signal for this rollout/metric — show a missing-data placeholder
+  // (after all hooks, to satisfy the Rules of Hooks).
+  if (!hasFocal) {
+    return <EmptyState minHeight={CHART_FILL} title={emptyTitle} detail={emptyDetail} />;
+  }
 
   const xScale = (f) => padL + (f / xMax) * innerW;
   const yScale = (v) => padT + (1 - (v - yLo) / (yHi - yLo)) * innerH;
@@ -361,60 +403,44 @@ function LossStrip({ run, ckpt }) {
 
   const losses = useM(() => {
     const tm = run.trainMetrics;
+    if (!tm || Object.keys(tm).length === 0) return {};
 
-    // Use real train_metrics.jsonl data when available
-    if (tm && Object.keys(tm).length > 0) {
-      // Skip non-loss metrics; prefer the most informative ones
-      const skip = new Set(['sps', 'epoch', 'wall_time_s']);
-      const preferred = ['policy_loss', 'value_loss', 'entropy', 'q1_loss', 'q2_loss'];
-      const available = Object.keys(tm).filter(k => !skip.has(k));
-      const ordered = [
-        ...preferred.filter(k => available.includes(k)),
-        ...available.filter(k => !preferred.includes(k)),
-      ].slice(0, 3);
+    // Skip non-loss metrics; prefer the most informative ones
+    const skip = new Set(['sps', 'epoch', 'wall_time_s']);
+    const preferred = ['policy_loss', 'value_loss', 'entropy', 'q1_loss', 'q2_loss'];
+    const available = Object.keys(tm).filter(k => !skip.has(k));
+    const ordered = [
+      ...preferred.filter(k => available.includes(k)),
+      ...available.filter(k => !preferred.includes(k)),
+    ].slice(0, 3);
 
-      const result = {};
-      for (const key of ordered) {
-        const entries = tm[key];
-        const arr = new Float32Array(entries.length);
-        entries.forEach((e, i) => { arr[i] = e.value; });
-        result[key] = arr;
-      }
-      return result;
+    const result = {};
+    for (const key of ordered) {
+      const entries = tm[key];
+      const arr = new Float32Array(entries.length);
+      entries.forEach((e, i) => { arr[i] = e.value; });
+      result[key] = arr;
     }
-
-    // Fallback: synthetic curves (for runs with no train_metrics.jsonl)
-    function gen(seed, opts = {}) {
-      const { floor = 0.1, samples = 200 } = opts;
-      const r = D.rng(seed);
-      const out = new Float32Array(samples);
-      for (let i = 0; i < samples; i++) {
-        const t = i / (samples - 1);
-        out[i] = floor + (1 - floor) * Math.exp(-2.8 * t) + (r() - 0.5) * 0.05;
-      }
-      return out;
-    }
-    const h = D.hashString(run.id);
-    return {
-      policy_loss: gen(h * 7,  { floor: 0.08 }),
-      value_loss:  gen(h * 11, { floor: 0.12 }),
-      entropy:     gen(h * 13, { floor: 0.40 }),
-    };
+    return result;
   }, [run]);
 
   const metricKeys = Object.keys(losses);
   const valAt = (arr) => arr[Math.min(Math.floor(ckptStepFrac * (arr.length - 1)), arr.length - 1)];
 
   return (
-    <div className="col border-t" style={{ flex: '0 0 auto', padding: '0 22px' }}>
-      <div className="row" style={{ alignItems: 'stretch' }}>
-        {metricKeys.map((key, i) => (
-          <React.Fragment key={key}>
-            {i > 0 && <div className="hr-v" />}
-            <LossChart title={key} values={losses[key]} atCkptValue={valAt(losses[key]).toFixed(3)} width={300} height={120} ckptStepFrac={ckptStepFrac} />
-          </React.Fragment>
-        ))}
-      </div>
+    <div className="col border-t" style={{ flex: '0 0 auto', padding: metricKeys.length ? '0 22px' : '16px 22px' }}>
+      {metricKeys.length === 0 ? (
+        <EmptyState title="no training metrics" detail="This run has no train_metrics.jsonl to chart." />
+      ) : (
+        <div className="row" style={{ alignItems: 'stretch' }}>
+          {metricKeys.map((key, i) => (
+            <React.Fragment key={key}>
+              {i > 0 && <div className="hr-v" />}
+              <LossChart title={key} values={losses[key]} atCkptValue={valAt(losses[key]).toFixed(3)} width={300} height={120} ckptStepFrac={ckptStepFrac} />
+            </React.Fragment>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

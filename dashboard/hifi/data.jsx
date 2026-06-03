@@ -3,26 +3,6 @@
 
 const D = {};
 
-// ── String hash (replaces the old parseInt(id, 16) which only worked for hex IDs) ──
-function hashString(str) {
-  let hash = 0;
-  for (let i = 0; i < str.length; i++) {
-    hash = (Math.imul(31, hash) + str.charCodeAt(i)) | 0;
-  }
-  return Math.abs(hash);
-}
-
-// ── Deterministic RNG — still used by LossStrip for now ─────────────────
-function rng(seed) {
-  let s = (seed | 0) || 1;
-  return () => {
-    s = (s + 0x9E3779B9) | 0;
-    let t = Math.imul(s ^ (s >>> 16), 0x21f0aaad);
-    t = Math.imul(t ^ (t >>> 15), 0x735a2d97);
-    return ((t ^ (t >>> 15)) >>> 0) / 4294967296;
-  };
-}
-
 // ── Format helpers (unchanged — still used by the UI) ───────────────────
 function fmtStep(s) {
   if (s >= 1e6) return `${(s / 1e6).toFixed(s % 1e6 === 0 ? 0 : 2)}M`;
@@ -202,8 +182,9 @@ async function loadSignals(rollout) {
       signals[signalName] = parseNpy(npyBuffer);
     }
 
-    // Derive cumulative_return by summing step_reward — it's not stored directly
-    if (signals.step_reward) {
+    // Prefer the stored cumulative_return; only derive it from step_reward
+    // when the run didn't write it directly (never fabricate when neither exists).
+    if (!signals.cumulative_return && signals.step_reward) {
       const sr  = signals.step_reward;
       const cum = new Float32Array(sr.length);
       let total = 0;
@@ -221,81 +202,14 @@ async function loadSignals(rollout) {
   }
 }
 
-// ── Per-frame signal synthesis ───────────────────────────────────────────
-const FRAME_CACHE = new Map();
-
-function frameKey(runId, step, kind, metric) {
-  return `${runId}-${step}-${kind}-${metric}`;
-}
-
+// ── Per-frame signal lookup ──────────────────────────────────────────────
+// Returns the real signal array for this rollout/metric, or null when the
+// rollout has no signals.npz or the metric isn't present in it. We never
+// synthesize stand-in data — callers render a "missing" state instead.
 function frameSignal(run, ckpt, rollout, metric) {
-  // If real signals are already loaded for this rollout, use them
-  if (rollout.dir) {
-    const real = SIGNAL_CACHE.get(rollout.dir);
-    if (real && real[metric] !== undefined) return real[metric];
-  }
-
-  // Otherwise fall back to the synthetic generator (cached to avoid recomputing)
-  const key = frameKey(run.id, ckpt.step, rollout.kind, metric);
-  if (FRAME_CACHE.has(key)) return FRAME_CACHE.get(key);
-
-  const len = rollout.length;
-  const arr = new Float32Array(len);
-  // Use hashString instead of parseInt(id, 16) so non-hex IDs work
-  const seed = (hashString(run.id) * 31 + ckpt.step / 1e5 + rollout.idx * 7 + metric.length) | 0;
-  const r = rng(seed);
-
-  const meanR = rollout.return / len;
-  const stumbleAt = Math.floor(len * (0.35 + r() * 0.45));
-  const stumbleWidth = 8 + Math.floor(r() * 8);
-
-  if (metric === 'cumulative_return') {
-    let cum = 0;
-    for (let i = 0; i < len; i++) {
-      let step_r = meanR + (r() - 0.5) * Math.abs(meanR) * 1.4;
-      if (Math.abs(i - stumbleAt) < stumbleWidth) step_r -= 1.0;
-      cum += step_r;
-      arr[i] = cum;
-    }
-  } else if (metric === 'step_reward') {
-    for (let i = 0; i < len; i++) {
-      let s = meanR + (r() - 0.5) * Math.abs(meanR) * 1.4;
-      if (Math.abs(i - stumbleAt) < stumbleWidth) s -= 1.0;
-      arr[i] = s;
-    }
-  } else if (metric === 'value') {
-    let v = 0.5;
-    const target = 0.4 + rollout.return / 2000;
-    for (let i = 0; i < len; i++) {
-      v = v * 0.92 + (r() * 0.4 + target - 0.2) * 0.08;
-      if (Math.abs(i - stumbleAt) < stumbleWidth * 3) v -= 0.018;
-      arr[i] = v;
-    }
-  } else if (metric === 'td_error') {
-    for (let i = 0; i < len; i++) {
-      let e = (r() - 0.5) * 0.4;
-      if (Math.abs(i - stumbleAt) < stumbleWidth) e += (r() - 0.5) * 2.5;
-      arr[i] = e;
-    }
-  } else if (metric === 'advantage') {
-    for (let i = 0; i < len; i++) {
-      let a = (r() - 0.5) * 0.6 + (i % 50 === 0 ? r() : 0);
-      if (Math.abs(i - stumbleAt) < stumbleWidth) a -= 1.2;
-      arr[i] = a;
-    }
-  } else if (metric === 'action_logp') {
-    for (let i = 0; i < len; i++) arr[i] = -0.5 - r() * 0.8;
-  } else if (metric === 'entropy') {
-    for (let i = 0; i < len; i++) {
-      const decay = 0.7 - (i / len) * 0.2;
-      arr[i] = decay + (r() - 0.5) * 0.1;
-    }
-  } else {
-    for (let i = 0; i < len; i++) arr[i] = r();
-  }
-
-  FRAME_CACHE.set(key, arr);
-  return arr;
+  if (!rollout || !rollout.dir || !metric) return null;
+  const real = SIGNAL_CACHE.get(rollout.dir);
+  return real && real[metric] !== undefined ? real[metric] : null;
 }
 
 // ── Lookup helpers (unchanged) ───────────────────────────────────────────
@@ -315,13 +229,11 @@ D.ready = loadAllRuns().then(runs => { D.RUNS = runs; });
 
 D.frameSignal    = frameSignal;
 D.loadSignals    = loadSignals;
-D.hashString     = hashString;
 D.getRun         = getRun;
 D.getCheckpoint  = getCheckpoint;
 D.getRollout     = getRollout;
 D.fmtStep        = fmtStep;
 D.fmtReward      = fmtReward;
 D.fmtTime        = fmtTime;
-D.rng            = rng;
 
 window.D = D;

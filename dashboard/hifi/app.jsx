@@ -38,7 +38,6 @@ function App() {
   const [frame, setFrame] = uS(init.frame || 0);
   const [playing, setPlaying] = uS(false);
   const [speed, setSpeed] = uS(1);
-  const [overlay, setOverlay] = uS('none');
   const [metric, setMetric] = uS(init.metric || 'value');
   const [query, setQuery] = uS('');
   const [darkMode, setDarkMode] = uS(() => {
@@ -81,16 +80,25 @@ function App() {
     setFrame(f => Math.min(f, rollout.length - 1));
   }, [rollout]);
 
-  // Load real signals when rollout changes, then bump signalVersion so charts redraw.
-  // signalVersion is passed to FrameChartPair and used as a useMemo dependency.
   const [signalVersion, setSignalVersion] = uS(0);
-  uE(() => {
-    if (!rollout) return;
-    D.loadSignals(rollout).then(() => setSignalVersion(v => v + 1));
-  }, [rollout]);
-
   const baselineRun = uM(() => D.RUNS.find(r => r.name === diffBaselineName) || null, [diffBaselineName]);
   const pinnedRuns = uM(() => D.RUNS.filter(r => pinnedIds.includes(r.id)), [pinnedIds]);
+
+  // Load real signals for the focal rollout AND each pinned run's charted rollout
+  // (last checkpoint, best episode — the ones FrameChartPair draws as ghosts), then
+  // bump signalVersion so the charts redraw. D.loadSignals caches, so re-runs are cheap.
+  // signalVersion is passed to FrameChartPair and used as a useMemo dependency.
+  uE(() => {
+    const rollouts = [];
+    if (rollout) rollouts.push(rollout);
+    for (const pr of pinnedRuns) {
+      const c = pr.checkpoints[pr.checkpoints.length - 1];
+      const ro = c && (c.rollouts.find(r => r.kind === 'best') || c.rollouts[0]);
+      if (ro) rollouts.push(ro);
+    }
+    if (rollouts.length === 0) return;
+    Promise.all(rollouts.map(r => D.loadSignals(r))).then(() => setSignalVersion(v => v + 1));
+  }, [rollout, pinnedRuns]);
 
   // Actions
   const togglePin = uCB((id) => {
@@ -198,7 +206,6 @@ function App() {
                 frame={frame} setFrame={setFrame}
                 playing={playing} setPlaying={setPlaying}
                 speed={speed} setSpeed={setSpeed}
-                overlay={overlay} setOverlay={setOverlay}
               />
               <EpisodePicker
                 ckpt={ckpt}

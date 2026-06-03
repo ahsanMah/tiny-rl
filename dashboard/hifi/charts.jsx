@@ -20,7 +20,20 @@ function buildPath(values, xScale, yScale, decim = 1) {
 // Run pin → ghost class index (matches CSS --run-N)
 const GHOST_CLASS = { 0: 'ghost-1', 1: 'ghost-2', 2: 'ghost-3' };
 
-// ── Hover tooltip (shared by FrameLevelChart + FrameLevelChartBare) ──
+// ── Missing-data placeholder ─────────────────────────────────────────
+// Shown wherever an artifact (signal / metric / video) is absent. We never
+// synthesize stand-in data; we state plainly that it isn't there.
+function EmptyState({ title, detail, mark = '∅', minHeight }) {
+  return (
+    <div className="empty-state" style={minHeight ? { minHeight } : undefined}>
+      <span className="empty-state__mark">{mark}</span>
+      <span className="label-eyebrow empty-state__title">{title}</span>
+      {detail && <span className="empty-state__detail">{detail}</span>}
+    </div>
+  );
+}
+
+// ── Hover tooltip (shared by the frame-level charts) ──
 function ChartTooltip({ lines, hoverFrame, hoverX }) {
   const fmt = (v) => {
     if (v == null || isNaN(v)) return '–';
@@ -70,187 +83,6 @@ function ChartTooltip({ lines, hoverFrame, hoverX }) {
           </div>
         );
       })}
-    </div>
-  );
-}
-
-// ── Frame-level chart (cumulative_return or metric) ──────────────────
-// Each comparison line is: { run, ckpt, rollout, color, isFocal }.
-function FrameLevelChart({
-  title, label, lines, frame, focalLength, setFrame, height = 152,
-  yLabel, yMin, yMax, metric, valueAtCursor,
-}) {
-  const svgRef = useRef(null);
-  const [hover, setHover] = useSt(null); // { frame: int, pct: float 0-1 }
-  const w = 480;
-  const h = height;
-  const padL = 32, padR = 8, padT = 8, padB = 18;
-  const innerW = w - padL - padR;
-  const innerH = h - padT - padB;
-
-  // Compute x_max = max length of any line in view
-  const xMax = useMemo(() => Math.max(...lines.map(l => l.values.length), focalLength || 0), [lines, focalLength]);
-
-  // Compute y range if not provided
-  const [yLo, yHi] = useMemo(() => {
-    if (yMin != null && yMax != null) return [yMin, yMax];
-    let lo = Infinity, hi = -Infinity;
-    for (const ln of lines) {
-      for (let i = 0; i < ln.values.length; i += 4) {
-        if (ln.values[i] < lo) lo = ln.values[i];
-        if (ln.values[i] > hi) hi = ln.values[i];
-      }
-    }
-    if (lo === Infinity) { lo = 0; hi = 1; }
-    const pad = (hi - lo) * 0.08;
-    return [lo - pad, hi + pad];
-  }, [lines, yMin, yMax]);
-
-  const xScale = (f) => padL + (f / xMax) * innerW;
-  const yScale = (v) => padT + (1 - (v - yLo) / (yHi - yLo)) * innerH;
-
-  // Y ticks (3 lines)
-  const yTicks = useMemo(() => {
-    const ticks = [];
-    for (let i = 0; i < 3; i++) {
-      const v = yLo + ((2 - i) / 2) * (yHi - yLo);
-      ticks.push(v);
-    }
-    return ticks;
-  }, [yLo, yHi]);
-
-  // X ticks at sensible frame counts
-  const xTicks = useMemo(() => {
-    const step = xMax > 1500 ? 400 : (xMax > 500 ? 200 : 100);
-    const out = [0];
-    for (let i = step; i < xMax; i += step) out.push(i);
-    out.push(xMax);
-    return out;
-  }, [xMax]);
-
-  // Scrub on chart click
-  const onPointer = useCB((e) => {
-    if (!svgRef.current || !setFrame) return;
-    const rect = svgRef.current.getBoundingClientRect();
-    const x = ((e.clientX - rect.left) / rect.width) * w;
-    const f = Math.max(0, Math.min(focalLength - 1, Math.round(((x - padL) / innerW) * xMax)));
-    setFrame(f);
-  }, [setFrame, focalLength, xMax]);
-
-  const fmtNum = (v) => {
-    if (Math.abs(v) >= 100) return v.toFixed(0);
-    if (Math.abs(v) >= 10)  return v.toFixed(1);
-    return v.toFixed(2);
-  };
-
-  const onHover = (e) => {
-    if (!svgRef.current) return;
-    const rect = svgRef.current.getBoundingClientRect();
-    const pct = (e.clientX - rect.left) / rect.width;
-    const xVB = pct * w;
-    const f = Math.max(0, Math.min(xMax - 1, Math.round(((xVB - padL) / innerW) * xMax)));
-    setHover({ frame: f, pct });
-  };
-
-  return (
-    <div className="col" style={{ minWidth: 0, flex: 1 }}>
-      {/* Header */}
-      <div className="row" style={{ alignItems: 'baseline', gap: 8, marginBottom: 4, height: 22 }}>
-        <span className="display" style={{ fontSize: 13, fontWeight: 600 }}>{title}</span>
-        {label && <span className="muted" style={{ fontSize: 11 }}>{label}</span>}
-        <span className="grow" />
-        {valueAtCursor != null && (
-          <span className="num" style={{ fontSize: 11.5, color: 'var(--accent)' }}>
-            @{frame}: {fmtNum(valueAtCursor)}
-          </span>
-        )}
-      </div>
-      <div style={{ position: 'relative' }}>
-      <div className="card" style={{ borderRadius: 3, padding: 0 }}>
-        <svg
-          ref={svgRef}
-          className="chart-svg"
-          viewBox={`0 0 ${w} ${h}`}
-          width="100%"
-          height={h}
-          preserveAspectRatio="none"
-          onMouseDown={(e) => {
-            onPointer(e);
-            const move = (ev) => onPointer(ev);
-            const up = () => {
-              window.removeEventListener('mousemove', move);
-              window.removeEventListener('mouseup', up);
-            };
-            window.addEventListener('mousemove', move);
-            window.addEventListener('mouseup', up);
-          }}
-          onMouseMove={onHover}
-          onMouseLeave={() => setHover(null)}
-          style={{ cursor: 'col-resize', display: 'block', height: 'clamp(160px, calc(13vw + 55px), 320px)' }}
-        >
-          {/* Y gridlines + labels */}
-          {yTicks.map((v, i) => (
-            <g key={i}>
-              <line x1={padL} y1={yScale(v)} x2={w - padR} y2={yScale(v)} className="grid" />
-              <text x={4} y={yScale(v) + 3.5} className="axis-text">{fmtNum(v)}</text>
-            </g>
-          ))}
-          {/* zero line emphasis if range straddles 0 */}
-          {yLo < 0 && yHi > 0 && (
-            <line x1={padL} y1={yScale(0)} x2={w - padR} y2={yScale(0)} stroke="rgba(255,255,255,.18)" strokeWidth="0.8" />
-          )}
-          {/* X axis */}
-          <line x1={padL} y1={padT + innerH} x2={w - padR} y2={padT + innerH} className="axis" />
-          {xTicks.map((f, i) => (
-            <text key={i} x={xScale(f) - 8} y={h - 4} className="axis-text">{f >= 1000 ? `${(f/1000).toFixed(f % 1000 === 0 ? 0 : 1)}k` : f}</text>
-          ))}
-
-          {/* Area fill + ghost lines (drawn first so focal stays on top) */}
-          {lines.filter(l => !l.isFocal).map((ln, i) => {
-            const cls = GHOST_CLASS[i % 3];
-            return (
-              <g key={ln.runId}>
-                <path d={buildPath(ln.values, xScale, yScale, 3)} className={cls}
-                  style={{ stroke: ln.color }} />
-                {/* End marker */}
-                <line
-                  x1={xScale(ln.values.length - 1)}
-                  y1={yScale(ln.values[ln.values.length - 1]) - 4}
-                  x2={xScale(ln.values.length - 1)}
-                  y2={yScale(ln.values[ln.values.length - 1]) + 4}
-                  stroke={ln.color} opacity="0.7"
-                />
-              </g>
-            );
-          })}
-          {/* Focal line */}
-          {lines.filter(l => l.isFocal).map((ln) => (
-            <path key={ln.runId} d={buildPath(ln.values, xScale, yScale, 2)} className="focal" />
-          ))}
-
-          {/* Hover crosshair */}
-          {hover != null && (
-            <line
-              x1={xScale(hover.frame)} y1={padT}
-              x2={xScale(hover.frame)} y2={padT + innerH}
-              stroke="var(--ink-3)" strokeWidth="0.7" strokeDasharray="2 3"
-              style={{ pointerEvents: 'none' }}
-            />
-          )}
-          {/* Playhead */}
-          {focalLength > 0 && (
-            <g>
-              <line x1={xScale(frame)} y1={padT} x2={xScale(frame)} y2={padT + innerH} className="playhead" />
-              <circle cx={xScale(frame)} cy={padT + innerH - 6} r="3" fill="var(--accent)"
-                filter="drop-shadow(0 0 3px var(--accent))" />
-            </g>
-          )}
-        </svg>
-      </div>
-      {hover != null && (
-        <ChartTooltip lines={lines} hoverFrame={hover.frame} hoverX={hover.pct} />
-      )}
-      </div>
     </div>
   );
 }
@@ -385,7 +217,7 @@ function Sparkline({ values, width = 64, height = 16, color = 'var(--ink-2)', st
 }
 
 window.ChartTooltip = ChartTooltip;
-window.FrameLevelChart = FrameLevelChart;
+window.EmptyState = EmptyState;
 window.LossChart = LossChart;
 window.CheckpointSparkbar = CheckpointSparkbar;
 window.Sparkline = Sparkline;
