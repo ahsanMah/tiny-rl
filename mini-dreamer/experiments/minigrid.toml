@@ -1,0 +1,35 @@
+[env]
+env_id = "MiniGrid-Empty-8x8-v0"
+
+[dataset]
+rollout_steps = 20000
+tile_size = 8
+seed = 0
+clip_length = 8
+clip_stride = 1
+preview_dir = "logs/minigrid-v1/previews"
+preview_clips = 4
+preview_fps = 2.0
+
+[model]
+base_channels = 32
+num_transformer_blocks = 4
+use_wavelet = true
+max_context_size = 7
+
+[train]
+save_dir = "logs/minigrid-v1"
+train_steps = 10000
+batch_size = 16
+learning_rate = 3e-4
+log_every = 100
+log_tensorboard = true
+sampling_distribution  ="logitnorm"
+
+
+[generate]
+load_dir = "logs/minigrid-v1"
+save_dir = "logs/minigrid-v1/generated"
+generate_new_frames = 2
+generate_num_steps = 32
+num_samples = 1

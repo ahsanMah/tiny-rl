@@ -5,15 +5,7 @@ from pathlib import Path
 import imageio.v2 as iio
 import mlx.core as mx
 import numpy as np
-
-
-def require_valid_unet_shape(frames: int, height: int, width: int) -> None:
-    dims = {"frames": frames, "height": height, "width": width}
-    for name, value in dims.items():
-        if value < 4:
-            raise ValueError(f"{name} must be >= 4, got {value}")
-        if value % 4 != 0:
-            raise ValueError(f"{name} must be divisible by 4, got {value}")
+from PIL import Image, ImageDraw, ImageFont
 
 
 def make_random_video_dataset(
@@ -25,7 +17,6 @@ def make_random_video_dataset(
     channels: int,
     seed: int = 0,
 ) -> mx.array:
-    require_valid_unet_shape(frames, height, width)
     mx.random.seed(seed)
     return mx.random.normal((num_videos, frames, height, width, channels))
 
@@ -93,7 +84,6 @@ def frames_to_clips(
     *,
     clip_length: int,
     clip_stride: int | None = None,
-    max_clips: int | None = None,
 ) -> mx.array:
     if frames.ndim != 4:
         raise ValueError(f"Expected frames with shape (T, H, W, C), got {frames.shape}")
@@ -102,14 +92,13 @@ def frames_to_clips(
             f"Need at least {clip_length} frames, but only loaded {frames.shape[0]}"
         )
 
-    clip_stride = clip_length if clip_stride is None else clip_stride
-    require_valid_unet_shape(clip_length, int(frames.shape[1]), int(frames.shape[2]))
+    clip_stride = 1 if clip_stride is None else clip_stride
+    if clip_stride <= 0:
+        raise ValueError(f"clip_stride must be > 0, got {clip_stride}")
 
     clips = []
     for start in range(0, frames.shape[0] - clip_length + 1, clip_stride):
         clips.append(frames[start : start + clip_length])
-        if max_clips is not None and len(clips) >= max_clips:
-            break
 
     if not clips:
         raise ValueError("No clips could be formed from the loaded video")
@@ -135,7 +124,6 @@ def load_video_dataset(
         frames,
         clip_length=clip_length,
         clip_stride=clip_stride,
-        max_clips=max_clips,
     )
     info["num_clips"] = int(clips.shape[0])
     info["clip_length"] = int(clips.shape[1])
@@ -146,12 +134,97 @@ def to_uint8_video(x: np.ndarray) -> np.ndarray:
     return np.clip((x + 1.0) * 127.5, 0.0, 255.0).astype(np.uint8)
 
 
+def _load_overlay_font() -> ImageFont.ImageFont:
+    try:
+        return ImageFont.load_default(size=10)
+    except TypeError:
+        return ImageFont.load_default()
+
+
+def _annotate_action(frame: np.ndarray, action: int) -> np.ndarray:
+    if frame.ndim != 3 or frame.shape[-1] not in (3, 4):
+        return frame
+    mode = "RGB" if frame.shape[-1] == 3 else "RGBA"
+    img = Image.fromarray(frame, mode=mode)
+    draw = ImageDraw.Draw(img)
+    draw.text(
+        (1, 1),
+        f"a={int(action)}",
+        fill=(255, 255, 255),
+        stroke_width=1,
+        stroke_fill=(0, 0, 0),
+        font=_load_overlay_font(),
+    )
+    return np.asarray(img)
+
+
+def save_diffusion_mp4(
+    context_frames: mx.array,
+    intermediates: list[mx.array],
+    output_path: str | Path,
+    *,
+    fps: float = 8.0,
+) -> None:
+    """Save a diffusion denoising trajectory as an MP4.
+
+    Each video frame shows a horizontal strip:
+        [ctx_0 | ctx_1 | … | ctx_L-1 ‖ generated_at_step_t]
+
+    Context frames are static across all video frames; the generated column
+    animates from pure noise (step 0) to the clean prediction (step N-1).
+    Multiple batch items are stacked vertically.
+
+    Args:
+        context_frames: ``(B, L, H, W, C)`` conditioning frames (static).
+        intermediates: list of ``(B, 1, H, W, C)`` arrays, one per denoising
+            step, as returned by ``sample_euler(return_intermediates=True)``.
+        output_path: destination ``.mp4`` file path.
+        fps: playback speed of the output video.
+    """
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    ctx_np = to_uint8_video(np.asarray(context_frames))  # (B, L, H, W, C)
+    B, L, H, W, C = ctx_np.shape
+
+    def _to_rgb(arr: np.ndarray) -> np.ndarray:
+        """Ensure last dim is 3 (broadcast grayscale, strip alpha)."""
+        if arr.shape[-1] == 1:
+            return np.repeat(arr, 3, axis=-1)
+        if arr.shape[-1] == 4:
+            return arr[..., :3]
+        return arr
+
+    ctx_rgb = _to_rgb(ctx_np)  # (B, L, H, W, 3)
+    sep = np.zeros((H, 2, 3), dtype=np.uint8)  # thin black column between ctx and gen
+
+    video_frames: list[np.ndarray] = []
+    for step_x in intermediates:
+        gen_np = to_uint8_video(np.asarray(step_x))  # (B, 1, H, W, C)
+        gen_rgb = _to_rgb(gen_np[:, 0])  # (B, H, W, 3)
+
+        rows: list[np.ndarray] = []
+        for b in range(B):
+            ctx_strip = np.concatenate(
+                [ctx_rgb[b, i] for i in range(L)], axis=1
+            )  # (H, L*W, 3)
+            row = np.concatenate(
+                [ctx_strip, sep, gen_rgb[b]], axis=1
+            )  # (H, L*W+2+W, 3)
+            rows.append(row)
+
+        video_frames.append(np.concatenate(rows, axis=0))  # (B*H, total_W, 3)
+
+    iio.mimsave(str(output_path), video_frames, fps=fps)
+
+
 def save_clip_previews(
     clips: mx.array,
     output_dir: str | Path,
     *,
     max_clips: int = 4,
     fps: float = 8.0,
+    actions: mx.array | np.ndarray | None = None,
 ) -> None:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -163,6 +236,22 @@ def save_clip_previews(
     num_clips, num_frames, height, width, channels = clips_uint8.shape
     if channels not in (1, 3, 4):
         raise ValueError(f"Unsupported channel count for preview: {channels}")
+
+    if actions is not None and channels in (3, 4):
+        actions_np = np.asarray(actions)[:preview_count]
+        if actions_np.shape[:2] != (num_clips, num_frames):
+            raise ValueError(
+                f"actions shape {tuple(actions_np.shape)} does not match clips "
+                f"({num_clips}, {num_frames})"
+            )
+        annotated = np.empty_like(clips_uint8)
+        for clip_idx in range(num_clips):
+            for frame_idx in range(num_frames):
+                annotated[clip_idx, frame_idx] = _annotate_action(
+                    clips_uint8[clip_idx, frame_idx],
+                    int(actions_np[clip_idx, frame_idx]),
+                )
+        clips_uint8 = annotated
 
     sheet = np.zeros((num_clips * height, num_frames * width, channels), dtype=np.uint8)
     for clip_idx in range(num_clips):

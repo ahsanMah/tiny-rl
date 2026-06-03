@@ -99,3 +99,4 @@ Experiments toward a diffusion-based world model for model-based RL. Trains a vi
 - Python ≥ 3.12, managed with [uv](https://github.com/astral-sh/uv)
 - Node.js + npm (dashboard only)
 - macOS recommended — MLX is Apple Silicon-native
+>>>>>>> main

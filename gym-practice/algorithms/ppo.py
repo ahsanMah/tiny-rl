@@ -522,13 +522,24 @@ def run(
             "ema": ema,
         },
         dashboard_capabilities={
-            "signals": ["step_reward"],
-            "value_estimate_kind": "state_value",
+            "signals": ["step_reward", "cumulative_return", "value_estimate"],
+            "signal_semantics": {
+                "step_reward": {"unit": "reward"},
+                "cumulative_return": {"unit": "return"},
+                "value_estimate": {"unit": "return"},
+            },
         },
     )
     eval_video_logger = VideoLogger(
         env_name=env_name, exp_folder=f"{eval_log_dir}/{metrics_logger.run_name}"
     )
+
+    eval_signal_semantics = {
+        "value_estimate": {"unit": "return"},
+    }
+
+    def _eval_value_estimate(obs, action):
+        return float(value_fn(obs).item())
 
     state_min = env.single_observation_space.low
     state_max = env.single_observation_space.high
@@ -538,7 +549,12 @@ def run(
     # First evaluation pass
     global_step = 0
     if record_eval_videos:
-        eval_video_logger.record_evaluation(policy, global_step)
+        eval_video_logger.record_evaluation(
+            policy,
+            global_step,
+            extra_signal_fns={"value_estimate": _eval_value_estimate},
+            signal_semantics=eval_signal_semantics,
+        )
         metrics_logger.log_video(
             global_step,
             eval_video_logger.exp_folder,
@@ -711,7 +727,12 @@ def run(
         # logger.info(f"Avg Policy Gradient Norm: {avg_grad_norms:.2f}")
 
         if epoch % 5 == 0 and record_eval_videos:
-            eval_video_logger.record_evaluation(policy, global_step)
+            eval_video_logger.record_evaluation(
+                policy,
+                global_step,
+                extra_signal_fns={"value_estimate": _eval_value_estimate},
+                signal_semantics=eval_signal_semantics,
+            )
             metrics_logger.log_video(
                 global_step,
                 eval_video_logger.exp_folder,
@@ -722,7 +743,12 @@ def run(
 
     # Final evaluation pass
     if record_eval_videos:
-        eval_video_logger.record_evaluation(policy, global_step)
+        eval_video_logger.record_evaluation(
+            policy,
+            global_step,
+            extra_signal_fns={"value_estimate": _eval_value_estimate},
+            signal_semantics=eval_signal_semantics,
+        )
         metrics_logger.log_video(
             global_step,
             eval_video_logger.exp_folder,
