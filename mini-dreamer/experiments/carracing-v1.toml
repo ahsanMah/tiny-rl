@@ -1,0 +1,33 @@
+[env]
+env_id = "CarRacing-v3"
+
+[dataset]
+rollout_steps = 20000
+seed = 0
+clip_length = 4
+clip_stride = 1
+preview_dir = "logs/carracing-v1/previews"
+preview_clips = 4
+preview_fps = 8.0
+frame_skip = 4
+
+[model]
+base_channels = 32
+num_transformer_blocks = 4
+use_wavelet = true
+
+[train]
+save_dir = "logs/carracing-v1"
+train_steps = 100000
+batch_size = 8
+learning_rate = 3e-4
+log_every = 100
+log_tensorboard = true
+sampling_distribution = "logitnorm"
+
+[generate]
+load_dir = "logs/carracing-v1"
+save_dir = "logs/carracing-v1/generated"
+generate_new_frames = 2
+generate_num_steps = 32
+num_samples = 8
