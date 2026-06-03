@@ -468,7 +468,7 @@ def _bench(model, x, t, a, num_runs: int = 20) -> None:
 
 
 if __name__ == "__main__":
-    x = mx.random.normal((8, 4, 96, 96, 1))
+    x = mx.random.normal((8, 8, 96, 96, 1))
     t = mx.ones((8, 1))
     a = mx.ones((8, 4), dtype=mx.uint8)
 
