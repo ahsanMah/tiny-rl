@@ -394,37 +394,42 @@ def train_vae_on_dataset(
     log10_max = 20.0 * float(mx.log10(mx.array(2.0)))
     avg_loss = 0.0
     start = time.time()
-    dummy_actions = mx.zeros((dataset_size, 1), dtype=mx.int8)
+    last_log_time = start
+    last_log_step = 0
+    batch_size = train_config.batch_size
+
     for step in range(1, train_config.vae_train_steps + 1):
-        batch, _ = sample_batch(
-            train_clips, dummy_actions[:train_size], train_config.batch_size
-        )
-        loss = float(trainer.compiled_train_step(batch))
+        indices = mx.random.randint(0, train_clips.shape[0], shape=(batch_size,))
+        batch = train_clips[indices]
+        loss = trainer.compiled_train_step(batch)
         avg_loss += loss
+        mx.async_eval(loss, avg_loss)
 
         if (
             step == 1
             or step % train_config.log_every == 0
             or step == train_config.vae_train_steps
         ):
-            elapsed = time.time() - start
-            avg_loss /= train_config.log_every
-            steps_per_sec = step / max(elapsed, 1e-8)
+            indices = mx.random.randint(0, val_clips.shape[0], shape=(batch_size,))
+            val_batch = val_clips[indices]
 
-            val_batch, _ = sample_batch(
-                val_clips,
-                dummy_actions[train_size:],
-                min(train_config.batch_size, int(val_clips.shape[0])),
-            )
             recon, mean, logvar = model(val_batch)
             recon_mse = mx.mean((recon - val_batch) ** 2)
             psnr = log10_max - 10.0 * mx.log10(mx.maximum(recon_mse, 1e-12))
             kl = kl_divergence(mean, logvar)
+            mx.async_eval(psnr, kl)
+
+            loss_f = float(loss)
+            avg_loss_f = float(avg_loss) / train_config.log_every
             psnr_f, kl_f = float(psnr), float(kl)
+
+            now = time.time()
+            window_steps = step - last_log_step
+            steps_per_sec = window_steps / max(now - last_log_time, 1e-8)
 
             print(
                 f"step={step:5d} steps/s={steps_per_sec:.2f} "
-                f"loss={loss:.4f} avg={avg_loss:.4f} "
+                f"loss={loss_f:.4f} avg={avg_loss_f:.4f} "
                 f"val_psnr={psnr_f:.2f}dB val_kl={kl_f:.4f}"
             )
             if train_logger is not None:
@@ -444,7 +449,9 @@ def train_vae_on_dataset(
                     {0.0: recon[:, -1]},
                 )
             avg_loss = 0.0
-            mx.clear_cache()
+            # mx.clear_cache()
+            last_log_step = step
+            last_log_time = time.time()
 
     # Latent-scale calibration pass on the trianing data (uses EMA weights).
     latent_scale = _calibrate_latent_scale(
