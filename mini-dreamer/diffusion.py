@@ -7,7 +7,7 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from pprint import pp, pprint
-from typing import Literal, Tuple
+from typing import Callable, Literal, Tuple
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -318,8 +318,12 @@ def sample_euler_to_mp4(
     output_path: str | Path,
     num_steps: int = 32,
     fps: float = 8.0,
+    decode_fn: Callable | None = None,
 ) -> None:
     """Generate one new frame and save the full denoising trajectory as an MP4.
+
+    If `decode_fn` is set, the latent conditioning clip and each latent
+    intermediate are decoded to pixels before the MP4 is written.
 
     The MP4 shows the context frames as static columns on the left and the
     evolving generated frame on the right — one MP4 frame per Euler step.
@@ -338,6 +342,9 @@ def sample_euler_to_mp4(
         num_steps=num_steps,
         return_intermediates=True,
     )
+    if decode_fn is not None:
+        conditioning_clips = decode_fn(conditioning_clips)
+        intermediates = [decode_fn(x) for x in intermediates]
     save_diffusion_mp4(conditioning_clips, intermediates, output_path, fps=fps)
 
 
@@ -454,8 +461,13 @@ def generate_env_video(
     save_dir: str | Path,
     seed: int = 0,
     actions_pool: list[int] | None = None,
+    decode_fn: Callable | None = None,
 ) -> mx.array:
-    """Autoregressively extend `initial_clip` using random actions for new frames."""
+    """Autoregressively extend `initial_clip` using random actions for new frames.
+
+    If `decode_fn` is set, generation runs in latent space and `decode_fn` maps
+    latents -> pixels right before previews are saved (default None = pixel space).
+    """
     rng = np.random.default_rng(seed)
     initial_actions_np = np.asarray(initial_actions)
     batch_size = int(initial_clip.shape[0])
@@ -478,8 +490,9 @@ def generate_env_video(
         actions=full_actions,
         num_steps=num_steps,
     )
+    preview_clips = decode_fn(generated) if decode_fn is not None else generated
     save_clip_previews(
-        generated,
+        preview_clips,
         save_dir,
         max_clips=batch_size,
         fps=sample_fps,
@@ -492,6 +505,7 @@ def generate_env_video(
         output_path=f"{save_dir}/denoising.mp4",
         num_steps=num_steps,
         fps=num_steps / 4.0,
+        decode_fn=decode_fn,
     )
     print(f"saved generated video to: {save_dir}")
     return generated
@@ -504,6 +518,7 @@ def train_on_dataset(
     model_config: ModelConfig | None = None,
     train_config: TrainConfig | None = None,
     sample_fps: float = 8.0,
+    decode_fn: Callable | None = None,
 ):
     model_config = ModelConfig() if model_config is None else model_config
     train_config = TrainConfig() if train_config is None else train_config
@@ -646,6 +661,8 @@ def train_on_dataset(
             actions=val_conditioning_actions,
             num_steps=train_config.sample_steps,
         )
+        if decode_fn is not None:
+            samples = decode_fn(samples)
         save_clip_previews(
             samples,
             train_config.save_dir,

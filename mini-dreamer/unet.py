@@ -284,7 +284,7 @@ class TransformerBlock(nn.Module):
         return self.ff(x)
 
 
-class WaveletDownsampleConv(nn.Module):
+class WaveletDownsampleConv:
     """Conv2d-based 2D Haar DWT. Grouped depthwise 2×2 strided conv variant of WaveletDownsample."""
 
     def __init__(self, in_channels: int):
@@ -315,7 +315,7 @@ class WaveletDownsampleConv(nn.Module):
         return out.reshape(B, T, H // 2, W // 2, C * 4)
 
 
-class WaveletUpsample(nn.Module):
+class WaveletUpsample:
     """Inverse 2D Haar DWT: (B, T, H/2, W/2, 4C) → (B, T, H, W, C)."""
 
     def __call__(self, x: mx.array) -> mx.array:

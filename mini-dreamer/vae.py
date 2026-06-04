@@ -34,6 +34,8 @@ class VAETrainConfig:
     learning_rate: float = 3e-4
     kl_weight: float = 1e-6
     recon_loss: ReconLoss = "l1"
+    wavelet_loss: bool = False
+    detail_weight: float = 0.0
     ema_decay: float = 0.999
     save_dir: str | None = None
     log_every: int = 50
@@ -206,12 +208,19 @@ class VAETrainer:
         ema_decay: float = 0.999,
         kl_weight: float = 1e-6,
         recon_loss: ReconLoss = "l1",
+        wavelet_loss: bool = False,
+        detail_weight: float = 1.0,
     ):
         self.model = model
         self.ema_model = ema_model
         self.ema_decay = ema_decay
         self.kl_weight = kl_weight
         self.recon_loss = recon_loss
+        self.wavelet_loss = wavelet_loss
+        self.detail_weight = detail_weight
+        # Fixed Haar DWT for wavelet-domain recon loss (filters are constants,
+        # not a trainable parameter — see WaveletDownsampleConv).
+        self.dwt = WaveletDownsampleConv(model.out_channels) if wavelet_loss else None
         self.max_grad_norm = max_grad_norm
         self.optimizer = optim.AdamW(
             learning_rate=learning_rate, weight_decay=weight_decay
@@ -238,9 +247,26 @@ class VAETrainer:
             case "l1+l2":
                 return mx.mean(mx.abs(recon - x)) + mx.mean((recon - x) ** 2)
 
+    def _wavelet_detail(self, recon: mx.array, x: mx.array) -> mx.array:
+        """Recon error on the single-level Haar high-frequency sub-bands (LH/HL/HH).
+
+        Added on top of the pixel recon loss to up-weight high-frequency detail
+        (e.g. small sharp objects). Excludes the LL band since the pixel loss
+        already covers low frequencies. ``2.0 *`` rescales the 0.25-scaled filters
+        to an orthonormal Haar so the coefficients carry true sub-band energy.
+        """
+        C = self.model.out_channels
+        wr = 2.0 * self.dwt(recon)
+        wt = 2.0 * self.dwt(x)
+        return self._recon(wr[..., C:], wt[..., C:])
+
     def loss(self, batch: mx.array) -> mx.array:
         recon, mean, logvar = self.model(batch)
         recon_loss = self._recon(recon, batch)
+        if self.wavelet_loss:
+            recon_loss = recon_loss + self.detail_weight * self._wavelet_detail(
+                recon, batch
+            )
         kl = kl_divergence(mean, logvar)
         return recon_loss + self.kl_weight * kl
 
@@ -356,6 +382,8 @@ def train_vae_on_dataset(
         ema_decay=train_config.ema_decay,
         kl_weight=train_config.kl_weight,
         recon_loss=train_config.recon_loss,
+        wavelet_loss=train_config.wavelet_loss,
+        detail_weight=train_config.detail_weight,
     )
 
     print("dataset:", tuple(frames.shape))
