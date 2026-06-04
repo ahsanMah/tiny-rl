@@ -1,13 +1,13 @@
 import tomllib
 import types
 import typing
-import wave
 from dataclasses import MISSING, asdict, dataclass, fields
 from pathlib import Path
 from pprint import pprint
 from typing import Any
 
 import click
+import mlx.core as mx
 
 from data import make_dataset, make_env
 from diffusion import (
@@ -20,6 +20,15 @@ from diffusion import (
     train_on_dataset,
 )
 from logger_utils import RLLogger
+from vae import (
+    VAEModelConfig,
+    VAETrainConfig,
+    decode_latents,
+    encode_clips,
+    load_vae,
+    save_vae,
+    train_vae_on_dataset,
+)
 from video_utils import save_clip_previews
 
 
@@ -52,12 +61,20 @@ class GenerateConfig:
     not_use_ema: bool = False
 
 
+@dataclass(frozen=True)
+class LatentConfig:
+    vae_dir: str | None = None
+
+
 _SECTION_DATACLASSES = {
     "env": EnvConfig,
     "dataset": DatasetConfig,
     "model": ModelConfig,
     "train": TrainConfig,
     "generate": GenerateConfig,
+    "vae_model": VAEModelConfig,
+    "vae_train": VAETrainConfig,
+    "latent": LatentConfig,
 }
 CONFIG_SCHEMA = {
     section: {f.name for f in fields(cls)}
@@ -104,22 +121,35 @@ def _from_resolved(cls, resolved: dict[str, Any]):
 
 def _build_train_configs(
     resolved: dict[str, Any],
-) -> tuple[EnvConfig, DatasetConfig, ModelConfig, TrainConfig]:
+) -> tuple[EnvConfig, DatasetConfig, ModelConfig, TrainConfig, LatentConfig]:
     return (
         _from_resolved(EnvConfig, resolved),
         _from_resolved(DatasetConfig, resolved),
         _from_resolved(ModelConfig, resolved),
         _from_resolved(TrainConfig, resolved),
+        _from_resolved(LatentConfig, resolved),
     )
 
 
 def _build_generate_configs(
     resolved: dict[str, Any],
-) -> tuple[EnvConfig, DatasetConfig, GenerateConfig]:
+) -> tuple[EnvConfig, DatasetConfig, GenerateConfig, LatentConfig]:
     return (
         _from_resolved(EnvConfig, resolved),
         _from_resolved(DatasetConfig, resolved),
         _from_resolved(GenerateConfig, resolved),
+        _from_resolved(LatentConfig, resolved),
+    )
+
+
+def _build_vae_train_configs(
+    resolved: dict[str, Any],
+) -> tuple[EnvConfig, DatasetConfig, VAEModelConfig, VAETrainConfig]:
+    return (
+        _from_resolved(EnvConfig, resolved),
+        _from_resolved(DatasetConfig, resolved),
+        _from_resolved(VAEModelConfig, resolved),
+        _from_resolved(VAETrainConfig, resolved),
     )
 
 
@@ -189,21 +219,23 @@ def _dataclass_options(cls, *, exclude: frozenset[str] = frozenset()):
 
 
 @cli.command(name="train")
-@_config_option(["env", "dataset", "model", "train"])
+@_config_option(["env", "dataset", "model", "train", "latent"])
 @_dataclass_options(EnvConfig)
 @_dataclass_options(DatasetConfig)
 @_dataclass_options(ModelConfig)
 @_dataclass_options(TrainConfig)
+@_dataclass_options(LatentConfig)
 @click.pass_context
 def train_cmd(ctx: click.Context, **kwargs) -> None:
     """Train the diffusion world model on MiniGrid rollouts."""
-    env_config, dataset_config, model_config, train_config = _build_train_configs(
-        ctx.params
+    env_config, dataset_config, model_config, train_config, latent_config = (
+        _build_train_configs(ctx.params)
     )
 
     print("Using data config:")
     pprint(dataset_config)
     env = make_env(env_config.env_id)
+    print(f"env: {env_config.env_id}")
     clips, action_clips = make_dataset(
         env=env,
         num_steps=dataset_config.rollout_steps,
@@ -212,7 +244,12 @@ def train_cmd(ctx: click.Context, **kwargs) -> None:
         clip_length=dataset_config.clip_length,
         clip_stride=dataset_config.clip_stride,
     )
-    print(f"env: {env_config.env_id}")
+    print(f"rollout resulted in {clips.shape[0]} clips")
+    # Drop last samples
+    drop_size = clips.shape[0] % train_config.batch_size
+    print(f"dropping {drop_size} samples")
+    clips = clips[:-drop_size]
+    action_clips = action_clips[:-drop_size]
     print(f"clips shape: {tuple(clips.shape)}")
     print(f"action clips shape: {tuple(action_clips.shape)}")
 
@@ -228,6 +265,29 @@ def train_cmd(ctx: click.Context, **kwargs) -> None:
     num_actions = int(env.action_space.n)
     save_path = Path(train_config.save_dir)
 
+    decode_fn = None
+    if latent_config.vae_dir is not None:
+
+        def decode_fn(latents):
+            return decode_latents(vae, latents)
+
+        vae = load_vae(latent_config.vae_dir)
+        b = train_config.batch_size
+        N, t, h, w, c = clips.shape
+        batched_clips = clips.reshape(N // b, b, t, h, w, c)
+        clips = map(lambda x: encode_clips(vae, x), batched_clips)
+        clips = mx.concatenate(list(clips))
+        print(f"encoded latent clips shape: {tuple(clips.shape)}")
+
+        if dataset_config.preview_dir is not None:
+            save_clip_previews(
+                clips[: dataset_config.preview_clips].mean(axis=-1, keepdims=True),
+                f"{dataset_config.preview_dir}/latents",
+                max_clips=dataset_config.preview_clips,
+                fps=dataset_config.preview_fps,
+            )
+            print(f"saved previews to: {dataset_config.preview_dir}")
+
     model, ema_model, full_model_config = train_on_dataset(
         clips,
         actions=action_clips,
@@ -235,21 +295,27 @@ def train_cmd(ctx: click.Context, **kwargs) -> None:
         model_config=model_config,
         train_config=train_config,
         sample_fps=dataset_config.preview_fps,
+        decode_fn=decode_fn,
     )
 
+    if latent_config.vae_dir is not None:
+        full_model_config["vae_dir"] = latent_config.vae_dir
     save_model(model, save_path, config=full_model_config, ema_model=ema_model)
     print(f"saved models to: {save_path}")
 
 
 @cli.command(name="generate")
-@_config_option(["env", "dataset", "generate"])
+@_config_option(["env", "dataset", "generate", "latent"])
 @_dataclass_options(EnvConfig)
 @_dataclass_options(DatasetConfig)
 @_dataclass_options(GenerateConfig)
+@_dataclass_options(LatentConfig)
 @click.pass_context
 def generate_cmd(ctx: click.Context, **kwargs) -> None:
     """Load a pretrained model and autoregressively generate a video."""
-    env_config, dataset_config, generate_config = _build_generate_configs(ctx.params)
+    env_config, dataset_config, generate_config, latent_config = (
+        _build_generate_configs(ctx.params)
+    )
 
     if generate_config.load_dir is None:
         raise click.UsageError("Missing option '--load-dir'.")
@@ -278,6 +344,13 @@ def generate_cmd(ctx: click.Context, **kwargs) -> None:
         warmup_steps=20,
     )
 
+    decode_fn = None
+    if latent_config.vae_dir is not None:
+        vae = load_vae(latent_config.vae_dir)
+        clips = encode_clips(vae, clips)
+        decode_fn = lambda latents: decode_latents(vae, latents)
+        print(f"encoded latent clips shape: {tuple(clips.shape)}")
+
     print(f"clips shape: {tuple(clips.shape)}")
     sample_count = generate_config.num_samples
     sample_clips, sample_action_clips = sample_batch(
@@ -300,7 +373,7 @@ def generate_cmd(ctx: click.Context, **kwargs) -> None:
 
     debug = True
 
-    if debug:
+    if debug and model.use_wavelet:
         # save the wavelets
         wavelets = model.prepool(sample_clips)
         print(f"{wavelets.shape = }")
@@ -331,7 +404,47 @@ def generate_cmd(ctx: click.Context, **kwargs) -> None:
         save_dir=out_dir,
         seed=dataset_config.seed + 1,
         actions_pool=actions_pool,
+        decode_fn=decode_fn,
     )
+
+
+@cli.command(name="train-vae")
+@_config_option(["env", "dataset", "vae_model", "vae_train"])
+@_dataclass_options(EnvConfig)
+@_dataclass_options(DatasetConfig)
+@_dataclass_options(VAEModelConfig)
+@_dataclass_options(VAETrainConfig)
+@click.pass_context
+def train_vae_cmd(ctx: click.Context, **kwargs) -> None:
+    """Train the standalone wavelet KL VAE on MiniGrid rollouts."""
+    env_config, dataset_config, vae_model_config, vae_train_config = (
+        _build_vae_train_configs(ctx.params)
+    )
+
+    print("Using data config:")
+    pprint(dataset_config)
+    env = make_env(env_config.env_id)
+    clips, _ = make_dataset(
+        env=env,
+        num_steps=dataset_config.rollout_steps,
+        tile_size=dataset_config.tile_size,
+        seed=dataset_config.seed,
+        clip_length=dataset_config.clip_length,
+        clip_stride=dataset_config.clip_stride,
+    )
+    print(f"env: {env_config.env_id}")
+    print(f"clips shape: {tuple(clips.shape)}")
+
+    model, ema_model, full_model_config = train_vae_on_dataset(
+        clips,
+        model_config=vae_model_config,
+        train_config=vae_train_config,
+        sample_fps=dataset_config.preview_fps,
+    )
+
+    save_path = Path(vae_train_config.save_dir)
+    save_vae(model, save_path, config=full_model_config, ema_model=ema_model)
+    print(f"saved VAE to: {save_path}")
 
 
 if __name__ == "__main__":
