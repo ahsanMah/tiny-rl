@@ -16,7 +16,7 @@ from diffusion import ema_update, sample_batch
 from logger_utils import RLLogger
 from unet import WaveletDownsampleConv, WaveletUpsample, print_param_table
 
-ReconLoss = Literal["l1", "l2"]
+ReconLoss = Literal["l1", "l2", "l1+l2"]
 
 
 @dataclass(frozen=True)
@@ -148,9 +148,10 @@ class WaveletVAE(nn.Module):
             h = down(block(h))
         h = self.enc_mid(h)
         moments = self.to_moments(h)
-        mean, logvar = moments[..., : self.latent_channels], moments[
-            ..., self.latent_channels :
-        ]
+        mean, logvar = (
+            moments[..., : self.latent_channels],
+            moments[..., self.latent_channels :],
+        )
         logvar = mx.clip(logvar, -30.0, 20.0)
         mean = mean.reshape(B, T, *mean.shape[1:])
         logvar = logvar.reshape(B, T, *logvar.shape[1:])
@@ -229,9 +230,13 @@ class VAETrainer:
         )
 
     def _recon(self, recon: mx.array, x: mx.array) -> mx.array:
-        if self.recon_loss == "l2":
-            return mx.mean((recon - x) ** 2)
-        return mx.mean(mx.abs(recon - x))
+        match self.recon_loss:
+            case "l2":
+                return mx.mean((recon - x) ** 2)
+            case "l1":
+                return mx.mean(mx.abs(recon - x))
+            case "l1+l2":
+                return mx.mean(mx.abs(recon - x)) + mx.mean((recon - x) ** 2)
 
     def loss(self, batch: mx.array) -> mx.array:
         recon, mean, logvar = self.model(batch)
@@ -290,9 +295,17 @@ def load_vae(save_dir: str | Path, *, prefer_ema: bool = True) -> WaveletVAE:
     return vae
 
 
-def _calibrate_latent_scale(vae: WaveletVAE, frames: mx.array) -> float:
-    mean, _ = vae.encode(frames)
-    return float(mx.std(mean))
+def _calibrate_latent_scale(
+    vae: WaveletVAE, frames: mx.array, batch_size: int = 16
+) -> float:
+    n = sum_ = sumsq = 0.0
+    for i in range(0, frames.shape[0], batch_size):
+        mean, _ = vae.encode(frames[i : i + batch_size])
+        sum_ += float(mx.sum(mean))
+        sumsq += float(mx.sum(mean * mean))
+        n += mean.size
+    var = sumsq / n - (sum_ / n) ** 2
+    return var**0.5
 
 
 def train_vae_on_dataset(
@@ -405,11 +418,10 @@ def train_vae_on_dataset(
             avg_loss = 0.0
             mx.clear_cache()
 
-    # Latent-scale calibration on a sample batch (uses EMA weights).
-    calib_batch, _ = sample_batch(
-        train_clips, dummy_actions[:train_size], train_config.batch_size
+    # Latent-scale calibration pass on the trianing data (uses EMA weights).
+    latent_scale = _calibrate_latent_scale(
+        ema_model, train_clips, batch_size=train_config.batch_size * 4
     )
-    latent_scale = _calibrate_latent_scale(ema_model, calib_batch)
     latent_scale = latent_scale if latent_scale > 1e-6 else 1.0
     print(f"calibrated latent_scale={latent_scale:.4f}")
     full_model_config["latent_scale"] = latent_scale
