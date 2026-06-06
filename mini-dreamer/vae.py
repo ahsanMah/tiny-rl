@@ -36,7 +36,7 @@ class VAETrainConfig:
     recon_loss: ReconLoss = "l1"
     wavelet_loss: bool = False
     detail_weight: float = 0.0
-    ema_decay: float = 0.999
+    ema_decay: float = 0.99
     save_dir: str | None = None
     log_every: int = 50
     log_tensorboard: bool = False
@@ -436,6 +436,9 @@ def train_vae_on_dataset(
             loss_f = float(loss)
             avg_loss_f = float(avg_loss) / train_config.log_every
             psnr_f, kl_f = float(psnr), float(kl)
+            l2_loss_f = float(eval_metrics["l2_loss"])
+            l1_loss_f = float(eval_metrics["l1_loss"])
+            detail_loss_f = float(eval_metrics["wavelet_loss"])
 
             now = time.time()
             window_steps = step - last_log_step
@@ -451,12 +454,21 @@ def train_vae_on_dataset(
                 train_logger.log_train_metrics(
                     step,
                     {
+                        "samples_per_second": samples_per_sec,
                         "loss": loss,
                         "avg_loss": avg_loss,
-                        "val_psnr": psnr_f,
-                        "val_kl": kl_f,
-                        "samples_per_second": samples_per_sec,
                     },
+                )
+                train_logger.log_train_metrics(
+                    step,
+                    {
+                        "psnr": psnr_f,
+                        "kl": kl_f,
+                        "l2_loss": l2_loss_f,
+                        "l1_loss": l1_loss_f,
+                        "detail_loss": detail_loss_f,
+                    },
+                    val=True,
                 )
                 train_logger.log_reconstructions(
                     step,

@@ -31,13 +31,14 @@ class RLLogger:
         self.writer.add_scalar("rollout/episode_reward", reward, global_step)
         self.writer.add_scalar("rollout/episode_length", length, global_step)
 
-    def log_train_metrics(self, global_step: int, metrics: Dict[str, Any]):
+    def log_train_metrics(self, global_step: int, metrics: Dict[str, Any], val=False):
         """
         Logs a dictionary of training metrics (losses, entropy, lr, etc.).
-        Metrics will automatically be grouped under the 'train/' prefix in TensorBoard.
+        Metrics will automatically be grouped under the 'train/val' prefix in TensorBoard.
         """
+        _name = "val" if val else "train"
         for key, value in metrics.items():
-            self.writer.add_scalar(f"train/{key}", float(value), global_step)
+            self.writer.add_scalar(f"{_name}/{key}", float(value), global_step)
 
     def log_validation_steps(self, global_step: int, metrics: Dict[float, Any]):
         """Logs validation losses keyed by diffusion timestep."""
