@@ -220,7 +220,9 @@ class VAETrainer:
         self.detail_weight = detail_weight
         # Fixed Haar DWT for wavelet-domain recon loss (filters are constants,
         # not a trainable parameter — see WaveletDownsampleConv).
-        self.dwt = WaveletDownsampleConv(model.out_channels) if wavelet_loss else None
+        self.dwt = WaveletDownsampleConv(
+            model.out_channels
+        )  # if wavelet_loss else None
         self.max_grad_norm = max_grad_norm
         self.optimizer = optim.AdamW(
             learning_rate=learning_rate, weight_decay=weight_decay
@@ -269,6 +271,16 @@ class VAETrainer:
             )
         kl = kl_divergence(mean, logvar)
         return recon_loss + self.kl_weight * kl
+
+    def eval_loss(self, batch: mx.array) -> dict[str, mx.array]:
+        metrics = {}
+        recon, mean, logvar = self.model(batch)
+        metrics["recon"] = recon
+        metrics["l2_loss"] = mx.mean((recon - batch) ** 2)
+        metrics["l1_loss"] = mx.mean(mx.abs(recon - batch))
+        metrics["kl_loss"] = kl_divergence(mean, logvar)
+        metrics["wavelet_loss"] = self._wavelet_detail(recon, batch)
+        return metrics
 
     def train_step(self, batch: mx.array) -> mx.array:
         loss_and_grad_fn = nn.value_and_grad(self.model, self.loss)
@@ -413,10 +425,12 @@ def train_vae_on_dataset(
             indices = mx.random.randint(0, val_clips.shape[0], shape=(batch_size,))
             val_batch = val_clips[indices]
 
-            recon, mean, logvar = model(val_batch)
-            recon_mse = mx.mean((recon - val_batch) ** 2)
-            psnr = log10_max - 10.0 * mx.log10(mx.maximum(recon_mse, 1e-12))
-            kl = kl_divergence(mean, logvar)
+            eval_metrics = trainer.eval_loss(val_batch)
+            recon = eval_metrics["recon"]
+            psnr = log10_max - 10.0 * mx.log10(
+                mx.maximum(eval_metrics["l2_loss"], 1e-12)
+            )
+            kl = eval_metrics["kl_loss"]
             mx.async_eval(psnr, kl)
 
             loss_f = float(loss)
@@ -425,10 +439,11 @@ def train_vae_on_dataset(
 
             now = time.time()
             window_steps = step - last_log_step
-            steps_per_sec = window_steps / max(now - last_log_time, 1e-8)
+            samples = window_steps * batch_size
+            samples_per_sec = samples / max(now - last_log_time, 1e-8)
 
             print(
-                f"step={step:5d} steps/s={steps_per_sec:.2f} "
+                f"step={step:5d} sample/s={samples_per_sec:.2f} "
                 f"loss={loss_f:.4f} avg={avg_loss_f:.4f} "
                 f"val_psnr={psnr_f:.2f}dB val_kl={kl_f:.4f}"
             )
@@ -440,7 +455,7 @@ def train_vae_on_dataset(
                         "avg_loss": avg_loss,
                         "val_psnr": psnr_f,
                         "val_kl": kl_f,
-                        "steps_per_second": steps_per_sec,
+                        "samples_per_second": samples_per_sec,
                     },
                 )
                 train_logger.log_reconstructions(
