@@ -271,7 +271,7 @@ def train_cmd(ctx: click.Context, **kwargs) -> None:
         def decode_fn(latents):
             return decode_latents(vae, latents)
 
-        vae = load_vae(latent_config.vae_dir)
+        vae = load_vae(latent_config.vae_dir, prefer_ema=True)
         b = train_config.batch_size
         N, t, h, w, c = clips.shape
         batched_clips = clips.reshape(N // b, b, t, h, w, c)
@@ -279,10 +279,18 @@ def train_cmd(ctx: click.Context, **kwargs) -> None:
         clips = mx.concatenate(list(clips))
         print(f"encoded latent clips shape: {tuple(clips.shape)}")
 
+        reconstructed = decode_fn(clips)
+
         if dataset_config.preview_dir is not None:
             save_clip_previews(
                 clips[: dataset_config.preview_clips].mean(axis=-1, keepdims=True),
                 f"{dataset_config.preview_dir}/latents",
+                max_clips=dataset_config.preview_clips,
+                fps=dataset_config.preview_fps,
+            )
+            save_clip_previews(
+                reconstructed[: dataset_config.preview_clips],
+                f"{dataset_config.preview_dir}/reconstructions",
                 max_clips=dataset_config.preview_clips,
                 fps=dataset_config.preview_fps,
             )

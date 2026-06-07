@@ -12,15 +12,18 @@ from diffusion import generate_video, sample_euler_to_mp4
 from unet import UNet3D
 from video_utils import frames_to_clips, save_clip_previews
 
-
-def _is_minigrid(env_id: str) -> bool:
-    return "MiniGrid" in env_id
+# def _is_minigrid(env_id: str) -> bool:
+#     return "MiniGrid" in env_id
 
 
 def make_env(env_id: str) -> gym.Env:
-    if _is_minigrid(env_id):
+    if "MiniGrid" in env_id:
         return gym.make(env_id)
-    return gym.make(env_id, continuous=False, frame_skip=4)
+
+    if "doom" in env_id:
+        return gym.make(env_id, continuous=False, frame_skip=4)
+
+    return gym.make(env_id, continuous=False)
 
 
 def rollout_minigrid_frames(

@@ -40,7 +40,7 @@ class TrainConfig:
     train_steps: int = 1_000
     batch_size: int = 1
     learning_rate: float = 1e-3
-    ema_decay: float = 0.999
+    ema_decay: float = 0.99
     log_every: int = 50
     save_dir: str | Path | None = None
     load_dir: str | None = None
@@ -511,6 +511,10 @@ def generate_env_video(
     return generated
 
 
+def decoder(x: mx.array) -> mx.array:
+    return x
+
+
 def train_on_dataset(
     videos: mx.array,
     actions: mx.array | None = None,
@@ -526,6 +530,9 @@ def train_on_dataset(
     if train_config.log_tensorboard:
         save_path = Path(train_config.save_dir)
         train_logger = RLLogger(log_dir=str(save_path.parent), exp_name=save_path.name)
+
+    if decode_fn is not None:
+        decoder = decode_fn
 
     print("Using train config:")
     pprint(train_config)
@@ -640,8 +647,8 @@ def train_on_dataset(
                 train_logger.log_validation_r2s(step, val_r2s)
                 train_logger.log_reconstructions(
                     step,
-                    val_batch[:, -1],
-                    {t: p[:, 0] for t, p in val_preds.items()},
+                    decoder(val_batch[:, -1:])[:, 0],
+                    {t: decoder(p[:, :1])[:, 0] for t, p in val_preds.items()},
                 )
 
             if step % checkpoint_interval == 0:
@@ -661,10 +668,9 @@ def train_on_dataset(
             actions=val_conditioning_actions,
             num_steps=train_config.sample_steps,
         )
-        if decode_fn is not None:
-            samples = decode_fn(samples)
+
         save_clip_previews(
-            samples,
+            decoder(samples),
             train_config.save_dir,
             max_clips=sample_count,
             fps=sample_fps,
