@@ -60,8 +60,8 @@ cd dashboard && npm install
 cd dashboard && npm start
 # → http://localhost:8080/index.html
 ```
+You can also directly access the dashboard by visiting [tiny-rl.vercel.app](https://tiny-rl.vercel.app)
 
-[browser-sync](https://browsersync.io/) serves the files and hot-reloads `hifi/**/*` on change.
 
 ### Run index
 
