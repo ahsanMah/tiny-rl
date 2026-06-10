@@ -1,0 +1,19 @@
+{
+  "schema_version": "rl-dashboard-v1",
+  "step": 500,
+  "kind": "median",
+  "episode_index": 4,
+  "return": -94.08848155941814,
+  "length": 132,
+  "video_file": "video.mp4",
+  "signals_file": "signals.npz",
+  "available_signals": [
+    "step_reward"
+  ],
+  "signal_shapes": {
+    "step_reward": [
+      132
+    ]
+  },
+  "signal_semantics": {}
+}

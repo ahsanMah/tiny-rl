@@ -1,0 +1,40 @@
+{
+  "schema_version": "rl-dashboard-v1",
+  "run_id": "BipedalWalker-v3-sac_2026-05-28_17-05-06",
+  "name": "BipedalWalker-v3-sac_2026-05-28_17-05-06",
+  "algorithm": "sac",
+  "env_id": "BipedalWalker-v3",
+  "status": "done",
+  "seed": null,
+  "hparams": {
+    "gamma": 0.99,
+    "alpha": 0.2,
+    "num_epochs": 20,
+    "num_updates_per_epoch": 1000,
+    "batch_size": 256,
+    "num_rollouts_per_epoch": 1000,
+    "num_parallel_envs": 8,
+    "hidden_dim": 64
+  },
+  "capabilities": {
+    "signals": [
+      "action_value",
+      "cumulative_return",
+      "step_reward"
+    ],
+    "signal_semantics": {
+      "step_reward": {
+        "unit": "reward"
+      },
+      "cumulative_return": {
+        "unit": "return"
+      },
+      "action_value": {
+        "unit": "return"
+      }
+    }
+  },
+  "created_at": "2026-05-28T21:05:06Z",
+  "updated_at": "2026-05-28T21:11:57Z",
+  "ended_at": "2026-05-28T21:11:57Z"
+}

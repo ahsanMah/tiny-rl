@@ -1,0 +1,37 @@
+{
+  "schema_version": "rl-dashboard-v1",
+  "step": 22528,
+  "kind": "worst",
+  "episode_index": 1,
+  "return": -117.56981042400002,
+  "length": 1600,
+  "video_file": "video.mp4",
+  "signals_file": "signals.npz",
+  "available_signals": [
+    "cumulative_return",
+    "step_reward",
+    "value_estimate"
+  ],
+  "signal_shapes": {
+    "step_reward": [
+      1600
+    ],
+    "cumulative_return": [
+      1600
+    ],
+    "value_estimate": [
+      1600
+    ]
+  },
+  "signal_semantics": {
+    "step_reward": {
+      "unit": "reward"
+    },
+    "cumulative_return": {
+      "unit": "return"
+    },
+    "value_estimate": {
+      "unit": "return"
+    }
+  }
+}

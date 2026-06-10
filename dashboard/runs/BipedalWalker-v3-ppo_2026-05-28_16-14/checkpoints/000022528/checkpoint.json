@@ -1,0 +1,56 @@
+{
+  "schema_version": "rl-dashboard-v1",
+  "step": 22528,
+  "created_at": "2026-05-28T20:20:07Z",
+  "num_eval_episodes": 4,
+  "mean_return": -116.97241562511772,
+  "std_return": 2.155823275667483,
+  "best_return": -113.87080678343773,
+  "median_return": -117.07927168346941,
+  "worst_return": -119.86031235009432,
+  "rollouts": [
+    {
+      "kind": "best",
+      "episode_index": 2,
+      "return": -113.87080678343773,
+      "length": 1600,
+      "dir": "rollouts/best"
+    },
+    {
+      "kind": "median",
+      "episode_index": 1,
+      "return": -117.63042259216309,
+      "length": 1600,
+      "dir": "rollouts/median"
+    },
+    {
+      "kind": "worst",
+      "episode_index": 0,
+      "return": -119.86031235009432,
+      "length": 1600,
+      "dir": "rollouts/worst"
+    }
+  ],
+  "episodes": [
+    {
+      "episode_index": 0,
+      "return": -119.86031235009432,
+      "length": 1600
+    },
+    {
+      "episode_index": 1,
+      "return": -117.63042259216309,
+      "length": 1600
+    },
+    {
+      "episode_index": 2,
+      "return": -113.87080678343773,
+      "length": 1600
+    },
+    {
+      "episode_index": 3,
+      "return": -116.52812077477574,
+      "length": 1600
+    }
+  ]
+}
