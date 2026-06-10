@@ -5,7 +5,7 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from pprint import pprint
-from typing import Literal
+from typing import Callable, Literal
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -33,6 +33,9 @@ class VAETrainConfig:
     vae_train_steps: int = 1_000
     batch_size: int = 16
     learning_rate: float = 3e-4
+    lr_warmup_steps: int = 0
+    lr_hold_steps: int = 0
+    lr_final: float | None = None
     kl_weight: float = 1e-6
     recon_loss: ReconLoss = "l1"
     wavelet_loss: bool = False
@@ -195,6 +198,49 @@ def kl_divergence(mean: mx.array, logvar: mx.array) -> mx.array:
     return -0.5 * mx.mean(1.0 + logvar - mean**2 - mx.exp(logvar))
 
 
+def linear_warmup_decay_schedule(
+    peak_lr: float,
+    *,
+    total_steps: int,
+    warmup_steps: int = 0,
+    hold_steps: int = 0,
+    final_lr: float | None = None,
+) -> float | Callable[[mx.array], mx.array]:
+    """Linear warmup from ``peak_lr / 10`` to ``peak_lr`` over ``warmup_steps``,
+    hold at ``peak_lr`` for ``hold_steps``, then linear decay to ``final_lr``
+    over the remaining steps.
+
+    Every part is optional: ``warmup_steps=0`` skips the warmup, ``hold_steps=0``
+    starts the decay right after warmup, and ``final_lr=None`` holds the LR
+    constant after warmup. With everything disabled this returns the plain
+    ``peak_lr`` float (a fixed learning rate).
+    """
+    if warmup_steps <= 0 and final_lr is None:
+        return peak_lr
+
+    constant = optim.linear_schedule(peak_lr, peak_lr, 1)
+    tail = (
+        optim.linear_schedule(
+            peak_lr, final_lr, max(total_steps - warmup_steps - hold_steps, 1)
+        )
+        if final_lr is not None
+        else constant
+    )
+
+    schedules = [tail]
+    boundaries: list[int] = []
+    if hold_steps > 0 and final_lr is not None:
+        schedules.insert(0, constant)
+        boundaries.insert(0, warmup_steps + hold_steps)
+    if warmup_steps > 0:
+        schedules.insert(0, optim.linear_schedule(peak_lr / 10.0, peak_lr, warmup_steps))
+        boundaries.insert(0, warmup_steps)
+
+    if not boundaries:
+        return tail
+    return optim.join_schedules(schedules, boundaries)
+
+
 class VAETrainer:
     """Template: FlowMatchingTrainer. AdamW + grad-clip + EMA + compiled step."""
 
@@ -203,7 +249,7 @@ class VAETrainer:
         model: WaveletVAE,
         ema_model: WaveletVAE,
         *,
-        learning_rate: float = 3e-4,
+        learning_rate: float | Callable[[mx.array], mx.array] = 3e-4,
         weight_decay: float = 1e-4,
         max_grad_norm: float = 2.0,
         ema_decay: float = 0.999,
@@ -380,10 +426,17 @@ def train_vae_on_dataset(
 
     model = WaveletVAE(**full_model_config)
     ema_model = _clone_vae(full_model_config, model.parameters())
+    lr_schedule = linear_warmup_decay_schedule(
+        train_config.learning_rate,
+        total_steps=train_config.vae_train_steps,
+        warmup_steps=train_config.lr_warmup_steps,
+        hold_steps=train_config.lr_hold_steps,
+        final_lr=train_config.lr_final,
+    )
     trainer = VAETrainer(
         model,
         ema_model,
-        learning_rate=train_config.learning_rate,
+        learning_rate=lr_schedule,
         ema_decay=train_config.ema_decay,
         kl_weight=train_config.kl_weight,
         recon_loss=train_config.recon_loss,
@@ -424,21 +477,22 @@ def train_vae_on_dataset(
             kl = eval_metrics["kl_loss"]
             mx.async_eval(psnr, kl)
 
+            window_steps = step - last_log_step
             loss_f = float(loss)
-            avg_loss_f = float(avg_loss) / train_config.log_every
+            avg_loss_f = float(avg_loss) / window_steps
             psnr_f, kl_f = float(psnr), float(kl)
             l2_loss_f = float(eval_metrics["l2_loss"])
             l1_loss_f = float(eval_metrics["l1_loss"])
             detail_loss_f = float(eval_metrics["wavelet_loss"])
 
             now = time.time()
-            window_steps = step - last_log_step
             samples = window_steps * batch_size
             samples_per_sec = samples / max(now - last_log_time, 1e-8)
 
+            lr_f = float(trainer.optimizer.learning_rate)
             print(
                 f"step={step:5d} sample/s={samples_per_sec:.2f} "
-                f"loss={loss_f:.4f} avg={avg_loss_f:.4f} "
+                f"loss={loss_f:.4f} avg={avg_loss_f:.4f} lr={lr_f:.2e} "
                 f"val_psnr={psnr_f:.2f}dB val_kl={kl_f:.4f}"
             )
             if train_logger is not None:
@@ -446,8 +500,9 @@ def train_vae_on_dataset(
                     step,
                     {
                         "samples_per_second": samples_per_sec,
-                        "loss": loss,
-                        "avg_loss": avg_loss,
+                        "loss": loss_f,
+                        "avg_loss": avg_loss_f,
+                        "learning_rate": lr_f,
                     },
                 )
                 train_logger.log_train_metrics(
