@@ -86,11 +86,12 @@ class RLLogger:
             if arr.shape[-1] == 1:
                 arr = np.repeat(arr, 3, axis=-1)  # broadcast grayscale → RGB
             b, h, w, c = arr.shape
-            rows = b // num_cols
-            arr = arr[: rows * num_cols]
-            # (rows, num_cols, H, W, C) → (rows, H, num_cols, W, C) → (rows*H, num_cols*W, C)
-            arr = arr.reshape(rows, num_cols, h, w, c)
-            arr = arr.transpose(0, 2, 1, 3, 4).reshape(rows * h, num_cols * w, c)
+            cols = min(num_cols, b)
+            rows = b // cols
+            arr = arr[: rows * cols]
+            # (rows, cols, H, W, C) → (rows, H, cols, W, C) → (rows*H, cols*W, C)
+            arr = arr.reshape(rows, cols, h, w, c)
+            arr = arr.transpose(0, 2, 1, 3, 4).reshape(rows * h, cols * w, c)
             return arr.transpose(2, 0, 1)  # (C, H, W)
 
         self.writer.add_image(

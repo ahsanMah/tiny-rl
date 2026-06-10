@@ -12,7 +12,8 @@ import mlx.nn as nn
 import mlx.optimizers as optim
 from mlx.utils import tree_map
 
-from diffusion import ema_update, sample_batch
+from data import Dataset
+from diffusion import ema_update
 from logger_utils import RLLogger
 from unet import WaveletDownsampleConv, WaveletUpsample, print_param_table
 
@@ -334,11 +335,12 @@ def load_vae(save_dir: str | Path, *, prefer_ema: bool = True) -> WaveletVAE:
 
 
 def _calibrate_latent_scale(
-    vae: WaveletVAE, frames: mx.array, batch_size: int = 16
+    vae: WaveletVAE, frames, batch_size: int = 16
 ) -> float:
+    """`frames` may be an mx.array or a (possibly memory-mapped) numpy array."""
     n = sum_ = sumsq = 0.0
     for i in range(0, frames.shape[0], batch_size):
-        mean, _ = vae.encode(frames[i : i + batch_size])
+        mean, _ = vae.encode(mx.array(frames[i : i + batch_size]))
         sum_ += float(mx.sum(mean))
         sumsq += float(mx.sum(mean * mean))
         n += mean.size
@@ -347,12 +349,12 @@ def _calibrate_latent_scale(
 
 
 def train_vae_on_dataset(
-    frames: mx.array,
+    dataset: Dataset,
     model_config: VAEModelConfig | None = None,
     train_config: VAETrainConfig | None = None,
     sample_fps: float = 2.0,
 ):
-    """Train the VAE on clips ``(B, T, H, W, C)``.
+    """Train the VAE on a `Dataset` of clips ``(B, T, H, W, C)``.
 
     Returns ``(model, ema_model, full_model_config)`` where the config carries
     the calibrated ``latent_scale``.
@@ -370,18 +372,9 @@ def train_vae_on_dataset(
     print("Using VAE model config:")
     pprint(model_config)
 
-    dataset_size = int(frames.shape[0])
-    if dataset_size < 2:
-        raise ValueError(f"Need at least 2 clips, got {dataset_size}")
-    val_size = max(1, int(round(dataset_size * 0.05)))
-    val_size = min(val_size, dataset_size - 1)
-    train_size = dataset_size - val_size
-    train_clips = frames[:train_size]
-    val_clips = frames[train_size:]
-
     input_config = {
-        "in_channels": int(frames.shape[-1]),
-        "out_channels": int(frames.shape[-1]),
+        "in_channels": dataset.num_channels,
+        "out_channels": dataset.num_channels,
     }
     full_model_config = {**input_config, **asdict(model_config)}
 
@@ -398,9 +391,9 @@ def train_vae_on_dataset(
         detail_weight=train_config.detail_weight,
     )
 
-    print("dataset:", tuple(frames.shape))
-    print("train split:", tuple(train_clips.shape))
-    print("val split:", tuple(val_clips.shape))
+    print("dataset clips:", dataset.dataset_size)
+    print("train split:", dataset.train_size)
+    print("val split:", dataset.val_size)
     print_param_table(model)
 
     log10_max = 20.0 * float(mx.log10(mx.array(2.0)))
@@ -411,8 +404,7 @@ def train_vae_on_dataset(
     batch_size = train_config.batch_size
 
     for step in range(1, train_config.vae_train_steps + 1):
-        indices = mx.random.randint(0, train_clips.shape[0], shape=(batch_size,))
-        batch = train_clips[indices]
+        batch, _ = dataset.sample_train_batch(batch_size)
         loss = trainer.compiled_train_step(batch)
         avg_loss += loss
         mx.async_eval(loss, avg_loss)
@@ -422,8 +414,7 @@ def train_vae_on_dataset(
             or step % train_config.log_every == 0
             or step == train_config.vae_train_steps
         ):
-            indices = mx.random.randint(0, val_clips.shape[0], shape=(batch_size,))
-            val_batch = val_clips[indices]
+            val_batch, _ = dataset.sample_val_batch(min(batch_size, dataset.val_size))
 
             eval_metrics = trainer.eval_loss(val_batch)
             recon = eval_metrics["recon"]
@@ -480,9 +471,9 @@ def train_vae_on_dataset(
             last_log_step = step
             last_log_time = time.time()
 
-    # Latent-scale calibration pass on the trianing data (uses EMA weights).
+    # Latent-scale calibration pass on the training data (uses EMA weights).
     latent_scale = _calibrate_latent_scale(
-        ema_model, train_clips, batch_size=train_config.batch_size * 4
+        ema_model, dataset.train_videos, batch_size=train_config.batch_size * 4
     )
     latent_scale = latent_scale if latent_scale > 1e-6 else 1.0
     print(f"calibrated latent_scale={latent_scale:.4f}")

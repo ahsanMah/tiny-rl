@@ -447,19 +447,26 @@ def train_vae_cmd(ctx: click.Context, **kwargs) -> None:
     print("Using data config:")
     pprint(dataset_config)
     env = make_env(env_config.env_id)
-    clips, _ = record_rollouts(
+    print(f"env: {env_config.env_id}")
+    clips, _, save_dir = record_rollouts(
         env=env,
         num_steps=dataset_config.rollout_steps,
         tile_size=dataset_config.tile_size,
         seed=dataset_config.seed,
         clip_length=dataset_config.clip_length,
         clip_stride=dataset_config.clip_stride,
+        warmup_steps=dataset_config.warmup_steps,
+        save_to_disk=True,
+        save_dir=dataset_config.save_dir,
     )
-    print(f"env: {env_config.env_id}")
+    assert save_dir is not None, "Training should always load rollouts from disk"
     print(f"clips shape: {tuple(clips.shape)}")
+    del clips
+
+    dataset = Dataset(data_dir=save_dir, memory_map=True)
 
     model, ema_model, full_model_config = train_vae_on_dataset(
-        clips,
+        dataset,
         model_config=vae_model_config,
         train_config=vae_train_config,
         sample_fps=dataset_config.preview_fps,
