@@ -49,10 +49,7 @@ Artifact schema: [`dashboard/docs/SCHEMA.md`](dashboard/docs/SCHEMA.md)
 
 ### Installation
 
-The dashboard reads run artifacts through a `runs/` symlink that points to `gym-practice/dashboard_artifacts/runs`. Run this once from the repo root:
-
 ```bash
-ln -s gym-practice/dashboard_artifacts/runs dashboard/runs
 cd dashboard && npm install
 ```
 
@@ -61,7 +58,7 @@ cd dashboard && npm install
 
 ```bash
 cd dashboard && npm start
-# → http://localhost:8080/RL%20Tracker.html
+# → http://localhost:8080/index.html
 ```
 
 [browser-sync](https://browsersync.io/) serves the files and hot-reloads `hifi/**/*` on change.
