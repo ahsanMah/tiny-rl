@@ -50,6 +50,7 @@ class DatasetConfig:
     frame_skip: int = 1
     save_to_disk: bool = False
     save_dir: str | None = None
+    warmup_steps: int = 50
 
 
 @dataclass(frozen=True)
@@ -246,6 +247,7 @@ def train_cmd(ctx: click.Context, **kwargs) -> None:
         clip_stride=dataset_config.clip_stride,
         save_to_disk=True,
         save_dir=dataset_config.save_dir,
+        warmup_steps=dataset_config.warmup_steps,
     )
     assert save_dir is not None, "Training should always load rollouts from disk"
     print(f"rollout resulted in {all_clips.shape[0]} clips")
@@ -353,24 +355,16 @@ def generate_cmd(ctx: click.Context, **kwargs) -> None:
     env = make_env(env_config.env_id)
     max_action_idx = -1
     clip_length = model.max_context_size
-    clips, action_clips = record_rollouts(
+    clips, action_clips, _ = record_rollouts(
         env=env,
-        num_steps=generate_config.num_samples * dataset_config.clip_length * 4,
+        num_steps=dataset_config.rollout_steps,
         tile_size=dataset_config.tile_size,
         seed=dataset_config.seed,
         clip_length=clip_length,  # only grab context clips
         clip_stride=dataset_config.clip_stride,
         max_action_idx=max_action_idx,
-        warmup_steps=20,
+        warmup_steps=dataset_config.warmup_steps,
     )
-
-    decode_fn = None
-    if latent_config.vae_dir is not None:
-        vae = load_vae(latent_config.vae_dir)
-        clips = encode_clips(vae, clips)
-        decode_fn = lambda latents: decode_latents(vae, latents)
-        print(f"encoded latent clips shape: {tuple(clips.shape)}")
-
     print(f"clips shape: {tuple(clips.shape)}")
     sample_count = generate_config.num_samples
     sample_clips, sample_action_clips = sample_batch(
@@ -378,6 +372,15 @@ def generate_cmd(ctx: click.Context, **kwargs) -> None:
         actions=action_clips,
         batch_size=sample_count,
     )
+    sample_clips = mx.array(sample_clips)
+    sample_action_clips = mx.array(sample_action_clips)
+
+    decode_fn = None
+    if latent_config.vae_dir is not None:
+        vae = load_vae(latent_config.vae_dir)
+        sample_clips = encode_clips(vae, sample_clips)
+        decode_fn = lambda latents: decode_latents(vae, latents)
+        print(f"encoded latent clips shape: {tuple(clips.shape)}")
 
     num_actions = env.action_space.n
     print(f"{sample_clips.shape = }")
@@ -385,7 +388,7 @@ def generate_cmd(ctx: click.Context, **kwargs) -> None:
 
     print(f"env: {env_config.env_id}")
 
-    actions_pool = None  # [1, 2]
+    actions_pool = [2, 3]
     out_dir = (
         Path(generate_config.save_dir)
         / f"{generate_config.generate_new_frames}f-{generate_config.generate_num_steps}s"

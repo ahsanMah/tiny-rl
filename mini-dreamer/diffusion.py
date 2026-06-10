@@ -183,6 +183,11 @@ class FlowMatchingTrainer:
         Skipped by default to keep training fast.
         """
         mask = make_final_frame_mask(x1)
+
+        # small noise added to conditioning frames for robustness
+        eps_noise = sample_noise(x1.shape, noise_distribution="normal") * 1e-2
+        x1 = x1 + eps_noise * (1 - mask)
+
         noise = sample_noise(x1.shape, noise_distribution="normal") * mask
         t_view = mx.reshape(t, (x1.shape[0], 1, 1, 1, 1)) * mask
         xt = (1.0 - t_view) * noise + t_view * x1 + (1 - mask) * x1
@@ -585,7 +590,6 @@ def train_on_dataset(
                 min(train_config.batch_size, dataset.val_size)
             )
 
-            # tic = time.perf_counter()
             val_losses, val_psnrs, val_r2s, val_preds = trainer.eval_loss_by_timestep(
                 val_batch, val_batch_actions, val_timesteps
             )
