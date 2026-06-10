@@ -15,6 +15,7 @@ import mlx.optimizers as optim
 import numpy as np
 from mlx.utils import tree_map
 
+from data import Dataset
 from logger_utils import RLLogger
 from unet import UNet3D, print_param_table
 from video_utils import (
@@ -29,6 +30,7 @@ NoiseDistribution = Literal["uniform", "logitnorm", "normal"]
 
 @dataclass(frozen=True)
 class ModelConfig:
+    in_channels: int = 3
     base_channels: int = 16
     max_context_size: int = 3
     num_transformer_blocks: int = 2
@@ -246,18 +248,6 @@ class FlowMatchingTrainer:
         self.optimizer.update(self.model, clipped_grads)
         ema_update(self.ema_model, self.model, self.ema_decay)
         return loss
-
-
-def sample_batch(
-    videos: mx.array,
-    actions: mx.array,
-    batch_size: int,
-) -> tuple[mx.array, mx.array]:
-    if batch_size >= videos.shape[0]:
-        return videos[:batch_size], actions[:batch_size]
-
-    indices = mx.random.randint(0, videos.shape[0], shape=(batch_size,))
-    return (videos[indices], actions[indices])
 
 
 def sample_euler(
@@ -516,8 +506,7 @@ def decoder(x: mx.array) -> mx.array:
 
 
 def train_on_dataset(
-    videos: mx.array,
-    actions: mx.array | None = None,
+    dataset: Dataset,
     num_env_actions: int = 1,
     model_config: ModelConfig | None = None,
     train_config: TrainConfig | None = None,
@@ -539,27 +528,9 @@ def train_on_dataset(
     print("Using model config:")
     pprint(model_config)
 
-    if actions is None:
-        actions = mx.zeros((videos.shape[0], 1), dtype=mx.int8)
-
-    dataset_size = int(videos.shape[0])
-    if dataset_size < 2:
-        raise ValueError(
-            f"Need at least 2 clips to make a train/val split, got {dataset_size}"
-        )
-
-    val_size = max(1, int(round(dataset_size * 0.05)))
-    val_size = min(val_size, dataset_size - 1)
-    train_size = dataset_size - val_size
-
-    train_videos = videos[:train_size]
-    train_actions = actions[:train_size]
-    val_videos = videos[train_size:]
-    val_actions = actions[train_size:]
-
     input_config = {
-        "in_channels": int(videos.shape[-1]),
-        "out_channels": int(videos.shape[-1]),
+        "in_channels": dataset.num_channels,
+        "out_channels": dataset.num_channels,
         "num_actions": num_env_actions,
     }
     full_model_config = {**input_config, **asdict(model_config)}
@@ -579,24 +550,23 @@ def train_on_dataset(
     save_path = Path(train_config.save_dir) / "resume-ckpt"
     print(f"periodically saving checkpoints to: {save_path}")
 
-    print("dataset:", tuple(videos.shape))
-    print("train split:", tuple(train_videos.shape))
-    print("val split:", tuple(val_videos.shape))
+    print("dataset clips:", dataset.dataset_size)
+    print("train split:", dataset.train_size)
+    print("val split:", dataset.val_size)
     print_param_table(model)
 
-    sample_count = min(train_config.num_gen_samples, int(val_videos.shape[0]))
+    sample_count = min(train_config.num_gen_samples, dataset.val_size)
     if train_config.save_dir is not None:
-        val_conditioning_clips = val_videos[:sample_count]
-        val_conditioning_actions = val_actions[:sample_count]
+        val_conditioning_clips, val_conditioning_actions = dataset.val_clips(
+            sample_count
+        )
 
     val_timesteps = (0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0)
     avg_loss = 0.0
     start = time.time()
     for step in range(1, train_config.train_steps + 1):
         tic = time.perf_counter()
-        batch, batch_actions = sample_batch(
-            train_videos, train_actions, train_config.batch_size
-        )
+        batch, batch_actions = dataset.sample_train_batch(train_config.batch_size)
         loss = trainer.compiled_train_step(batch, batch_actions)
         loss = float(loss)  # also flushes the compiled step's state updates
         avg_loss += loss
@@ -608,13 +578,11 @@ def train_on_dataset(
             or step % train_config.log_every == 0
             or step == train_config.train_steps
         ):
-            elapsed = time.time() - start
+            elapsed = time.time() - tic
             avg_loss /= train_config.log_every
             steps_per_sec = step / max(elapsed, 1e-8)
-            val_batch, val_batch_actions = sample_batch(
-                val_videos,
-                val_actions,
-                min(train_config.batch_size * 4, int(val_videos.shape[0])),
+            val_batch, val_batch_actions = dataset.sample_val_batch(
+                min(train_config.batch_size, dataset.val_size)
             )
 
             # tic = time.perf_counter()

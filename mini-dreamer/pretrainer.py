@@ -9,13 +9,12 @@ from typing import Any
 import click
 import mlx.core as mx
 
-from data import make_dataset, make_env
+from data import Dataset, make_env, record_rollouts, sample_batch
 from diffusion import (
     ModelConfig,
     TrainConfig,
     generate_env_video,
     load_model,
-    sample_batch,
     save_model,
     train_on_dataset,
 )
@@ -49,6 +48,8 @@ class DatasetConfig:
     preview_dir: str | None = None
     preview_clips: int = 4
     frame_skip: int = 1
+    save_to_disk: bool = False
+    save_dir: str | None = None
 
 
 @dataclass(frozen=True)
@@ -236,54 +237,57 @@ def train_cmd(ctx: click.Context, **kwargs) -> None:
     pprint(dataset_config)
     env = make_env(env_config.env_id)
     print(f"env: {env_config.env_id}")
-    clips, action_clips = make_dataset(
+    all_clips, all_actions, save_dir = record_rollouts(
         env=env,
         num_steps=dataset_config.rollout_steps,
         tile_size=dataset_config.tile_size,
         seed=dataset_config.seed,
         clip_length=dataset_config.clip_length,
         clip_stride=dataset_config.clip_stride,
+        save_to_disk=True,
+        save_dir=dataset_config.save_dir,
     )
-    print(f"rollout resulted in {clips.shape[0]} clips")
-    # Drop last samples
-    drop_size = clips.shape[0] % train_config.batch_size
-    print(f"dropping {drop_size} samples")
-    clips = clips[:-drop_size]
-    action_clips = action_clips[:-drop_size]
-    print(f"clips shape: {tuple(clips.shape)}")
+    assert save_dir is not None, "Training should always load rollouts from disk"
+    print(f"rollout resulted in {all_clips.shape[0]} clips")
+
+    preview_clips = all_clips[: dataset_config.preview_clips]
+    action_clips = all_actions[: dataset_config.preview_clips]
+    print(f"clips shape: {tuple(preview_clips.shape)}")
     print(f"action clips shape: {tuple(action_clips.shape)}")
+    del all_clips, all_actions
 
     if dataset_config.preview_dir is not None:
         save_clip_previews(
-            clips,
+            preview_clips,
             dataset_config.preview_dir,
             max_clips=dataset_config.preview_clips,
             fps=dataset_config.preview_fps,
         )
         print(f"saved previews to: {dataset_config.preview_dir}")
 
-    num_actions = int(env.action_space.n)
-    save_path = Path(train_config.save_dir)
-
-    decode_fn = None
+    decode_fn = lambda x: x
+    encode_fn = lambda x: x
     if latent_config.vae_dir is not None:
 
         def decode_fn(latents):
             return decode_latents(vae, latents)
 
-        vae = load_vae(latent_config.vae_dir, prefer_ema=True)
-        b = train_config.batch_size
-        N, t, h, w, c = clips.shape
-        batched_clips = clips.reshape(N // b, b, t, h, w, c)
-        clips = map(lambda x: encode_clips(vae, x), batched_clips)
-        clips = mx.concatenate(list(clips))
-        print(f"encoded latent clips shape: {tuple(clips.shape)}")
+        def encode_fn(clips):
+            return encode_clips(vae, clips)
 
-        reconstructed = decode_fn(clips)
+        vae = load_vae(latent_config.vae_dir, prefer_ema=True)
+        b = min(train_config.batch_size, dataset_config.preview_clips)
+        N, t, h, w, c = preview_clips.shape
+        batched_clips = preview_clips.reshape(N // b, b, t, h, w, c)
+        preview_clips = map(lambda x: encode_clips(vae, mx.array(x)), batched_clips)
+        preview_clips = mx.concatenate(list(preview_clips))
+        print(f"encoded latent clips shape: {tuple(preview_clips.shape)}")
+
+        reconstructed = decode_fn(preview_clips)
 
         if dataset_config.preview_dir is not None:
             save_clip_previews(
-                clips[: dataset_config.preview_clips].mean(axis=-1, keepdims=True),
+                preview_clips.mean(axis=-1, keepdims=True),
                 f"{dataset_config.preview_dir}/latents",
                 max_clips=dataset_config.preview_clips,
                 fps=dataset_config.preview_fps,
@@ -296,9 +300,17 @@ def train_cmd(ctx: click.Context, **kwargs) -> None:
             )
             print(f"saved previews to: {dataset_config.preview_dir}")
 
+    dataset = Dataset(
+        data_dir=save_dir,
+        encoder=encode_fn,
+        memory_map=True,
+    )
+
+    num_actions = int(env.action_space.n)
+    save_path = Path(train_config.save_dir)
+
     model, ema_model, full_model_config = train_on_dataset(
-        clips,
-        actions=action_clips,
+        dataset,
         num_env_actions=num_actions,
         model_config=model_config,
         train_config=train_config,
@@ -341,7 +353,7 @@ def generate_cmd(ctx: click.Context, **kwargs) -> None:
     env = make_env(env_config.env_id)
     max_action_idx = -1
     clip_length = model.max_context_size
-    clips, action_clips = make_dataset(
+    clips, action_clips = record_rollouts(
         env=env,
         num_steps=generate_config.num_samples * dataset_config.clip_length * 4,
         tile_size=dataset_config.tile_size,
@@ -432,7 +444,7 @@ def train_vae_cmd(ctx: click.Context, **kwargs) -> None:
     print("Using data config:")
     pprint(dataset_config)
     env = make_env(env_config.env_id)
-    clips, _ = make_dataset(
+    clips, _ = record_rollouts(
         env=env,
         num_steps=dataset_config.rollout_steps,
         tile_size=dataset_config.tile_size,

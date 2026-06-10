@@ -1,5 +1,6 @@
 from pathlib import Path
 from pprint import pprint
+from typing import Callable
 
 import gymnasium as gym
 import minigrid  # noqa: F401  # registers MiniGrid envs in gymnasium
@@ -8,12 +9,14 @@ import numpy as np
 from minigrid.wrappers import RGBImgObsWrapper
 from vizdoom import gymnasium_wrapper
 
-from diffusion import generate_video, sample_euler_to_mp4
-from unet import UNet3D
-from video_utils import frames_to_clips, save_clip_previews
-
 # def _is_minigrid(env_id: str) -> bool:
 #     return "MiniGrid" in env_id
+
+# Files written by `save_rollout`. `frames` is stored as a plain `.npy` (not
+# bundled into a single `.npz`) because a zip archive cannot be memory-mapped —
+# keeping it standalone lets `load_rollout(mmap=True)` page clips off disk.
+FRAMES_FILE = "frames.npy"
+ACTIONS_FILE = "actions.npy"
 
 
 def make_env(env_id: str) -> gym.Env:
@@ -219,6 +222,38 @@ def actions_to_clips(
     return mx.array(np.stack(clips, axis=0))
 
 
+def clip_starts_from_episodes(
+    episode_ends: list[int],
+    *,
+    clip_length: int,
+    clip_stride: int | None = None,
+) -> list[int]:
+    """Absolute start indices of clips that never cross an episode boundary.
+
+    Shared by the in-memory (`clips_from_episodes`) and on-disk/memmap
+    (`MemmapClipDataset`) paths so the boundary logic lives in one place.
+    """
+    clip_stride = 1 if clip_stride is None else clip_stride
+    if clip_stride <= 0:
+        raise ValueError(f"clip_stride must be > 0, got {clip_stride}")
+
+    starts: list[int] = []
+    ep_start = 0
+    for ep_end in episode_ends:
+        ep_len = ep_end - ep_start
+        if ep_len >= clip_length:
+            for s in range(0, ep_len - clip_length + 1, clip_stride):
+                starts.append(ep_start + s)
+        ep_start = ep_end
+
+    if not starts:
+        raise ValueError(
+            f"No clips formed: all episodes shorter than clip_length={clip_length}"
+        )
+
+    return starts
+
+
 def clips_from_episodes(
     frames: np.ndarray,
     actions: np.ndarray,
@@ -226,32 +261,55 @@ def clips_from_episodes(
     *,
     clip_length: int,
     clip_stride: int | None = None,
-) -> tuple[mx.array, mx.array]:
+) -> tuple[np.ndarray, np.ndarray]:
     """Slice frames and actions into clips that never cross episode boundaries."""
-    clip_stride = 1 if clip_stride is None else clip_stride
-    if clip_stride <= 0:
-        raise ValueError(f"clip_stride must be > 0, got {clip_stride}")
+    starts = clip_starts_from_episodes(
+        episode_ends, clip_length=clip_length, clip_stride=clip_stride
+    )
+    frame_clips = [frames[s : s + clip_length] for s in starts]
+    action_clips = [actions[s : s + clip_length] for s in starts]
+    return np.stack(frame_clips), np.stack(action_clips)
 
-    frame_clips: list[np.ndarray] = []
-    action_clips: list[np.ndarray] = []
-    ep_start = 0
-    for ep_end in episode_ends:
-        ep_len = ep_end - ep_start
-        if ep_len >= clip_length:
-            for s in range(0, ep_len - clip_length + 1, clip_stride):
-                frame_clips.append(frames[ep_start + s : ep_start + s + clip_length])
-                action_clips.append(actions[ep_start + s : ep_start + s + clip_length])
-        ep_start = ep_end
 
-    if not frame_clips:
-        raise ValueError(
-            f"No clips formed: all episodes shorter than clip_length={clip_length}"
+def rollout_env(
+    env: gym.Env,
+    *,
+    num_steps: int = 256,
+    seed: int = 42,
+    tile_size: int = 8,
+    max_action_idx: int = -1,
+    warmup_steps: int = 50,
+) -> tuple[np.ndarray, np.ndarray, list[int]]:
+    """Dispatch to the right rollout fn for `env` and return the raw stream.
+
+    Returns ``(frames, actions, episode_ends)`` — frames are float32 in
+    [-1, 1] with shape ``(T, H, W, C)``, actions are int32 ``(T,)``.
+    """
+    env_id = env.spec.id if env.spec else ""
+    if "MiniGrid" in env_id:
+        return rollout_minigrid_frames(
+            env=env,
+            num_steps=num_steps,
+            tile_size=tile_size,
+            seed=seed,
+            max_action_idx=max_action_idx,
         )
+    if "Vizdoom" in env_id:
+        return rollout_doom(
+            env=env,
+            num_steps=num_steps,
+            seed=seed,
+            warmup_steps=warmup_steps,
+        )
+    return rollout_box2d_frames(
+        env=env,
+        num_steps=num_steps,
+        seed=seed,
+        warmup_steps=warmup_steps,
+    )
 
-    return mx.array(np.stack(frame_clips)), mx.array(np.stack(action_clips))
 
-
-def make_dataset(
+def record_rollouts(
     env: gym.Env,
     *,
     num_steps: int = 256,
@@ -261,29 +319,139 @@ def make_dataset(
     tile_size: int = 8,
     max_action_idx: int = -1,
     warmup_steps: int = 50,
-) -> tuple[mx.array, mx.array]:
-    if "MiniGrid" in (env.spec.id if env.spec else ""):
-        frames, actions, episode_ends = rollout_minigrid_frames(
-            env=env,
-            num_steps=num_steps,
-            tile_size=tile_size,
-            seed=seed,
-            max_action_idx=max_action_idx,
-        )
-    elif "Vizdoom" in (env.spec.id if env.spec else ""):
-        frames, actions, episode_ends = rollout_doom(
-            env=env,
-            num_steps=num_steps,
-            seed=seed,
-            warmup_steps=warmup_steps,
-        )
-    else:
-        frames, actions, episode_ends = rollout_box2d_frames(
-            env=env,
-            num_steps=num_steps,
-            seed=seed,
-            warmup_steps=warmup_steps,
-        )
-    return clips_from_episodes(
+    save_to_disk: bool = False,
+    save_dir: str | Path | None = None,
+) -> tuple[np.ndarray, np.ndarray, str | Path | None]:
+    frames, actions, episode_ends = rollout_env(
+        env,
+        num_steps=num_steps,
+        seed=seed,
+        tile_size=tile_size,
+        max_action_idx=max_action_idx,
+        warmup_steps=warmup_steps,
+    )
+
+    frames, actions = clips_from_episodes(
         frames, actions, episode_ends, clip_length=clip_length, clip_stride=clip_stride
     )
+
+    if save_to_disk:
+        assert save_dir is not None
+        save_rollouts(save_dir, frames, actions)
+
+    return frames, actions, save_dir
+
+
+def save_rollouts(
+    save_dir: str | Path,
+    frames: np.ndarray,
+    actions: np.ndarray,
+) -> Path:
+    """Persist a recorded rollout to `save_dir` as memmap-friendly `.npy` files.
+
+    Writes `frames.npy` (T, H, W, C) float32, `actions.npy` (T,) int32, and
+    `episode_ends.npy` (num_episodes,) int32. Reload with `load_rollout`.
+    """
+    save_dir = Path(save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+    np.save(save_dir / FRAMES_FILE, np.ascontiguousarray(frames, dtype=np.float32))
+    np.save(save_dir / ACTIONS_FILE, np.asarray(actions, dtype=np.int32))
+    print(f"saved rollout ({frames.shape[0]} frames) to: {save_dir}")
+    return save_dir
+
+
+def load_rollouts(
+    data_dir: str | Path,
+    *,
+    mmap: bool = True,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Load a rollout saved by `save_rollout`.
+
+    When `mmap` is True the large `frames` array is returned as a read-only
+    `np.memmap` so individual clips are paged off disk on access rather than
+    loaded into RAM up front. `actions`/`episode_ends` are small and always
+    read fully.
+    """
+    data_dir = Path(data_dir)
+    frames = np.load(data_dir / FRAMES_FILE, mmap_mode="r" if mmap else None)
+    actions = np.load(data_dir / ACTIONS_FILE)
+    return frames, actions
+
+
+def _split_size(dataset_size: int, val_fraction: float) -> int:
+    """Number of held-out validation items, leaving at least one for training."""
+    if dataset_size < 2:
+        raise ValueError(
+            f"Need at least 2 clips to make a train/val split, got {dataset_size}"
+        )
+    val_size = max(1, int(round(dataset_size * val_fraction)))
+    return min(val_size, dataset_size - 1)
+
+
+def sample_batch(
+    videos: np.ndarray,
+    actions: np.ndarray,
+    batch_size: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    if batch_size >= videos.shape[0]:
+        return videos[:batch_size], actions[:batch_size]
+
+    indices = np.random.randint(0, videos.shape[0], size=(batch_size,))
+    return (videos[indices], actions[indices])
+
+
+class Dataset:
+    """Train/val view over clip tensors already materialised in memory or on disk."""
+
+    def __init__(
+        self,
+        data_dir: str | Path,
+        *,
+        val_fraction: float = 0.05,
+        encoder: Callable | None = None,
+        memory_map: bool = False,
+    ):
+        videos, actions = load_rollouts(data_dir, mmap=memory_map)
+
+        dataset_size = int(videos.shape[0])
+        val_size = _split_size(dataset_size, val_fraction)
+        train_size = dataset_size - val_size
+        self.encoder = encoder
+
+        self.train_videos = videos[:train_size]
+        self.train_actions = actions[:train_size]
+        self.val_videos = videos[train_size:]
+        self.val_actions = actions[train_size:]
+
+        self.dataset_size = dataset_size
+        self.train_size = train_size
+        self.val_size = int(self.val_videos.shape[0])
+        self.num_channels = int(videos.shape[-1])
+
+    def _build_tensor(
+        self,
+        videos: np.ndarray,
+        actions: np.ndarray,
+    ) -> tuple[mx.array, mx.array]:
+
+        video_batch = mx.array(videos)
+        action_batch = mx.array(actions)
+
+        if self.encoder is not None:
+            video_batch = self.encoder(video_batch)
+        return video_batch, action_batch
+
+    def sample_train_batch(self, batch_size: int) -> tuple[mx.array, mx.array]:
+        videos, actions = sample_batch(
+            self.train_videos, self.train_actions, batch_size
+        )
+        return self._build_tensor(videos, actions)
+
+    def sample_val_batch(self, batch_size: int) -> tuple[mx.array, mx.array]:
+        videos, actions = sample_batch(self.val_videos, self.val_actions, batch_size)
+        return self._build_tensor(videos, actions)
+
+    def val_clips(self, num_clips: int) -> tuple[mx.array, mx.array]:
+        return self._build_tensor(
+            self.val_videos[:num_clips], self.val_actions[:num_clips]
+        )
