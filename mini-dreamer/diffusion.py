@@ -569,23 +569,21 @@ def train_on_dataset(
     val_timesteps = (0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0)
     avg_loss = 0.0
     start = time.time()
+    last_log_time = start
+    last_log_step = 0
+    batch_size = train_config.batch_size
+
     for step in range(1, train_config.train_steps + 1):
-        tic = time.perf_counter()
-        batch, batch_actions = dataset.sample_train_batch(train_config.batch_size)
+        batch, batch_actions = dataset.sample_train_batch(batch_size)
         loss = trainer.compiled_train_step(batch, batch_actions)
-        loss = float(loss)  # also flushes the compiled step's state updates
         avg_loss += loss
-        # time_per_train_step = time.perf_counter() - tic
-        # print(f"train step {step} took {time_per_train_step*1e3:.2f}ms")
+        mx.async_eval(loss, avg_loss)
 
         if (
             step == 1
             or step % train_config.log_every == 0
             or step == train_config.train_steps
         ):
-            elapsed = time.time() - tic
-            avg_loss /= train_config.log_every
-            steps_per_sec = step / max(elapsed, 1e-8)
             val_batch, val_batch_actions = dataset.sample_val_batch(
                 min(train_config.batch_size, dataset.val_size)
             )
@@ -593,6 +591,14 @@ def train_on_dataset(
             val_losses, val_psnrs, val_r2s, val_preds = trainer.eval_loss_by_timestep(
                 val_batch, val_batch_actions, val_timesteps
             )
+            mx.async_eval(*val_losses.values(), *val_psnrs.values(), *val_r2s.values())
+
+            window_steps = step - last_log_step
+            loss_f = float(loss)
+            avg_loss_f = float(avg_loss) / window_steps
+            val_losses = {t: float(v) for t, v in val_losses.items()}
+            val_psnrs = {t: float(v) for t, v in val_psnrs.items()}
+            val_r2s = {t: float(v) for t, v in val_r2s.items()}
             avg_val_loss = sum(val_losses.values()) / len(val_losses)
             avg_val_psnr = sum(val_psnrs.values()) / len(val_psnrs)
             avg_val_r2 = sum(val_r2s.values()) / len(val_r2s)
@@ -601,18 +607,31 @@ def train_on_dataset(
                 f"avg_val_r2={avg_val_r2:.3f}"
             )
 
+            now = time.time()
+            samples = window_steps * batch_size
+            samples_per_sec = samples / max(now - last_log_time, 1e-8)
+
             print(
-                f"step={step:5d} steps/s={steps_per_sec:.2f} "
-                f"loss={loss:.4f} avg={avg_loss:.4f} {val_report}"
+                f"step={step:5d} sample/s={samples_per_sec:.2f} "
+                f"loss={loss_f:.4f} avg={avg_loss_f:.4f} {val_report}"
             )
             if train_logger is not None:
                 train_logger.log_train_metrics(
                     step,
                     {
-                        "loss": loss,
-                        "avg_loss": avg_loss,
-                        "steps_per_second": steps_per_sec,
+                        "samples_per_second": samples_per_sec,
+                        "loss": loss_f,
+                        "avg_loss": avg_loss_f,
                     },
+                )
+                train_logger.log_train_metrics(
+                    step,
+                    {
+                        "avg_loss_t": avg_val_loss,
+                        "avg_psnr": avg_val_psnr,
+                        "avg_r2": avg_val_r2,
+                    },
+                    val=True,
                 )
                 train_logger.log_validation_steps(step, val_losses)
                 train_logger.log_validation_psnrs(step, val_psnrs)
@@ -632,6 +651,8 @@ def train_on_dataset(
 
             avg_loss = 0.0
             mx.clear_cache()
+            last_log_step = step
+            last_log_time = time.time()
 
     if train_config.save_dir is not None:
         samples = sample_euler(

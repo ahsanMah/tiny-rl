@@ -198,6 +198,25 @@ def rollout_doom(
     return stacked, action_array, episode_ends
 
 
+def pad_frames_to_multiple(frames: np.ndarray, *, multiple: int = 16) -> np.ndarray:
+    """Pad the spatial dims of `frames` (T, H, W, C) up to the next multiple.
+
+    Padding is centered (split between both sides) and filled with -1.0,
+    i.e. black for frames normalized to [-1, 1].
+    """
+    _, height, width, _ = frames.shape
+    pad_h = (-height) % multiple
+    pad_w = (-width) % multiple
+    if pad_h == 0 and pad_w == 0:
+        return frames
+
+    top, left = pad_h // 2, pad_w // 2
+    pad_widths = ((0, 0), (top, pad_h - top), (left, pad_w - left), (0, 0))
+    padded = np.pad(frames, pad_widths, mode="constant", constant_values=-1.0)
+    print(f"padded frames from {(height, width)} to {padded.shape[1:3]}")
+    return padded
+
+
 def actions_to_clips(
     actions: np.ndarray,
     *,
@@ -321,6 +340,7 @@ def record_rollouts(
     warmup_steps: int = 50,
     save_to_disk: bool = False,
     save_dir: str | Path | None = None,
+    pad_multiple: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray, str | Path | None]:
     frames, actions, episode_ends = rollout_env(
         env,
@@ -330,6 +350,9 @@ def record_rollouts(
         max_action_idx=max_action_idx,
         warmup_steps=warmup_steps,
     )
+
+    if pad_multiple is not None:
+        frames = pad_frames_to_multiple(frames, multiple=pad_multiple)
 
     frames, actions = clips_from_episodes(
         frames, actions, episode_ends, clip_length=clip_length, clip_stride=clip_stride

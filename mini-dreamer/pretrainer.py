@@ -51,6 +51,7 @@ class DatasetConfig:
     save_to_disk: bool = False
     save_dir: str | None = None
     warmup_steps: int = 50
+    pad_multiple: int | None = None
 
 
 @dataclass(frozen=True)
@@ -248,6 +249,7 @@ def train_cmd(ctx: click.Context, **kwargs) -> None:
         save_to_disk=True,
         save_dir=dataset_config.save_dir,
         warmup_steps=dataset_config.warmup_steps,
+        pad_multiple=dataset_config.pad_multiple,
     )
     assert save_dir is not None, "Training should always load rollouts from disk"
     print(f"rollout resulted in {all_clips.shape[0]} clips")
@@ -364,6 +366,7 @@ def generate_cmd(ctx: click.Context, **kwargs) -> None:
         clip_stride=dataset_config.clip_stride,
         max_action_idx=max_action_idx,
         warmup_steps=dataset_config.warmup_steps,
+        pad_multiple=dataset_config.pad_multiple,
     )
     print(f"clips shape: {tuple(clips.shape)}")
     sample_count = generate_config.num_samples
@@ -458,6 +461,7 @@ def train_vae_cmd(ctx: click.Context, **kwargs) -> None:
         warmup_steps=dataset_config.warmup_steps,
         save_to_disk=True,
         save_dir=dataset_config.save_dir,
+        pad_multiple=dataset_config.pad_multiple,
     )
     assert save_dir is not None, "Training should always load rollouts from disk"
     print(f"clips shape: {tuple(clips.shape)}")
