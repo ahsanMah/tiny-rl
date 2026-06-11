@@ -98,6 +98,14 @@ function App() {
   const [metric, setMetric] = uS(init.metric || 'value');
   const [railWidth, setRailWidth] = uS(init.railWidth || 260);
   const [query, setQuery] = uS('');
+
+  // ── Responsive drawers ─────────────────────────────────────────
+  // When a rail can't be docked at the current width it renders as a
+  // slide-in drawer. `leftDocked` is true on tablet+wide; phones get a
+  // hamburger that opens the runs list as a drawer.
+  const leftDocked = mode !== 'phone';
+  const [leftDrawerOpen, setLeftDrawerOpen] = uS(false);
+
   const [darkMode, setDarkMode] = uS(() => {
     try { return localStorage.getItem('rl-dark-mode') !== 'false'; } catch { return true; }
   });
@@ -168,6 +176,7 @@ function App() {
     setPlaying(false);
     setEpisodeKind('best');
     setFrame(0);
+    setLeftDrawerOpen(false); // picking a run dismisses the mobile drawer
   }, []);
 
   // ── Persist on relevant state changes ──────────────────────────
@@ -187,6 +196,9 @@ function App() {
     const onKey = (e) => {
       if (isEditable(document.activeElement)) return;
       switch (e.key) {
+        case 'Escape':
+          setLeftDrawerOpen(false);
+          break;
         case ' ':
           e.preventDefault();
           setPlaying(p => !p);
@@ -227,26 +239,42 @@ function App() {
   return (
     <React.Fragment>
       <div style={{ display: 'flex', width: '100%', height: '100%' }}>
-        {/* LEFT RAIL */}
-        <RailLeft
-          runs={D.RUNS}
-          focusedId={focusedId}
-          pinnedIds={pinnedIds}
-          onFocus={handleFocus}
-          onTogglePin={togglePin}
-          query={query} setQuery={setQuery}
-          width={railWidth}
-        />
+        {/* LEFT RAIL — docked on tablet/wide, slide-in drawer on phone */}
+        {leftDocked ? (
+          <React.Fragment>
+            <RailLeft
+              runs={D.RUNS}
+              focusedId={focusedId}
+              pinnedIds={pinnedIds}
+              onFocus={handleFocus}
+              onTogglePin={togglePin}
+              query={query} setQuery={setQuery}
+              width={railWidth}
+            />
 
-        {/* RAIL RESIZE HANDLE */}
-        <div
-          title="drag to resize"
-          onMouseDown={(e) => startDrag(e, (ev) => {
-            setRailWidth(Math.max(180, Math.min(480, ev.clientX)));
-          }, 'col-resize')}
-          style={{ flex: '0 0 auto', width: 5, marginLeft: -2, marginRight: -2,
-                   cursor: 'col-resize', zIndex: 5 }}
-        />
+            {/* RAIL RESIZE HANDLE (docked only) */}
+            <div
+              title="drag to resize"
+              onMouseDown={(e) => startDrag(e, (ev) => {
+                setRailWidth(Math.max(180, Math.min(480, ev.clientX)));
+              }, 'col-resize')}
+              style={{ flex: '0 0 auto', width: 5, marginLeft: -2, marginRight: -2,
+                       cursor: 'col-resize', zIndex: 5 }}
+            />
+          </React.Fragment>
+        ) : (
+          <Drawer side="left" open={leftDrawerOpen} onClose={() => setLeftDrawerOpen(false)}>
+            <RailLeft
+              runs={D.RUNS}
+              focusedId={focusedId}
+              pinnedIds={pinnedIds}
+              onFocus={handleFocus}
+              onTogglePin={togglePin}
+              query={query} setQuery={setQuery}
+              width={Math.min(300, window.innerWidth - 56)}
+            />
+          </Drawer>
+        )}
 
         {/* CENTER */}
         <div className="col grow" style={{ minWidth: 0, height: '100%' }}>
@@ -260,6 +288,8 @@ function App() {
             pinnedRuns={pinnedRuns}
             darkMode={darkMode}
             onToggleDark={toggleDark}
+            mode={mode}
+            onOpenLeft={() => setLeftDrawerOpen(true)}
           />
           <CkptNav
             run={focusedRun}
