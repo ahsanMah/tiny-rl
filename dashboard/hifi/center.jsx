@@ -54,6 +54,8 @@ function TopBar({
     pinnedRuns,
     darkMode,
     onToggleDark,
+    mode,
+    onOpenLeft,
 }) {
     return (
         <div
@@ -66,6 +68,17 @@ function TopBar({
                 minWidth: 0,
             }}
         >
+            {mode === "phone" && (
+                <button
+                    className="btn icon"
+                    onClick={onOpenLeft}
+                    title="show runs"
+                    aria-label="show runs"
+                    style={{ flex: "0 0 auto", width: 34, height: 34 }}
+                >
+                    <IconMenu />
+                </button>
+            )}
             <div
                 className="doc-title"
                 style={{ flex: "1 1 auto", minWidth: 0 }}
