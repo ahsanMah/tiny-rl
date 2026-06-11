@@ -313,6 +313,7 @@ function App() {
             run={focusedRun}
             ckpt={ckpt}
             onSelectCkpt={setCkptStep}
+            mode={mode}
           />
 
           {/* Scrollable body */}

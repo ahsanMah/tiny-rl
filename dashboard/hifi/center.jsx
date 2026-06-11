@@ -59,12 +59,13 @@ function TopBar({
     rightDocked,
     onOpenRight,
 }) {
+    const isPhone = mode === "phone";
     return (
         <div
             className="row border-b"
             style={{
-                padding: "12px 22px",
-                gap: 12,
+                padding: isPhone ? "10px 12px" : "12px 22px",
+                gap: isPhone ? 8 : 12,
                 height: 80,
                 flex: "0 0 auto",
                 minWidth: 0,
@@ -86,12 +87,18 @@ function TopBar({
                 style={{ flex: "1 1 auto", minWidth: 0 }}
             >
                 <span className="crumb">
-                    <span style={{ color: "var(--ink)" }} className="strong">
-                        tracker
-                    </span>
-                    <span className="sep">/</span>
-                    <span>{run.env.split("-")[0]}</span>
-                    <span className="sep">/</span>
+                    {/* On phones the prefix segments are dropped to leave room
+                        for the run name — the essential identifier. */}
+                    {!isPhone && (
+                        <React.Fragment>
+                            <span style={{ color: "var(--ink)" }} className="strong">
+                                tracker
+                            </span>
+                            <span className="sep">/</span>
+                            <span>{run.env.split("-")[0]}</span>
+                            <span className="sep">/</span>
+                        </React.Fragment>
+                    )}
                     <span className="current">{run.name}</span>
                     <span className="sep">@</span>
                     <span className="num" style={{ color: "var(--ink-2)" }}>
@@ -106,8 +113,9 @@ function TopBar({
                 title="hyperparam diff baseline"
                 style={{
                     font: "500 var(--t-sm) var(--ui)",
-                    flex: "0 0 auto",
-                    maxWidth: 180,
+                    flex: "0 1 auto",
+                    minWidth: 0,
+                    maxWidth: isPhone ? 116 : 180,
                     padding: "6px 10px",
                     height: 34,
                 }}
@@ -147,19 +155,22 @@ function TopBar({
 }
 
 // ── Checkpoint navigator row (sparkbar + arrows + stats) ─────────────
-function CkptNav({ run, ckpt, onSelectCkpt }) {
+function CkptNav({ run, ckpt, onSelectCkpt, mode }) {
     const idx = run.checkpoints.findIndex((c) => c.step === ckpt.step);
     const total = run.checkpoints.length;
     const prev = () => idx > 0 && onSelectCkpt(run.checkpoints[idx - 1].step);
     const next = () =>
         idx < total - 1 && onSelectCkpt(run.checkpoints[idx + 1].step);
     const f2 = (v) => (v == null || isNaN(v) ? "–" : Number(v).toFixed(2));
+    const isPhone = mode === "phone";
     return (
         <div
             className="row border-b"
             style={{
-                padding: "11px 22px",
-                gap: 14,
+                padding: isPhone ? "10px 12px" : "11px 22px",
+                gap: isPhone ? 10 : 14,
+                rowGap: isPhone ? 10 : undefined,
+                flexWrap: isPhone ? "wrap" : "nowrap",
                 flex: "0 0 auto",
                 background: "var(--surface)",
             }}
@@ -176,12 +187,14 @@ function CkptNav({ run, ckpt, onSelectCkpt }) {
             >
                 {D.fmtStep(ckpt.step)}
             </span>
-            <span
-                className="muted"
-                style={{ fontSize: 11, whiteSpace: "nowrap" }}
-            >
-                step {idx + 1} of {total}
-            </span>
+            {!isPhone && (
+                <span
+                    className="muted"
+                    style={{ fontSize: 11, whiteSpace: "nowrap" }}
+                >
+                    step {idx + 1} of {total}
+                </span>
+            )}
             <div className="row gap-1">
                 <button
                     className="btn icon"
@@ -200,7 +213,16 @@ function CkptNav({ run, ckpt, onSelectCkpt }) {
                     ▶
                 </button>
             </div>
-            <div style={{ flex: 1, minWidth: 0, marginLeft: 6 }}>
+            <div
+                style={{
+                    // On phones the sparkbar takes its own full-width row so it
+                    // stays scrubbable; the stats wrap onto a line below it.
+                    flex: isPhone ? "1 1 100%" : 1,
+                    minWidth: 0,
+                    marginLeft: isPhone ? 0 : 6,
+                    order: isPhone ? 1 : 0,
+                }}
+            >
                 <CheckpointSparkbar
                     checkpoints={run.checkpoints}
                     activeStep={ckpt.step}
@@ -208,8 +230,11 @@ function CkptNav({ run, ckpt, onSelectCkpt }) {
                     height={32}
                 />
             </div>
-            <span className="grow" />
-            <div className="row gap-3" style={{ alignItems: "baseline" }}>
+            {!isPhone && <span className="grow" />}
+            <div
+                className="row gap-3"
+                style={{ alignItems: "baseline", order: isPhone ? 2 : 0 }}
+            >
                 <span className="col" style={{ alignItems: "flex-end" }}>
                     <span className="label-eyebrow">μ ± σ</span>
                     <span className="num strong" style={{ fontSize: 13 }}>
