@@ -74,6 +74,18 @@ function IconMenu() {
   );
 }
 
+// Info glyph — opens the run-details rail as a drawer on narrow screens.
+function IconInfo() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
+         stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="9" />
+      <line x1="12" y1="11" x2="12" y2="16" />
+      <line x1="12" y1="8" x2="12" y2="8" />
+    </svg>
+  );
+}
+
 
 function App() {
   const init = uM(loadSession, []);
@@ -105,6 +117,9 @@ function App() {
   // hamburger that opens the runs list as a drawer.
   const leftDocked = mode !== 'phone';
   const [leftDrawerOpen, setLeftDrawerOpen] = uS(false);
+  // Right details rail docks only on wide screens; tablet+phone open it as a drawer.
+  const rightDocked = mode === 'wide';
+  const [rightDrawerOpen, setRightDrawerOpen] = uS(false);
 
   const [darkMode, setDarkMode] = uS(() => {
     try { return localStorage.getItem('rl-dark-mode') !== 'false'; } catch { return true; }
