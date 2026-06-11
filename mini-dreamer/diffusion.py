@@ -42,6 +42,9 @@ class TrainConfig:
     train_steps: int = 1_000
     batch_size: int = 1
     learning_rate: float = 1e-3
+    lr_final: float | None = None
+    lr_warmup_steps: int = 500
+    lr_hold_steps: int = 3000
     ema_decay: float = 0.99
     log_every: int = 50
     save_dir: str | Path | None = None
@@ -105,13 +108,58 @@ def sample_noise(
             raise ValueError(f"Unknown noise distribution: {noise_distribution}")
 
 
+def linear_warmup_decay_schedule(
+    peak_lr: float,
+    *,
+    total_steps: int,
+    warmup_steps: int = 0,
+    hold_steps: int = 0,
+    final_lr: float | None = None,
+) -> float | Callable[[mx.array], mx.array]:
+    """Linear warmup from ``peak_lr / 10`` to ``peak_lr`` over ``warmup_steps``,
+    hold at ``peak_lr`` for ``hold_steps``, then linear decay to ``final_lr``
+    over the remaining steps.
+
+    Every part is optional: ``warmup_steps=0`` skips the warmup, ``hold_steps=0``
+    starts the decay right after warmup, and ``final_lr=None`` holds the LR
+    constant after warmup. With everything disabled this returns the plain
+    ``peak_lr`` float (a fixed learning rate).
+    """
+    if warmup_steps <= 0 and final_lr is None:
+        return peak_lr
+
+    constant = optim.linear_schedule(peak_lr, peak_lr, 1)
+    tail = (
+        optim.linear_schedule(
+            peak_lr, final_lr, max(total_steps - warmup_steps - hold_steps, 1)
+        )
+        if final_lr is not None
+        else constant
+    )
+
+    schedules = [tail]
+    boundaries: list[int] = []
+    if hold_steps > 0 and final_lr is not None:
+        schedules.insert(0, constant)
+        boundaries.insert(0, warmup_steps + hold_steps)
+    if warmup_steps > 0:
+        schedules.insert(
+            0, optim.linear_schedule(peak_lr / 10.0, peak_lr, warmup_steps)
+        )
+        boundaries.insert(0, warmup_steps)
+
+    if not boundaries:
+        return tail
+    return optim.join_schedules(schedules, boundaries)
+
+
 class FlowMatchingTrainer:
     def __init__(
         self,
         model,
         ema_model,
         *,
-        learning_rate: float = 1e-3,
+        learning_rate: float | Callable[[mx.array], mx.array] = 3e-4,
         weight_decay: float = 1e-4,
         max_grad_norm: float = 2.0,
         ema_decay: float = 0.999,
@@ -547,9 +595,16 @@ def train_on_dataset(
         model = UNet3D(**full_model_config)
 
     ema_model = clone_model(full_model_config, model.parameters())
-    trainer = FlowMatchingTrainer(
-        model, ema_model, learning_rate=train_config.learning_rate
+
+    lr_schedule = linear_warmup_decay_schedule(
+        train_config.learning_rate,
+        total_steps=train_config.train_steps,
+        warmup_steps=train_config.lr_warmup_steps,
+        hold_steps=train_config.lr_hold_steps,
+        final_lr=train_config.lr_final,
     )
+
+    trainer = FlowMatchingTrainer(model, ema_model, learning_rate=lr_schedule)
 
     checkpoint_interval = 1000
     save_path = Path(train_config.save_dir) / "resume-ckpt"
@@ -566,7 +621,7 @@ def train_on_dataset(
             sample_count
         )
 
-    val_timesteps = (0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0)
+    val_timesteps = (0.0, 1.0 / 3.0, 2.0 / 3.0, 0.9)
     avg_loss = 0.0
     start = time.time()
     last_log_time = start
