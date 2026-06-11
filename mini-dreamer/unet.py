@@ -108,6 +108,10 @@ class ActionEmbedding(nn.Module):
     Categorical actions (`num_actions` set) use an embedding lookup; continuous
     actions (`action_dim` set) use a linear projection. Exactly one of the two
     must be provided.
+
+    Categorical embeddings reserve one extra slot (index `num_actions`) as a
+    learned NULL action, usable for unconditional generation (CFG dropout) and
+    for "no action yet" contexts when extracting policy/value embeddings.
     """
 
     def __init__(
@@ -125,8 +129,10 @@ class ActionEmbedding(nn.Module):
 
         self.categorical = num_actions is not None
         if self.categorical:
-            self.embed = nn.Embedding(num_actions, embed_dim)
+            self.null_action = num_actions
+            self.embed = nn.Embedding(num_actions + 1, embed_dim)
         else:
+            self.null_action = None
             self.embed = nn.Linear(action_dim, embed_dim)
 
     def __call__(self, actions: mx.array) -> mx.array:
@@ -343,7 +349,6 @@ class UNet3D(nn.Module):
         self,
         *,
         in_channels: int = 1,
-        out_channels: int = 1,
         num_actions: int = 1,
         max_context_size: int = 3,
         base_channels: int = 16,
@@ -355,6 +360,7 @@ class UNet3D(nn.Module):
         time_embed_dim = base_channels * 4
         self.max_context_size = max_context_size
         self.use_wavelet = use_wavelet
+        self.null_action = num_actions
         self.time_embed = TimeEmbedding(time_embed_dim)
         self.context_embed = ActionEmbedding(time_embed_dim, num_actions=num_actions)
         conv_block: nn.Module = ConvResBlock3D
@@ -363,8 +369,8 @@ class UNet3D(nn.Module):
             self.prepool = WaveletDownsampleConv(in_channels)
             self.unpool = WaveletUpsample()
             in_channels = in_channels * 4
-            out_channels = out_channels * 4
 
+        out_channels = in_channels
         self.res1 = conv_block(
             in_channels, base_channels, time_embed_dim=time_embed_dim
         )
@@ -406,7 +412,17 @@ class UNet3D(nn.Module):
 
         self.out_conv = nn.Conv3d(base_channels, out_channels, kernel_size=1)
 
-    def __call__(self, x: mx.array, t: mx.array, context: mx.array) -> mx.array:
+    def encode(
+        self, x: mx.array, t: mx.array, context: mx.array
+    ) -> tuple[mx.array, tuple[mx.array, mx.array], mx.array]:
+        """Down + mid path. Returns (xmid, skips, time_context).
+
+        xmid is the post-mid_conv bottleneck, shape
+        (B, S/4, H/4, W/4, 4*base_channels): the embedding consumed by
+        downstream heads (value, policy, reward). Call with clean frames,
+        t=1, and a context ending in the NULL action to get a deterministic
+        state embedding for acting.
+        """
         if self.use_wavelet:
             x = self.prepool(x)
 
@@ -429,8 +445,11 @@ class UNet3D(nn.Module):
         for block in self.mid_transformer_blocks:
             xmid = block(xmid, context=context)
         xmid = mx.reshape(xmid, (b, s, h, w, c))
-
         xmid = self.mid_conv(xmid, time_context)
+        return xmid, (x1, x2), time_context
+
+    def __call__(self, x: mx.array, t: mx.array, context: mx.array) -> mx.array:
+        xmid, (x1, x2), time_context = self.encode(x, t, context)
 
         x = self.up2(xmid, x2, time_context)
         x = self.up1(x, x1, time_context)
@@ -459,6 +478,7 @@ def _bench(model, x, t, a, num_runs: int = 20) -> None:
     compiled = mx.compile(model)
     for _ in range(5):
         mx.eval(compiled(x, t, a))
+    print("warmup complete")
 
     start = time.perf_counter()
     for _ in range(num_runs):
@@ -468,7 +488,7 @@ def _bench(model, x, t, a, num_runs: int = 20) -> None:
 
 
 if __name__ == "__main__":
-    x = mx.random.normal((8, 8, 96, 96, 1))
+    x = mx.random.normal((8, 8, 96, 96, 3))
     t = mx.ones((8, 1))
     a = mx.ones((8, 4), dtype=mx.uint8)
 
@@ -476,8 +496,8 @@ if __name__ == "__main__":
         label = "wavelet" if use_wavelet else "no wavelet"
         print(f"\n{'=' * 40}\n{label}\n{'=' * 40}")
         model = UNet3D(
-            in_channels=1,
-            out_channels=2,
+            in_channels=3,
+            out_channels=3,
             base_channels=16,
             num_actions=3,
             use_wavelet=use_wavelet,
