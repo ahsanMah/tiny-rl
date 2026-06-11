@@ -48,11 +48,36 @@ function useViewport() {
   return mode;
 }
 
+// ── Slide-in drawer ──────────────────────────────────────────────────
+// Wraps a rail when it can't be docked. Always mounted so the panel can
+// animate both directions;  The dim backdrop only renders while open and dismisses on click.
+function Drawer({ side, open, onClose, children }) {
+  return (
+    <React.Fragment>
+      {open && <div className="drawer-backdrop" onClick={onClose} />}
+      <div className={`drawer drawer-${side}${open ? ' open' : ''}`} aria-hidden={!open}>
+        {children}
+      </div>
+    </React.Fragment>
+  );
+}
+
+// Hamburger / panel-toggle glyph for the mobile rail triggers.
+function IconMenu() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
+         stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+      <line x1="3" y1="6" x2="21" y2="6" />
+      <line x1="3" y1="12" x2="21" y2="12" />
+      <line x1="3" y1="18" x2="21" y2="18" />
+    </svg>
+  );
+}
+
 
 function App() {
   const init = uM(loadSession, []);
   const mode = useViewport();
-  uE(() => { console.log('[viewport] mode →', mode, '@', window.innerWidth + 'px'); }, [mode]);
 
   // ── Loading state — wait for D.ready before rendering ──────────
   const [loaded, setLoaded] = uS(false);
