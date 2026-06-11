@@ -317,7 +317,7 @@ function App() {
           />
 
           {/* Scrollable body */}
-          <div className="scroll col grow" style={{ minHeight: 0 }}>
+          <div className="scroll col grow" style={{ minHeight: 0, overflowX: 'hidden' }}>
             <div className="col" style={{ padding: '28px 20px 20px', gap: 20, flex: '0 0 auto' }}>
               <WalkerPlayer
                 run={focusedRun} ckpt={ckpt} rollout={rollout}
@@ -329,6 +329,7 @@ function App() {
                 ckpt={ckpt}
                 selected={episodeKind}
                 onSelect={(k) => { setEpisodeKind(k); setFrame(0); setPlaying(false); }}
+                mode={mode}
               />
             </div>
 
@@ -341,6 +342,7 @@ function App() {
               pinnedRuns={pinnedRuns}
               metric={metric} setMetric={setMetric}
               signalVersion={signalVersion}
+              mode={mode}
             />
 
             <LossStrip run={focusedRun} ckpt={ckpt} />
