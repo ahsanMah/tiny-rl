@@ -18,9 +18,41 @@ function saveSession(state) {
   } catch {}
 }
 
+// ── Responsive breakpoints ───────────────────────────────────────────
+// Drives whether the rails render docked (in-flow) or as slide-in drawers.
+//   wide   (>= 1080px): both rails docked
+//   tablet (760–1079px): left rail docked, right rail is a drawer
+//   phone  (< 760px):    both rails are drawers
+const BP_TABLET = 760;
+const BP_WIDE = 1080;
+function modeForWidth(w) {
+  if (w < BP_TABLET) return 'phone';
+  if (w < BP_WIDE) return 'tablet';
+  return 'wide';
+}
+// Returns the current responsive mode, updating on resize (rAF-throttled).
+function useViewport() {
+  const [mode, setMode] = uS(() => modeForWidth(window.innerWidth));
+  uE(() => {
+    let raf = 0;
+    const onResize = () => {
+      if (raf) return;
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        setMode(modeForWidth(window.innerWidth));
+      });
+    };
+    window.addEventListener('resize', onResize);
+    return () => { window.removeEventListener('resize', onResize); if (raf) cancelAnimationFrame(raf); };
+  }, []);
+  return mode;
+}
+
 
 function App() {
   const init = uM(loadSession, []);
+  const mode = useViewport();
+  uE(() => { console.log('[viewport] mode →', mode, '@', window.innerWidth + 'px'); }, [mode]);
 
   // ── Loading state — wait for D.ready before rendering ──────────
   const [loaded, setLoaded] = uS(false);
