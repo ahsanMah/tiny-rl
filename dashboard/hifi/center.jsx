@@ -56,6 +56,8 @@ function TopBar({
     onToggleDark,
     mode,
     onOpenLeft,
+    rightDocked,
+    onOpenRight,
 }) {
     return (
         <div
@@ -129,6 +131,17 @@ function TopBar({
             >
                 {darkMode ? <IconSun /> : <IconMoon />}
             </button>
+            {!rightDocked && (
+                <button
+                    className="btn icon"
+                    onClick={onOpenRight}
+                    title="show details"
+                    aria-label="show run details"
+                    style={{ flex: "0 0 auto", width: 34, height: 34 }}
+                >
+                    <IconInfo />
+                </button>
+            )}
         </div>
     );
 }
