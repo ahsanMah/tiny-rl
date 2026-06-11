@@ -262,7 +262,7 @@ function CkptNav({ run, ckpt, onSelectCkpt, mode }) {
 }
 
 // ── Episode picker buttons (no thumbnails) ──────────────────────────
-function EpisodePicker({ ckpt, selected, onSelect }) {
+function EpisodePicker({ ckpt, selected, onSelect, mode }) {
     const rollouts = ckpt.rollouts;
     // Buttons: best, median, worst (the 3 the user explicitly asked for)
     const visible = ["best", "median", "worst"]
@@ -270,8 +270,12 @@ function EpisodePicker({ ckpt, selected, onSelect }) {
         .filter(Boolean);
     const iconMap = { best: "★", median: "◇", worst: "✕" };
     const labelMap = { best: "best episode", median: "median", worst: "worst" };
+    const isPhone = mode === "phone";
     return (
-        <div className="row gap-2">
+        <div
+            className="gap-2"
+            style={{ display: "flex", flexDirection: isPhone ? "column" : "row" }}
+        >
             {visible.map((r) => (
                 <button
                     key={r.kind}
@@ -326,6 +330,7 @@ function FrameChartPair({
     metric,
     setMetric,
     signalVersion,
+    mode,
 }) {
     // ── Line builder — one focal line + a ghost per pinned run. Lines whose real
     // signal is missing are omitted (we never fabricate); the ghost slot/color
@@ -413,8 +418,16 @@ function FrameChartPair({
         ? signalLabel(activeMetric)
         : "per-frame signal";
 
+    const isPhone = mode === "phone";
     return (
-        <div className="row gap-3" style={{ padding: "20px 22px 16px" }}>
+        <div
+            className="gap-3"
+            style={{
+                display: "flex",
+                flexDirection: isPhone ? "column" : "row",
+                padding: isPhone ? "20px 14px 16px" : "20px 22px 16px",
+            }}
+        >
             {/* cumulative_return (left) — its own dedicated chart */}
             <div className="col" style={{ minWidth: 0, flex: 1 }}>
                 <div
