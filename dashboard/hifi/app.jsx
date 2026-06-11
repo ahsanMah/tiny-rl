@@ -213,6 +213,7 @@ function App() {
       switch (e.key) {
         case 'Escape':
           setLeftDrawerOpen(false);
+          setRightDrawerOpen(false);
           break;
         case ' ':
           e.preventDefault();
@@ -305,6 +306,8 @@ function App() {
             onToggleDark={toggleDark}
             mode={mode}
             onOpenLeft={() => setLeftDrawerOpen(true)}
+            rightDocked={rightDocked}
+            onOpenRight={() => setRightDrawerOpen(true)}
           />
           <CkptNav
             run={focusedRun}
@@ -344,15 +347,29 @@ function App() {
 
         </div>
 
-        {/* RIGHT RAIL */}
-        <RailRight
-          run={focusedRun}
-          ckpt={ckpt}
-          rollout={rollout}
-          frame={frame}
-          baselineRun={baselineRun}
-          allRuns={D.RUNS}
-        />
+        {/* RIGHT RAIL — docked on wide, slide-in drawer on tablet/phone */}
+        {rightDocked ? (
+          <RailRight
+            run={focusedRun}
+            ckpt={ckpt}
+            rollout={rollout}
+            frame={frame}
+            baselineRun={baselineRun}
+            allRuns={D.RUNS}
+          />
+        ) : (
+          <Drawer side="right" open={rightDrawerOpen} onClose={() => setRightDrawerOpen(false)}>
+            <RailRight
+              run={focusedRun}
+              ckpt={ckpt}
+              rollout={rollout}
+              frame={frame}
+              baselineRun={baselineRun}
+              allRuns={D.RUNS}
+              width={Math.min(340, window.innerWidth - 56)}
+            />
+          </Drawer>
+        )}
       </div>
 
     </React.Fragment>
