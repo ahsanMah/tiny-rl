@@ -28,7 +28,7 @@ function Section({ title, right, children }) {
   );
 }
 
-function RailRight({ run, ckpt, rollout, frame, baselineRun, allRuns }) {
+function RailRight({ run, ckpt, rollout, frame, baselineRun, allRuns, width = 'clamp(190px, 15vw, 280px)' }) {
   if (!run) return null;
 
   // HP diff
@@ -37,7 +37,7 @@ function RailRight({ run, ckpt, rollout, frame, baselineRun, allRuns }) {
   const changes = hpKeys.filter(k => baselineRun && baseHp[k] !== run.hp[k]);
 
   return (
-    <div className="col scroll" style={{ width: 'clamp(190px, 15vw, 280px)', flexShrink: 0, background: 'var(--paper)', borderLeft: '1px solid var(--hairline)', height: '100%' }}>
+    <div className="col scroll" style={{ width, flexShrink: 0, background: 'var(--paper)', borderLeft: '1px solid var(--hairline)', height: '100%' }}>
 
       {/* Focused run */}
       <Section title="Focused"
