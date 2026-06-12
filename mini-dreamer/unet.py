@@ -354,6 +354,7 @@ class UNet3D(nn.Module):
         base_channels: int = 16,
         num_transformer_blocks: int = 2,
         use_wavelet: bool = False,
+        predict_reward: bool = False,
         **kwargs,
     ):
         super().__init__()
@@ -412,6 +413,23 @@ class UNet3D(nn.Module):
 
         self.out_conv = nn.Conv3d(base_channels, out_channels, kernel_size=1)
 
+        self.has_reward_head = predict_reward
+        if predict_reward:
+            mid_channels = base_channels * 4
+            self.reward_head = nn.Sequential(
+                nn.RMSNorm(mid_channels),
+                nn.Linear(mid_channels, mid_channels),
+                nn.SiLU(),
+                nn.Linear(mid_channels, 1),
+            )
+            zero_init = nn.init.constant(0.0)
+            self.reward_head.layers[-1].weight = zero_init(
+                self.reward_head.layers[-1].weight
+            )
+            self.reward_head.layers[-1].bias = zero_init(
+                self.reward_head.layers[-1].bias
+            )
+
     def encode(
         self, x: mx.array, t: mx.array, context: mx.array
     ) -> tuple[mx.array, tuple[mx.array, mx.array], mx.array]:
@@ -448,9 +466,14 @@ class UNet3D(nn.Module):
         xmid = self.mid_conv(xmid, time_context)
         return xmid, (x1, x2), time_context
 
-    def __call__(self, x: mx.array, t: mx.array, context: mx.array) -> mx.array:
-        xmid, (x1, x2), time_context = self.encode(x, t, context)
-
+    def decode(
+        self,
+        xmid: mx.array,
+        skips: tuple[mx.array, mx.array],
+        time_context: mx.array,
+    ) -> mx.array:
+        """Up path: bottleneck features + skips -> predicted velocity."""
+        x1, x2 = skips
         x = self.up2(xmid, x2, time_context)
         x = self.up1(x, x1, time_context)
 
@@ -458,6 +481,18 @@ class UNet3D(nn.Module):
         if self.use_wavelet:
             out = self.unpool(out)
         return out
+
+    def predict_reward(self, xmid: mx.array) -> mx.array:
+        """Predict the final frame's reward from bottleneck features.
+
+        Pools xmid (B, S', H', W', C) over space and time, returns (B,).
+        """
+        pooled = mx.mean(xmid, axis=(1, 2, 3))
+        return self.reward_head(pooled)[:, 0]
+
+    def __call__(self, x: mx.array, t: mx.array, context: mx.array) -> mx.array:
+        xmid, skips, time_context = self.encode(x, t, context)
+        return self.decode(xmid, skips, time_context)
 
 
 def _bench(model, x, t, a, num_runs: int = 20) -> None:

@@ -233,7 +233,9 @@ def linear_warmup_decay_schedule(
         schedules.insert(0, constant)
         boundaries.insert(0, warmup_steps + hold_steps)
     if warmup_steps > 0:
-        schedules.insert(0, optim.linear_schedule(peak_lr / 10.0, peak_lr, warmup_steps))
+        schedules.insert(
+            0, optim.linear_schedule(peak_lr / 10.0, peak_lr, warmup_steps)
+        )
         boundaries.insert(0, warmup_steps)
 
     if not boundaries:
@@ -380,9 +382,7 @@ def load_vae(save_dir: str | Path, *, prefer_ema: bool = True) -> WaveletVAE:
     return vae
 
 
-def _calibrate_latent_scale(
-    vae: WaveletVAE, frames, batch_size: int = 16
-) -> float:
+def _calibrate_latent_scale(vae: WaveletVAE, frames, batch_size: int = 16) -> float:
     """`frames` may be an mx.array or a (possibly memory-mapped) numpy array."""
     n = sum_ = sumsq = 0.0
     for i in range(0, frames.shape[0], batch_size):
@@ -457,7 +457,7 @@ def train_vae_on_dataset(
     batch_size = train_config.batch_size
 
     for step in range(1, train_config.vae_train_steps + 1):
-        batch, _ = dataset.sample_train_batch(batch_size)
+        batch, *_ = dataset.sample_train_batch(batch_size)
         loss = trainer.compiled_train_step(batch)
         avg_loss += loss
         mx.async_eval(loss, avg_loss)
@@ -467,7 +467,7 @@ def train_vae_on_dataset(
             or step % train_config.log_every == 0
             or step == train_config.vae_train_steps
         ):
-            val_batch, _ = dataset.sample_val_batch(min(batch_size, dataset.val_size))
+            val_batch, *_ = dataset.sample_val_batch(min(batch_size, dataset.val_size))
 
             eval_metrics = trainer.eval_loss(val_batch)
             recon = eval_metrics["recon"]

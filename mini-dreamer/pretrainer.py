@@ -9,7 +9,7 @@ from typing import Any
 import click
 import mlx.core as mx
 
-from data import Dataset, make_env, record_rollouts, sample_batch
+from data import Dataset, DatasetConfig, make_env, record_rollouts, sample_batch
 from diffusion import (
     ModelConfig,
     TrainConfig,
@@ -34,24 +34,6 @@ from video_utils import save_clip_previews
 @dataclass(frozen=True)
 class EnvConfig:
     env_id: str = "MiniGrid-Empty-8x8-v0"
-
-
-@dataclass(frozen=True)
-class DatasetConfig:
-    tile_size: int = 8
-    seed: int = 0
-    clip_length: int = 4
-    clip_stride: int | None = None
-    max_clips: int | None = None
-    preview_fps: float = 2.0
-    rollout_steps: int = 32
-    preview_dir: str | None = None
-    preview_clips: int = 4
-    frame_skip: int = 1
-    save_to_disk: bool = False
-    save_dir: str | None = None
-    warmup_steps: int = 50
-    pad_multiple: int | None = None
 
 
 @dataclass(frozen=True)
@@ -239,7 +221,7 @@ def train_cmd(ctx: click.Context, **kwargs) -> None:
     pprint(dataset_config)
     env = make_env(env_config.env_id)
     print(f"env: {env_config.env_id}")
-    all_clips, all_actions, save_dir = record_rollouts(
+    all_clips, all_actions, _, save_dir = record_rollouts(
         env=env,
         num_steps=dataset_config.rollout_steps,
         tile_size=dataset_config.tile_size,
@@ -357,7 +339,7 @@ def generate_cmd(ctx: click.Context, **kwargs) -> None:
     env = make_env(env_config.env_id)
     max_action_idx = -1
     clip_length = model.max_context_size
-    clips, action_clips, _ = record_rollouts(
+    clips, action_clips, _, _ = record_rollouts(
         env=env,
         num_steps=dataset_config.rollout_steps,
         tile_size=dataset_config.tile_size,
@@ -451,7 +433,7 @@ def train_vae_cmd(ctx: click.Context, **kwargs) -> None:
     pprint(dataset_config)
     env = make_env(env_config.env_id)
     print(f"env: {env_config.env_id}")
-    clips, _, save_dir = record_rollouts(
+    clips, _, _, save_dir = record_rollouts(
         env=env,
         num_steps=dataset_config.rollout_steps,
         tile_size=dataset_config.tile_size,

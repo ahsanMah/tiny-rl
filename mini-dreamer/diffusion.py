@@ -35,6 +35,7 @@ class ModelConfig:
     max_context_size: int = 3
     num_transformer_blocks: int = 2
     use_wavelet: bool = False
+    predict_reward: bool = False
 
 
 @dataclass(frozen=True)
@@ -46,6 +47,9 @@ class TrainConfig:
     lr_warmup_steps: int = 500
     lr_hold_steps: int = 3000
     ema_decay: float = 0.99
+    action_dropout: float = 0.1
+    reward_loss_weight: float = 0.0
+    reward_t_threshold: float = 0.6
     log_every: int = 50
     save_dir: str | Path | None = None
     load_dir: str | None = None
@@ -163,13 +167,23 @@ class FlowMatchingTrainer:
         weight_decay: float = 1e-4,
         max_grad_norm: float = 2.0,
         ema_decay: float = 0.999,
+        action_dropout: float = 0.1,
+        reward_loss_weight: float = 0.0,
+        reward_t_threshold: float = 0.6,
         sampling_distribution: NoiseDistribution = "logitnorm",
         logit_norm_mu: float = 0.0,
         logit_norm_scale: float = 1.0,
     ):
+        if reward_loss_weight > 0.0 and not getattr(model, "has_reward_head", False):
+            raise ValueError(
+                "reward_loss_weight > 0 requires a model built with predict_reward=True"
+            )
         self.model = model
         self.ema_model = ema_model
         self.ema_decay = ema_decay
+        self.action_dropout = action_dropout
+        self.reward_loss_weight = reward_loss_weight
+        self.reward_t_threshold = reward_t_threshold
         self.optimizer = optim.AdamW(
             learning_rate=learning_rate, weight_decay=weight_decay
         )
@@ -194,7 +208,7 @@ class FlowMatchingTrainer:
             mx.random.state,
         ]
         self.compiled_train_step = mx.compile(
-            lambda batch, actions: self.train_step(batch, actions),
+            lambda batch, actions, rewards: self.train_step(batch, actions, rewards),
             inputs=train_state,
             outputs=train_state,
         )
@@ -217,18 +231,26 @@ class FlowMatchingTrainer:
         actions: mx.array,
         t: mx.array,
         *,
+        rewards: mx.array | None = None,
         return_eval_aux: bool = False,
-    ) -> mx.array | tuple[mx.array, mx.array, mx.array, mx.array]:
-        """Flow-matching loss at the given t. If ``return_eval_aux`` is True,
-        also returns ``(recon_mse, x1_pred, r2)`` for eval/logging:
+    ) -> tuple[mx.array, mx.array] | tuple[mx.array, mx.array, mx.array, mx.array]:
+        """Flow-matching loss at the given t.
+
+        By default returns ``(total_loss, reward_loss)`` where ``total_loss``
+        is the flow loss plus ``reward_loss_weight * reward_loss``. The reward
+        loss is an MSE on the final frame's reward, computed only when
+        ``rewards`` (B,) is given and ``reward_loss_weight > 0``, and only over
+        batch elements with ``t >= reward_t_threshold`` (near-clean inputs —
+        heavily noised frames carry too little state to predict reward from).
+
+        If ``return_eval_aux`` is True, returns ``(loss, recon_mse, x1_pred,
+        r2)`` for eval/logging instead (flow loss only):
 
         - ``recon_mse``: MSE of the one-step x1 reconstruction
           ``x1_pred = xt + (1 - t) * v_pred``.
         - ``x1_pred``: the prediction itself, shape ``(B, 1, H, W, C)``.
         - ``r2``: ``1 - loss / E[target_velocity^2]`` — fraction of target
           variance explained, scale-free baseline.
-
-        Skipped by default to keep training fast.
         """
         mask = make_final_frame_mask(x1)
 
@@ -240,10 +262,16 @@ class FlowMatchingTrainer:
         t_view = mx.reshape(t, (x1.shape[0], 1, 1, 1, 1)) * mask
         xt = (1.0 - t_view) * noise + t_view * x1 + (1 - mask) * x1
         target_velocity = mask * (x1 - noise)
-        pred_velocity = model(xt, t, context=actions)
+        xmid, skips, time_context = model.encode(xt, t, context=actions)
+        pred_velocity = model.decode(xmid, skips, time_context)
         loss = mx.mean((pred_velocity[:, -1:] - target_velocity[:, -1:]) ** 2)
         if not return_eval_aux:
-            return loss
+            reward_loss = mx.array(0.0)
+            if rewards is not None and self.reward_loss_weight > 0.0:
+                pred_reward = model.predict_reward(xmid)
+                keep = (t >= self.reward_t_threshold).astype(loss.dtype)
+                reward_loss = mx.mean(keep * (pred_reward - rewards) ** 2)
+            return loss + self.reward_loss_weight * reward_loss, reward_loss
 
         x1_pred = xt[:, -1:] + (1.0 - t_view[:, -1:]) * pred_velocity[:, -1:]
         recon_mse = mx.mean((x1_pred - x1[:, -1:]) ** 2)
@@ -287,20 +315,39 @@ class FlowMatchingTrainer:
             preds[timestep] = x1_pred
         return losses, psnrs, r2s, preds
 
-    def train_step(self, batch: mx.array, actions: mx.array) -> float:
-        def _loss(batch, actions):
+    def _dropout_actions(self, actions: mx.array) -> mx.array:
+        """Replace each action slot with the NULL action independently with
+        probability ``action_dropout``. Full-NULL contexts train the
+        unconditional path (CFG); partial-NULL contexts make "real prefix +
+        NULL last action" in-distribution for policy/value embedding
+        extraction."""
+        if self.action_dropout <= 0.0:
+            return actions
+        drop = mx.random.uniform(shape=actions.shape) < self.action_dropout
+        null = mx.array(self.model.null_action, dtype=actions.dtype)
+        return mx.where(drop, null, actions)
+
+    def train_step(
+        self, batch: mx.array, actions: mx.array, rewards: mx.array | None = None
+    ) -> tuple[mx.array, mx.array]:
+        if rewards is not None and rewards.ndim == 2:
+            rewards = rewards[:, -1]  # reward of the final (denoised) frame
+
+        def _loss(batch, actions, rewards):
             # This is where the logit norm sampling may be used
             t = self.sampling_fn_for_t(batch.shape[:1])
-            return self._loss_at_t(self.model, batch, actions, t)
+            actions = self._dropout_actions(actions)
+            return self._loss_at_t(self.model, batch, actions, t, rewards=rewards)
 
         loss_and_grad_fn = nn.value_and_grad(self.model, _loss)
-        loss, grads = loss_and_grad_fn(batch, actions)
+        (loss, reward_loss), grads = loss_and_grad_fn(batch, actions, rewards)
+
         clipped_grads, total_norm = optim.clip_grad_norm(
             grads, max_norm=self.max_grad_norm
         )
         self.optimizer.update(self.model, clipped_grads)
         ema_update(self.ema_model, self.model, self.ema_decay)
-        return loss
+        return loss, reward_loss
 
 
 def sample_euler(
@@ -426,7 +473,7 @@ def load_model(save_dir: str | Path, *, prefer_ema: bool = True) -> UNet3D:
     model_path = save_dir / "model.safetensors"
     ema_path = save_dir / "ema_model.safetensors"
     weights_path = ema_path if prefer_ema and ema_path.exists() else model_path
-    model.load_weights(str(weights_path))
+    model.load_weights(str(weights_path), strict=False)
     return model
 
 
@@ -604,7 +651,20 @@ def train_on_dataset(
         final_lr=train_config.lr_final,
     )
 
-    trainer = FlowMatchingTrainer(model, ema_model, learning_rate=lr_schedule)
+    if train_config.reward_loss_weight > 0.0 and not dataset.has_rewards:
+        raise ValueError(
+            "reward_loss_weight > 0 but the dataset has no rewards.npy — "
+            "re-record the rollouts to capture rewards"
+        )
+
+    trainer = FlowMatchingTrainer(
+        model,
+        ema_model,
+        learning_rate=lr_schedule,
+        action_dropout=train_config.action_dropout,
+        reward_loss_weight=train_config.reward_loss_weight,
+        reward_t_threshold=train_config.reward_t_threshold,
+    )
 
     checkpoint_interval = 1000
     save_path = Path(train_config.save_dir) / "resume-ckpt"
@@ -617,7 +677,7 @@ def train_on_dataset(
 
     sample_count = min(train_config.num_gen_samples, dataset.val_size)
     if train_config.save_dir is not None:
-        val_conditioning_clips, val_conditioning_actions = dataset.val_clips(
+        val_conditioning_clips, val_conditioning_actions, _ = dataset.val_clips(
             sample_count
         )
 
@@ -629,17 +689,19 @@ def train_on_dataset(
     batch_size = train_config.batch_size
 
     for step in range(1, train_config.train_steps + 1):
-        batch, batch_actions = dataset.sample_train_batch(batch_size)
-        loss = trainer.compiled_train_step(batch, batch_actions)
+        batch, batch_actions, batch_rewards = dataset.sample_train_batch(batch_size)
+        loss, reward_loss = trainer.compiled_train_step(
+            batch, batch_actions, batch_rewards
+        )
         avg_loss += loss
-        mx.async_eval(loss, avg_loss)
+        mx.async_eval(loss, avg_loss, reward_loss)
 
         if (
             step == 1
             or step % train_config.log_every == 0
             or step == train_config.train_steps
         ):
-            val_batch, val_batch_actions = dataset.sample_val_batch(
+            val_batch, val_batch_actions, _ = dataset.sample_val_batch(
                 min(train_config.batch_size, dataset.val_size)
             )
 
@@ -666,19 +728,23 @@ def train_on_dataset(
             samples = window_steps * batch_size
             samples_per_sec = samples / max(now - last_log_time, 1e-8)
 
+            reward_report = ""
+            train_metrics = {
+                "samples_per_second": samples_per_sec,
+                "loss": loss_f,
+                "avg_loss": avg_loss_f,
+            }
+            if train_config.reward_loss_weight > 0.0:
+                reward_loss_f = float(reward_loss)
+                reward_report = f" reward_loss={reward_loss_f:.4f}"
+                train_metrics["reward_loss"] = reward_loss_f
+
             print(
                 f"step={step:5d} sample/s={samples_per_sec:.2f} "
-                f"loss={loss_f:.4f} avg={avg_loss_f:.4f} {val_report}"
+                f"loss={loss_f:.4f} avg={avg_loss_f:.4f}{reward_report} {val_report}"
             )
             if train_logger is not None:
-                train_logger.log_train_metrics(
-                    step,
-                    {
-                        "samples_per_second": samples_per_sec,
-                        "loss": loss_f,
-                        "avg_loss": avg_loss_f,
-                    },
-                )
+                train_logger.log_train_metrics(step, train_metrics)
                 train_logger.log_train_metrics(
                     step,
                     {
