@@ -171,7 +171,6 @@ def rollout_doom(
     num_steps: int = 256,
     seed: int = 0,
     warmup_steps: int = 50,
-    frame_skip: int = 1,
 ) -> tuple[np.ndarray, np.ndarray, list[int]]:
     """Roll out random discrete actions in a Box2D env and capture RGB frames.
 
@@ -192,27 +191,20 @@ def rollout_doom(
         for _ in range(warmup_steps):
             env.step(env.action_space.sample())
 
-    # _warmup()
-    # print(f"warmup_steps={warmup_steps}")
-
     frames: list[np.ndarray] = []
     actions: list[int] = []
     rewards: list[float] = []
     episode_ends: list[int] = []
     action = int(env.action_space.sample())
 
-    for _ in range(num_steps):
+    for i in range(num_steps):
         reset_happened = False
         step_reward = 0.0
-        for _ in range(frame_skip):
-            obs, reward, terminated, truncated, _ = env.step(action)
-            step_reward += float(reward)
-            if terminated or truncated:
-                env.reset(seed=seed)
-                # print(f"reset happened at {len(frames)}")
-                # _warmup()
-                reset_happened = True
-                break
+        obs, reward, terminated, truncated, _ = env.step(action)
+        step_reward += float(reward)
+        if terminated or truncated:
+            env.reset(seed=seed + i)
+            reset_happened = True
 
         actions.append(action)
         frames.append(np.asarray(obs["screen"]))
