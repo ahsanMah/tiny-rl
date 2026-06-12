@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import copy
 import json
 import time
 from dataclasses import asdict, dataclass
@@ -757,10 +756,12 @@ def train_on_dataset(
                 train_logger.log_validation_steps(step, val_losses)
                 train_logger.log_validation_psnrs(step, val_psnrs)
                 train_logger.log_validation_r2s(step, val_r2s)
+                _viz_samples = min(16, val_batch.shape[0])
+
                 train_logger.log_reconstructions(
                     step,
-                    decoder(val_batch[:, -1:])[:, 0],
-                    {t: decoder(p[:, :1])[:, 0] for t, p in val_preds.items()},
+                    decoder(val_batch[:_viz_samples, -1:])[:, 0],
+                    {t: decoder(p[:_viz_samples])[:, 0] for t, p in val_preds.items()},
                 )
 
             if step % checkpoint_interval == 0:
