@@ -4,7 +4,7 @@ import gymnasium as gym
 import mlx.core as mx
 import numpy as np
 
-from data import clip_starts_from_episodes, clips_from_episodes, make_env, rollout_env
+from data import clips_from_episodes, make_env, rollout_env
 from diffusion import FlowMatchingTrainer, load_model, save_model
 from unet import UNet3D
 from vae import WaveletVAE, encode_clips, load_vae
@@ -28,8 +28,7 @@ class WorldModel:
 
     def encode(self, x: mx.array, t: mx.array, context: mx.array) -> mx.array:
         if self.vae is not None:
-            mean, _ = self.vae.encode(x)
-            x = mean / self.vae.latent_scale
+            x = encode_clips(self.vae, x)
         xmid, _, _ = self.model.encode(x, t, context=context)
         return xmid
 
@@ -54,13 +53,18 @@ def collect_and_encode_rollout(
     Window ``[s, s+L)`` represents the state at frame ``s+L-1``; its aligned
     ``action``/``reward`` are the ones recorded at that same frame.
 
+    If ``model.vae`` is set, frames are latent-encoded with ``encode_clips``
+    before being passed to the world model (latent-space models).
+
+    The embedding is the raw ``xmid`` bottleneck, intentionally left spatial
+    (not pooled/flattened) so a downstream policy can consume it convolutionally.
+
     Args:
-        vae: if set, frames are latent-encoded with ``encode_clips`` before being
-            passed to the world model (latent-space models).
         encode_batch_size: number of windows encoded per ``model.encode`` call.
 
     Returns:
-        embeddings: ``(num_windows, 4 * base_channels)`` float32 state embeddings.
+        embeddings: ``(num_windows, S/4, H/4, W/4, 4 * base_channels)`` float32
+            state embeddings.
         actions: ``(num_windows,)`` int32 — action taken from each state.
         rewards: ``(num_windows,)`` float32 — reward received at each state.
     """
@@ -89,19 +93,14 @@ def collect_and_encode_rollout(
         action_batch[:, -1] = null_action
 
         t = mx.ones((video_batch.shape[0],))
-        embs = model.encode(video_batch, t, context=mx.array(action_batch))
+        embs = model.encode(video_batch, t, context=action_batch)
         _embeddings.append(embs)
 
     embeddings = mx.concatenate(_embeddings, axis=0)
 
     # Align actions/rewards to the frame each window ends on (s + L - 1).
-    _actions, _rewards = [], []
-    for act, rew in zip(action_sequence, reward_sequence):
-        _actions.append(act[-1])
-        _rewards.append(rew[-1])
-
-    aligned_actions = np.array(_actions).astype(np.int32)
-    aligned_rewards = np.array(_rewards).astype(np.float32)
+    aligned_actions = action_sequence[:, -1].astype(np.int32)
+    aligned_rewards = reward_sequence[:, -1].astype(np.float32)
 
     rollouts["policy"] = (embeddings, aligned_actions, aligned_rewards)
 
@@ -117,7 +116,17 @@ def train():
 
     rollouts = collect_and_encode_rollout(gym_env, world_model)
 
-    print(rollouts)
+    world_model_rollouts = rollouts["world_model"]
+    policy_rollouts = rollouts["policy"]
+
+    print(world_model_rollouts, policy_rollouts)
+
+    # train policy using world model embeddings
+    # i.e fill buffer with observations, advantages etc
+    # and do ppo update
+
+    # train world (diffusion) model using real frames
+    # i.e use flow matching trainer
 
 
 if __name__ == "__main__":
