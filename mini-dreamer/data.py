@@ -311,15 +311,31 @@ def clips_from_episodes(
     *,
     clip_length: int,
     clip_stride: int | None = None,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Slice frames, actions and rewards into clips that never cross episode boundaries."""
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Slice frames, actions, rewards and dones into clips that never cross
+    episode boundaries.
+
+    ``dones`` is a per-frame terminal mask derived from ``episode_ends`` (True on
+    each episode's final frame), sliced alongside the other streams so callers
+    can read a clip's terminal flag as ``done_clips[:, -1]`` — symmetric with the
+    aligned action/reward at ``[:, -1]``.
+    """
     starts = clip_starts_from_episodes(
         episode_ends, clip_length=clip_length, clip_stride=clip_stride
     )
+    frame_dones = np.zeros(len(frames), dtype=bool)
+    frame_dones[np.asarray(episode_ends) - 1] = True
+
     frame_clips = [frames[s : s + clip_length] for s in starts]
     action_clips = [actions[s : s + clip_length] for s in starts]
     reward_clips = [rewards[s : s + clip_length] for s in starts]
-    return np.stack(frame_clips), np.stack(action_clips), np.stack(reward_clips)
+    done_clips = [frame_dones[s : s + clip_length] for s in starts]
+    return (
+        np.stack(frame_clips),
+        np.stack(action_clips),
+        np.stack(reward_clips),
+        np.stack(done_clips),
+    )
 
 
 def rollout_env(
@@ -375,13 +391,22 @@ def record_rollouts(
     save_dir: str | Path | None = None,
     pad_multiple: int | None = None,
     recompute: bool = False,
+    return_dones: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, str | Path | None]:
+    """Record clips from ``env``.
+
+    If ``return_dones`` is True, the per-clip terminal mask ``done_sequence``
+    (``(num_clips, clip_length)`` bool, terminal at ``[:, -1]``) is appended to
+    the return tuple. Dones are not persisted, so a cached disk load returns
+    ``None`` for them.
+    """
 
     if save_to_disk:
         assert save_dir is not None
         if not recompute and Path(save_dir).exists():
             print(f"Loading precomputed rollouts from {save_dir}")
-            return (*load_rollouts(save_dir), save_dir)
+            result = (*load_rollouts(save_dir), save_dir)
+            return (*result, None) if return_dones else result
 
     frames, actions, rewards, episode_ends = rollout_env(
         env,
@@ -395,7 +420,7 @@ def record_rollouts(
     if pad_multiple is not None:
         frames = pad_frames_to_multiple(frames, multiple=pad_multiple)
 
-    frames, actions, rewards = clips_from_episodes(
+    frames, actions, rewards, dones = clips_from_episodes(
         frames,
         actions,
         rewards,
@@ -408,7 +433,8 @@ def record_rollouts(
         assert save_dir is not None
         save_rollouts(save_dir, frames, actions, rewards)
 
-    return frames, actions, rewards, save_dir
+    result = (frames, actions, rewards, save_dir)
+    return (*result, dones) if return_dones else result
 
 
 def save_rollouts(

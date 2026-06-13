@@ -1,10 +1,15 @@
+from collections import deque
+
 import gymnasium as gym
 import mlx.core as mx
+import mlx.optimizers as optim
 import numpy as np
 from tqdm import tqdm
 
-from data import Dataset, make_env, record_rollouts
+from data import Dataset, make_env, pad_frames_to_multiple, record_rollouts
 from diffusion import FlowMatchingTrainer, load_model, save_model
+from logger_utils import VideoLogger
+from ppo import Batch, Categorical, PPOConfig, RunningNorm, make_net, update
 from unet import UNet3D
 from vae import WaveletVAE, decode_latents, encode_clips, load_vae
 
@@ -43,7 +48,7 @@ def collect_and_encode_rollout(
     num_steps: int = 256,
     seed: int = 0,
     encode_batch_size: int = 64,
-) -> tuple[Dataset, tuple[mx.array, np.ndarray, np.ndarray]]:
+) -> tuple[Dataset, tuple[mx.array, np.ndarray, np.ndarray, np.ndarray]]:
     """Roll out ``env`` and encode it into per-step world-model state embeddings.
 
     Collects a raw ``(frames, actions, rewards)`` stream via ``rollout_env`` and
@@ -70,15 +75,19 @@ def collect_and_encode_rollout(
     Returns:
         rollout_dataset: ``Dataset`` over the raw ``(frames, actions, rewards)``
             clips, for training the world model on real-env transitions.
-        policy_rollouts: ``(embeddings, actions, rewards)`` where
+        policy_rollouts: ``(embeddings, actions, rewards, dones)`` where
             - embeddings: ``(num_windows, S/4, H/4, W/4, 4 * base_channels)``
               float32 state embeddings,
             - actions: ``(num_windows,)`` int32 — action taken from each state,
-            - rewards: ``(num_windows,)`` float32 — reward received at each state.
+            - rewards: ``(num_windows,)`` float32 — reward received at each state,
+            - dones: ``(num_windows,)`` float32 — 1.0 if the window ends an
+              episode (terminal), else 0.0. The windows form a single ordered
+              stream of concatenated episodes (stride-1, no boundary crossing),
+              so ``dones`` is the GAE reset mask for that stream.
     """
     context_size = model.max_context_size + 1
 
-    videos, action_sequence, reward_sequence, save_dir = record_rollouts(
+    videos, action_sequence, reward_sequence, save_dir, done_sequence = record_rollouts(
         env=env,
         num_steps=num_steps,
         seed=seed,
@@ -88,6 +97,7 @@ def collect_and_encode_rollout(
         save_dir="/tmp/dreamer/test",
         recompute=True,
         pad_multiple=32,
+        return_dones=True,
     )
 
     rollout_dataset = Dataset(save_dir, encoder=model.image_encoder)
@@ -112,11 +122,12 @@ def collect_and_encode_rollout(
 
     embeddings = mx.concatenate(_embeddings, axis=0)
 
-    # Align actions/rewards to the frame each window ends on (s + L - 1).
+    # Align action/reward/done to the frame each window ends on (s + L - 1).
     aligned_actions = action_sequence[:, -1].astype(np.int32)
     aligned_rewards = reward_sequence[:, -1].astype(np.float32)
+    aligned_dones = done_sequence[:, -1].astype(np.float32)
 
-    policy_rollouts = (embeddings, aligned_actions, aligned_rewards)
+    policy_rollouts = (embeddings, aligned_actions, aligned_rewards, aligned_dones)
 
     return rollout_dataset, policy_rollouts
 
@@ -125,7 +136,7 @@ def update_world_model(
     trainer: FlowMatchingTrainer,
     dataset: Dataset,
     *,
-    num_steps: int = 10,
+    num_steps: int = 100,
     batch_size: int = 8,
 ) -> float:
     """Run ``num_steps`` flow-matching updates on real-env clips.
@@ -145,6 +156,93 @@ def update_world_model(
             pbar.set_postfix(loss=f"{float(loss):.4f}")
 
     return float(total_loss) / num_steps
+
+
+def compute_gae(
+    rewards: np.ndarray,
+    values: np.ndarray,
+    dones: np.ndarray,
+    *,
+    gamma: float,
+    gae_lambda: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """GAE over a single ordered stream of concatenated episodes.
+
+    Mirrors the reverse scan in ``ppo.collect_rollout`` but for a flat ``(N,)``
+    sequence whose episode resets are marked by ``dones`` (1.0 on terminal
+    steps). The successor of step ``t`` is step ``t+1`` (windows are contiguous
+    within an episode); ``dones[t]`` zeroes the bootstrap at episode ends. A
+    non-terminal final step is treated as truncated with a zero bootstrap.
+    """
+    n = len(rewards)
+    advantages = np.zeros(n, dtype=np.float32)
+    last_gae = 0.0
+    for t in reversed(range(n)):
+        nonterminal = 1.0 - dones[t]
+        next_value = values[t + 1] if t + 1 < n else 0.0
+        delta = rewards[t] + gamma * next_value * nonterminal - values[t]
+        last_gae = delta + gamma * gae_lambda * nonterminal * last_gae
+        advantages[t] = last_gae
+    returns = advantages + values
+    return advantages, returns
+
+
+def build_policy_agent(embedding_dim: int, num_actions: int, cfg: PPOConfig):
+    """Flat-MLP actor-critic over flattened world-model embeddings.
+
+    Returns ``(policy, value_net, normalizer, policy_opt, value_opt)`` — built
+    once and reused across iterations so optimizer/normalizer state persists.
+    """
+    normalizer = RunningNorm((embedding_dim,)) if cfg.normalize_obs else None
+    policy_net = make_net(embedding_dim, num_actions, cfg, normalizer)
+    value_net = make_net(embedding_dim, 1, cfg, normalizer)
+    mx.eval(policy_net.parameters(), value_net.parameters())
+
+    policy = Categorical(policy_net)
+    policy_opt = optim.AdamW(learning_rate=cfg.policy_lr)
+    value_opt = optim.AdamW(learning_rate=cfg.value_lr)
+    return policy, value_net, normalizer, policy_opt, value_opt
+
+
+def update_policy(
+    policy,
+    value_net,
+    normalizer,
+    policy_opt,
+    value_opt,
+    policy_rollouts: tuple[mx.array, np.ndarray, np.ndarray, np.ndarray],
+    cfg: PPOConfig,
+) -> dict:
+    """Run a PPO update on a real-env batch of world-model embeddings.
+
+    Flattens the spatial embeddings to vector observations, computes GAE
+    advantages/returns with the current value net (obs stats frozen for the
+    whole update, as in ``ppo``), runs the clipped PPO update, then folds the
+    batch into the obs normalizer for the next iteration.
+    """
+    embeddings, actions, rewards, dones = policy_rollouts
+    obs = embeddings.reshape(embeddings.shape[0], -1)
+
+    values = np.array(value_net(obs).reshape(-1))
+    advantages, returns = compute_gae(
+        np.asarray(rewards),
+        values,
+        np.asarray(dones),
+        gamma=cfg.gamma,
+        gae_lambda=cfg.gae_lambda,
+    )
+
+    batch = Batch(
+        obs=obs,
+        actions=mx.array(actions),
+        returns=mx.array(returns),
+        advantages=mx.array(advantages),
+    )
+    metrics = update(policy, value_net, policy_opt, value_opt, batch, cfg)
+
+    if normalizer is not None:
+        normalizer.update(np.array(obs))
+    return metrics
 
 
 def train():
@@ -167,12 +265,22 @@ def train():
     rollout_dataset, policy_rollouts = collect_and_encode_rollout(gym_env, world_model)
 
     # train world (diffusion) model using real frames
-    wm_loss = update_world_model(world_model_trainer, rollout_dataset)
+    wm_loss = update_world_model(world_model_trainer, rollout_dataset, num_steps=10)
     print(f"world model loss: {wm_loss:.4f}")
 
     # train policy using world model embeddings
-    # i.e fill buffer with observations, advantages etc
-    # and do ppo update
+    num_windows = int(policy_rollouts[0].shape[0])
+    embedding_dim = int(np.prod(policy_rollouts[0].shape[1:]))
+    num_actions = int(gym_env.action_space.n)
+    cfg = PPOConfig(num_envs=1, num_steps=num_windows, update_epochs=10)
+
+    policy, value_net, normalizer, policy_opt, value_opt = build_policy_agent(
+        embedding_dim, num_actions, cfg
+    )
+    metrics = update_policy(
+        policy, value_net, normalizer, policy_opt, value_opt, policy_rollouts, cfg
+    )
+    print(f"policy update: {metrics}")
 
 
 if __name__ == "__main__":
