@@ -169,18 +169,22 @@ class VideoLogger:
         env_name: str,
         exp_folder: str,
         num_eval_episodes: int = 4,
+        record_fps: int = 30,
     ):
 
         # Configuration
         self.env_name = env_name
-        self.num_eval_episodes = 4
+        self.num_eval_episodes = num_eval_episodes
         self.exp_folder = exp_folder
+        self.record_fps = record_fps
 
-    def record_evaluation(self, policy, global_step: int = 0):
+    def record_evaluation(self, policy, global_step: int = 0, **env_kwargs):
 
-        # Create environment with recording capabilities
+        # Create environment with recording capabilities. Extra ``env_kwargs``
+        # (e.g. continuous/frame_skip) are forwarded to ``gym.make`` so callers
+        # can match the env configuration their agent was trained on.
         env = gym.make(
-            self.env_name, render_mode="rgb_array"
+            self.env_name, render_mode="rgb_array", **env_kwargs
         )  # rgb_array needed for video recording
 
         # Add video recording for every episode
@@ -189,6 +193,7 @@ class VideoLogger:
             video_folder=self.exp_folder,  # Folder to save videos
             name_prefix=f"step-{global_step:05d}",  # Prefix for video filenames
             episode_trigger=lambda x: True,  # Record every episode
+            fps=self.record_fps,
         )
 
         # Add episode statistics tracking
@@ -199,6 +204,10 @@ class VideoLogger:
 
         for episode_num in range(self.num_eval_episodes):
             obs, info = env.reset()
+            # Let a stateful agent clear any per-episode context (e.g. the
+            # rolling frame window an embedding-space policy carries).
+            if hasattr(policy, "reset"):
+                policy.reset()
             episode_reward = 0
             step_count = 0
 
@@ -206,6 +215,8 @@ class VideoLogger:
             while not episode_over:
                 # Replace this with your trained agent's policy
                 action = policy.get_action(obs, sample=False)
+                # action = env.action_space.sample()
+                # print(f"{action = }")
 
                 obs, reward, terminated, truncated, info = env.step(action)
                 episode_reward += reward
@@ -214,7 +225,7 @@ class VideoLogger:
                 episode_over = terminated or truncated
 
             print(
-                f"Episode {episode_num + 1}: {step_count} steps, reward = {episode_reward}"
+                f"Episode {episode_num + 1}: {step_count} steps, reward = {episode_reward} - final action: {action}"
             )
 
         # Print summary statistics

@@ -245,10 +245,79 @@ def update_policy(
     return metrics
 
 
+class EvalAgent:
+    """Stateful adapter that lets ``VideoLogger.record_evaluation`` drive an
+    embedding-space policy on raw env frames.
+
+    ``record_evaluation`` owns the eval loop: it hands us one raw observation at
+    a time via ``get_action(obs, sample=False)`` and expects an ``int`` action.
+    Our policy, however, acts on the *flattened world-model state embedding* of a
+    ``max_context_size + 1``-frame window (see ``collect_and_encode_rollout``), so
+    each call we:
+
+    1. Preprocess the frame exactly as the training pipeline does
+       (``screen / 127.5 - 1`` → window → ``pad_frames_to_multiple(.., 32)``).
+    2. Append it to a rolling window of the last ``context_size`` frames, left-
+       padded with the first frame until the window fills (cold start).
+    3. Encode the window through the world model with ``t=1`` and an action
+       context whose final entry is the NULL action, yielding the same ``xmid``
+       state embedding the policy was trained on.
+    4. Flatten it and defer to the wrapped policy.
+
+    ``reset`` (called by ``record_evaluation`` at each episode start) clears the
+    frame/action buffers so windows never bleed across episodes.
+    """
+
+    def __init__(self, world_model: WorldModel, policy: Categorical):
+        self.world_model = world_model
+        self.policy = policy
+        self.context_size = world_model.max_context_size + 1
+        self.null_action = world_model.null_action
+        self.reset()
+
+    def reset(self) -> None:
+        self._frames: deque = deque(maxlen=self.context_size)
+        # Actions taken at the (context_size - 1) frames preceding the current one.
+        self._actions: deque = deque(maxlen=self.context_size - 1)
+
+    @staticmethod
+    def _preprocess(obs) -> np.ndarray:
+        screen = obs["screen"] if isinstance(obs, dict) else obs
+        return np.asarray(screen, dtype=np.float32) / 127.5 - 1.0
+
+    def get_action(self, obs, sample: bool = False) -> int:
+        self._frames.append(self._preprocess(obs))
+
+        # Left-pad the window with the first available frame until it fills, then
+        # pad spatially to match the world model's expected (multiple-of-32) size.
+        frames = list(self._frames)
+        frames = [frames[0]] * (self.context_size - len(frames)) + frames
+        window = pad_frames_to_multiple(np.stack(frames, axis=0), multiple=32)
+
+        # Action context aligned to the window: action taken at each frame, with
+        # the current frame's action NULLed (it's the one we're about to choose).
+        actions = list(self._actions)
+        actions = [self.null_action] * (self.context_size - 1 - len(actions)) + actions
+        action_ctx = np.asarray(actions + [self.null_action], dtype=np.int32)
+        # print(f"{action_ctx = }")
+
+        emb = self.world_model.encode(
+            mx.array(window)[None],
+            mx.ones((1,)),
+            context=mx.array(action_ctx)[None],
+        )
+        action = self.policy.get_action(np.array(emb.reshape(-1)), sample=sample)
+
+        self._actions.append(int(action))
+
+        return int(action)
+
+
 def train():
 
     load_dir = "logs/vizdoom-latent-rewards"
     gym_env = make_env("VizdoomBasic-v1")
+    # breakpoint()
     # Online + EMA copies start from the same pretrained weights.
     model = load_model(load_dir)
     ema_model = load_model(load_dir)
@@ -262,25 +331,39 @@ def train():
         reward_loss_weight=1e-1,
     )
 
-    rollout_dataset, policy_rollouts = collect_and_encode_rollout(gym_env, world_model)
+    rollout_dataset, policy_rollouts = collect_and_encode_rollout(
+        gym_env, world_model, num_steps=2000
+    )
 
     # train world (diffusion) model using real frames
     wm_loss = update_world_model(world_model_trainer, rollout_dataset, num_steps=10)
     print(f"world model loss: {wm_loss:.4f}")
 
     # train policy using world model embeddings
+    print("building policy agent")
     num_windows = int(policy_rollouts[0].shape[0])
     embedding_dim = int(np.prod(policy_rollouts[0].shape[1:]))
     num_actions = int(gym_env.action_space.n)
     cfg = PPOConfig(num_envs=1, num_steps=num_windows, update_epochs=10)
-
     policy, value_net, normalizer, policy_opt, value_opt = build_policy_agent(
         embedding_dim, num_actions, cfg
     )
+    print("policy agent built")
     metrics = update_policy(
         policy, value_net, normalizer, policy_opt, value_opt, policy_rollouts, cfg
     )
     print(f"policy update: {metrics}")
+
+    # Evaluate the policy in the *real* env, recording videos via the logger.
+    # frame_skip/continuous mirror make_env's doom path so eval dynamics match
+    # the transitions the world model was trained on.
+    eval_agent = EvalAgent(world_model, policy)
+    video_logger = VideoLogger("VizdoomBasic-v1", exp_folder="logs/dreamer-eval")
+    video_logger.record_evaluation(
+        eval_agent,
+        global_step=0,
+        continuous=False,
+    )
 
 
 if __name__ == "__main__":

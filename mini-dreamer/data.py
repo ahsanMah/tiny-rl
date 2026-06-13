@@ -40,12 +40,12 @@ class DatasetConfig:
     recompute: bool = False
 
 
-def make_env(env_id: str) -> gym.Env:
+def make_env(env_id: str, frame_skip: int = 1) -> gym.Env:
     if "MiniGrid" in env_id:
         return gym.make(env_id)
 
     if "doom" in env_id:
-        return gym.make(env_id, continuous=False, frame_skip=4)
+        return gym.make(env_id, continuous=False, frame_skip=frame_skip)
 
     return gym.make(env_id, continuous=False)
 
@@ -243,7 +243,6 @@ def pad_frames_to_multiple(frames: np.ndarray, *, multiple: int = 16) -> np.ndar
     top, left = pad_h // 2, pad_w // 2
     pad_widths = ((0, 0), (top, pad_h - top), (left, pad_w - left), (0, 0))
     padded = np.pad(frames, pad_widths, mode="constant", constant_values=-1.0)
-    print(f"padded frames from {(height, width)} to {padded.shape[1:3]}")
     return padded
 
 
@@ -418,7 +417,9 @@ def record_rollouts(
     )
 
     if pad_multiple is not None:
+        height, width = frames.shape[1:3]
         frames = pad_frames_to_multiple(frames, multiple=pad_multiple)
+        print(f"padded frames from {(height, width)} to {frames.shape[1:3]}")
 
     frames, actions, rewards, dones = clips_from_episodes(
         frames,
