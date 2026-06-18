@@ -4,10 +4,11 @@ import gymnasium as gym
 import mlx.core as mx
 import mlx.optimizers as optim
 import numpy as np
+from mlx import nn
 from tqdm import tqdm
 
 from data import Dataset, make_env, pad_frames_to_multiple, record_rollouts
-from diffusion import FlowMatchingTrainer, load_model, save_model
+from diffusion import FlowMatchingTrainer, load_model, sample_euler, save_model
 from logger_utils import VideoLogger
 from ppo import Batch, Categorical, PPOConfig, RunningNorm, make_net, update
 from unet import UNet3D
@@ -313,6 +314,118 @@ class EvalAgent:
         return int(action)
 
 
+def dream(
+    world_model: WorldModel,
+    policy: Categorical,
+    seed_rollout: Dataset,
+    *,
+    num_trajectory_steps: int = 256,
+    num_parallel_dreams: int = 4,
+    sample_steps: int = 16,
+) -> tuple[mx.array, np.ndarray, np.ndarray, np.ndarray]:
+    """Roll the policy forward *inside* the world model and return imagined
+    experience in the same ``(embeddings, actions, rewards, dones)`` layout as
+    ``collect_and_encode_rollout`` — ready to hand straight to ``update_policy``.
+
+    Starting from ``num_parallel_dreams`` seed windows sampled from
+    ``seed_rollout`` (already VAE-encoded latents, since the dataset carries the
+    world model's image encoder), each dream step:
+
+    1. Encodes the current ``context_size``-frame window at ``t=1`` with the last
+       action NULLed to get the pre-action state embedding — identical to the
+       real-env path in ``collect_and_encode_rollout``.
+    2. Samples an action from ``policy`` for every parallel dream.
+    3. Generates the next latent frame with ``sample_euler`` conditioned on that
+       action and slides it into the rolling window.
+    4. Re-encodes the window now ending on the new frame — last action kept (not
+       NULLed, since it produced that frame) — and reads the world model's reward
+       head as the imagined reward for the transition.
+
+    Because the world model has no termination head, dreams are fixed-horizon:
+    every trajectory runs the full ``num_trajectory_steps`` and is marked ``done`` only on
+    its final step (a GAE reset between concatenated dreams, see ``compute_gae``).
+
+    All work happens in latent space, so we call ``world_model.model`` directly
+    rather than ``world_model.encode`` (which would re-encode the latents through
+    the VAE).
+
+    Returns ``(embeddings, actions, rewards, dones)`` with the parallel dreams
+    concatenated into one ordered stream (dream 0's steps, then dream 1's, ...),
+    matching the contract ``update_policy`` already consumes.
+    """
+    model = world_model.model
+    if not getattr(model, "has_reward_head", False):
+        raise ValueError(
+            "dream needs a world model built with predict_reward=True to score "
+            "imagined transitions"
+        )
+
+    context_size = world_model.max_context_size + 1
+    null_action = world_model.null_action
+
+    # Seed windows are already latent (the dataset carries the image encoder).
+    seed_frames, seed_actions, _ = seed_rollout.sample_val_batch(num_parallel_dreams)
+    frames = seed_frames[:, -context_size:]
+    actions = np.array(seed_actions[:, -context_size:], dtype=np.int32)
+    batch = int(frames.shape[0])
+    ones = mx.ones((batch,))
+
+    step_embeddings: list[mx.array] = []
+    step_actions: list[np.ndarray] = []
+    step_rewards: list[np.ndarray] = []
+
+    for _ in tqdm(range(num_trajectory_steps), desc="dreaming"):
+        # 1. Pre-action state embedding: full window, last action NULLed.
+        ctx = actions.copy()
+        ctx[:, -1] = null_action
+        xmid, _, _ = model.encode(frames, ones, context=mx.array(ctx))
+
+        # 2. Sample an action per parallel dream from the policy.
+        obs = np.array(xmid.reshape(batch, -1))
+        act = np.asarray(policy.get_action(obs, sample=True), dtype=np.int32)
+
+        # 3. Generate the next latent frame conditioned on the chosen action.
+        #    Conditioning is the last max_context_size frames; the action window
+        #    aligns those frames' actions and appends the new action.
+        gen_actions = mx.array(np.concatenate([actions[:, 1:], act[:, None]], axis=1))
+        sample = sample_euler(
+            model,
+            conditioning_clips=frames[:, 1:],
+            actions=gen_actions,
+            num_steps=sample_steps,
+        )
+
+        # Slide the rolling window forward one frame / action.
+        frames = mx.concatenate([frames[:, 1:], sample[:, -1:]], axis=1)
+        actions = np.concatenate([actions[:, 1:], act[:, None]], axis=1)
+
+        # 4. Reward for the transition: window now ending on the new frame, with
+        #    the action that produced it kept (matches the reward-head target).
+        xmid_r, _, _ = model.encode(frames, ones, context=mx.array(actions))
+        reward = model.predict_reward(xmid_r)
+        mx.eval(frames, xmid, reward)
+
+        step_embeddings.append(xmid)
+        step_actions.append(act)
+        step_rewards.append(np.array(reward))
+
+    # (T, B, ...) -> (B, T, ...) -> (B*T, ...): one ordered stream per dream,
+    # dreams concatenated back-to-back so compute_gae scans each in order.
+    embeddings = mx.stack(step_embeddings, axis=0).swapaxes(0, 1)
+    embeddings = embeddings.reshape(batch * num_trajectory_steps, *embeddings.shape[2:])
+    actions_out = np.stack(step_actions, axis=0).swapaxes(0, 1).reshape(-1)
+    rewards_out = (
+        np.stack(step_rewards, axis=0).swapaxes(0, 1).reshape(-1).astype(np.float32)
+    )
+
+    # Mark only each dream's final step terminal, resetting GAE between dreams.
+    dones = np.zeros((batch, num_trajectory_steps), dtype=np.float32)
+    dones[:, -1] = 1.0
+    dones_out = dones.reshape(-1)
+
+    return embeddings, actions_out.astype(np.int32), rewards_out, dones_out
+
+
 def train():
 
     load_dir = "logs/vizdoom-latent-rewards"
@@ -324,6 +437,7 @@ def train():
     vae = load_vae("logs/vizdoom-vae")
     world_model = WorldModel(ema_model, vae)
 
+    ppo_config = PPOConfig(num_envs=1, update_epochs=10)
     world_model_trainer = FlowMatchingTrainer(
         model,
         ema_model,
@@ -332,27 +446,57 @@ def train():
     )
 
     rollout_dataset, policy_rollouts = collect_and_encode_rollout(
-        gym_env, world_model, num_steps=2000
+        gym_env, world_model, num_steps=200
     )
 
     # train world (diffusion) model using real frames
-    wm_loss = update_world_model(world_model_trainer, rollout_dataset, num_steps=10)
-    print(f"world model loss: {wm_loss:.4f}")
+    # wm_loss = update_world_model(world_model_trainer, rollout_dataset, num_steps=10)
+    # print(f"world model loss: {wm_loss:.4f}")
 
     # train policy using world model embeddings
     print("building policy agent")
     num_windows = int(policy_rollouts[0].shape[0])
     embedding_dim = int(np.prod(policy_rollouts[0].shape[1:]))
     num_actions = int(gym_env.action_space.n)
-    cfg = PPOConfig(num_envs=1, num_steps=num_windows, update_epochs=10)
     policy, value_net, normalizer, policy_opt, value_opt = build_policy_agent(
-        embedding_dim, num_actions, cfg
+        embedding_dim, num_actions, ppo_config
     )
     print("policy agent built")
     metrics = update_policy(
-        policy, value_net, normalizer, policy_opt, value_opt, policy_rollouts, cfg
+        policy,
+        value_net,
+        normalizer,
+        policy_opt,
+        value_opt,
+        policy_rollouts,
+        ppo_config,
     )
-    print(f"policy update: {metrics}")
+    print(f"policy update (real): {metrics}")
+
+    # Dream loop: roll the policy forward inside the world model and train it on
+    # the imagined experience. Each dream produces the same embedding/action/
+    # reward/done tuples as the real rollout, so update_policy is reused as-is.
+    num_dream_iters = 5
+    dream_steps = 32
+    num_parallel_dreams = 8
+    for dream_iter in range(num_dream_iters):
+        dream_rollouts = dream(
+            world_model,
+            policy,
+            rollout_dataset,
+            num_trajectory_steps=dream_steps,
+            num_parallel_dreams=num_parallel_dreams,
+        )
+        metrics = update_policy(
+            policy,
+            value_net,
+            normalizer,
+            policy_opt,
+            value_opt,
+            dream_rollouts,
+            ppo_config,
+        )
+        print(f"policy update (dream {dream_iter + 1}/{num_dream_iters}): {metrics}")
 
     # Evaluate the policy in the *real* env, recording videos via the logger.
     # frame_skip/continuous mirror make_env's doom path so eval dynamics match
