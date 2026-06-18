@@ -218,6 +218,40 @@ def save_diffusion_mp4(
     iio.mimsave(str(output_path), video_frames, fps=fps)
 
 
+def save_video_grid(
+    videos: mx.array | np.ndarray,
+    output_path: str | Path,
+    *,
+    grid_size: int = 4,
+    fps: float = 8.0,
+) -> None:
+    """Tile up to ``grid_size**2`` videos into a square grid and save as MP4.
+
+    Args:
+        videos: ``(N, T, H, W, C)`` array of videos in ``[-1, 1]``. Only the
+            first ``grid_size**2`` are used; if fewer are given the remaining
+            grid cells are left black.
+        output_path: destination ``.mp4`` file path.
+        grid_size: number of videos per row/column (``4`` -> 4x4 = 16 videos).
+        fps: playback speed of the output video.
+    """
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    vids = to_uint8_video(np.asarray(videos))  # (N, T, H, W, C)
+    n, t, h, w, c = vids.shape
+    cells = grid_size * grid_size
+    grid = np.zeros((cells, t, h, w, c), dtype=np.uint8)
+    grid[: min(n, cells)] = vids[:cells]
+
+    # (cells, T, H, W, C) -> (T, grid_size*H, grid_size*W, C)
+    grid = grid.reshape(grid_size, grid_size, t, h, w, c)
+    grid = grid.transpose(2, 0, 3, 1, 4, 5)
+    grid = grid.reshape(t, grid_size * h, grid_size * w, c)
+
+    iio.mimsave(str(output_path), list(grid), fps=fps)
+
+
 def save_clip_previews(
     clips: mx.array,
     output_dir: str | Path,
