@@ -1,6 +1,10 @@
+import tomllib
 from collections import deque
+from dataclasses import dataclass, fields
+from pathlib import Path
 from pprint import pprint
 
+import click
 import gymnasium as gym
 import mlx.core as mx
 import mlx.optimizers as optim
@@ -12,6 +16,7 @@ from data import Dataset, make_env, pad_frames_to_multiple, record_rollouts
 from diffusion import FlowMatchingTrainer, load_model, sample_euler, save_model
 from logger_utils import VideoLogger
 from ppo import Batch, Categorical, PPOConfig, RunningNorm, make_net, update
+from pretrainer import _dataclass_options, _from_resolved
 from unet import UNet3D
 from vae import WaveletVAE, decode_latents, encode_clips, load_vae
 from video_utils import save_video_grid
@@ -448,33 +453,63 @@ def dream(
     return embeddings, actions_out.astype(np.int32), rewards_out, dones_out
 
 
-def train():
+@dataclass(frozen=True)
+class DreamerConfig:
+    # Paths / env
+    env_id: str = "VizdoomBasic-v1"
+    model_dir: str = "logs/vizdoom-latent-rewards"
+    vae_dir: str = "logs/vizdoom-vae"
+    experiment_dir: str = "logs/doom-dreamer-v1"
+    use_bfloat16: bool = True
 
-    load_dir = "logs/vizdoom-latent-rewards"
-    gym_env = make_env("VizdoomBasic-v1")
-    # breakpoint()
+    # World-model (flow-matching) trainer
+    wm_learning_rate: float = 1e-5
+    reward_loss_weight: float = 1e-1
+    weight_decay: float = 1e-2
+    ema_decay: float = 0.99
+
+    # Outer training loop
+    gym_sessions: int = 5
+    warmup_rollout_steps: int = 10
+    rollout_steps: int = 1000
+    wm_update_steps: int = 100
+    wm_batch_size: int = 32
+
+    # Dream loop
+    num_dream_iters: int = 5
+    dream_steps_base: int = 8  # dream horizon = dream_steps_base * (session + 1)
+    num_parallel_dreams: int = 16
+    sample_steps: int = 16
+
+    # PPO
+    update_epochs: int = 10
+
+
+def train(cfg: DreamerConfig = DreamerConfig()):
+    gym_env = make_env(cfg.env_id)
     # Online + EMA copies start from the same pretrained weights.
-    model = load_model(load_dir)
-    ema_model = load_model(load_dir)
-    model.set_dtype(mx.bfloat16)
-    ema_model.set_dtype(mx.bfloat16)
+    model = load_model(cfg.model_dir, prefer_ema=False)
+    ema_model = load_model(cfg.model_dir)
+    vae = load_vae(cfg.vae_dir)
+    if cfg.use_bfloat16:
+        model.set_dtype(mx.bfloat16)
+        ema_model.set_dtype(mx.bfloat16)
+        vae.set_dtype(mx.bfloat16)
 
-    vae = load_vae("logs/vizdoom-vae")
     world_model = WorldModel(ema_model, vae)
-    ppo_config = PPOConfig(num_envs=1, update_epochs=10)
+    ppo_config = PPOConfig(num_envs=1, update_epochs=cfg.update_epochs)
     world_model_trainer = FlowMatchingTrainer(
         model,
         ema_model,
-        learning_rate=1e-5,
-        reward_loss_weight=1e-1,
-        weight_decay=1e-2,
-        ema_decay=0.99,
+        learning_rate=cfg.wm_learning_rate,
+        reward_loss_weight=cfg.reward_loss_weight,
+        weight_decay=cfg.weight_decay,
+        ema_decay=cfg.ema_decay,
     )
-    experiment_dir = "logs/doom-dreamer-v1"
 
     print("building policy agent")
     rollout_dataset, policy_rollouts = collect_and_encode_rollout(
-        gym_env, world_model, num_steps=10
+        gym_env, world_model, num_steps=cfg.warmup_rollout_steps
     )
     embedding_dim = int(np.prod(policy_rollouts[0].shape[1:]))
     num_actions = int(gym_env.action_space.n)
@@ -483,15 +518,17 @@ def train():
     )
     print("policy agent built")
 
-    gym_sessions = 5
     global_step = 0
-    for sess in range(gym_sessions):
+    for sess in range(cfg.gym_sessions):
         rollout_dataset, policy_rollouts = collect_and_encode_rollout(
-            gym_env, world_model, num_steps=1000
+            gym_env, world_model, num_steps=cfg.rollout_steps
         )
         # train world (diffusion) model using real frames
         wm_loss = update_world_model(
-            world_model_trainer, rollout_dataset, num_steps=100, batch_size=32
+            world_model_trainer,
+            rollout_dataset,
+            num_steps=cfg.wm_update_steps,
+            batch_size=cfg.wm_batch_size,
         )
         print(f"world model loss: {wm_loss:.4f}")
 
@@ -512,17 +549,16 @@ def train():
         # Dream loop: roll the policy forward inside the world model and train it on
         # the imagined experience. Each dream produces the same embedding/action/
         # reward/done tuples as the real rollout, so update_policy is reused as-is.
-        num_dream_iters = 5
-        dream_steps = 8 * (sess + 1)
-        num_parallel_dreams = 16
-        for dream_iter in range(num_dream_iters):
+        dream_steps = cfg.dream_steps_base * (sess + 1)
+        for dream_iter in range(cfg.num_dream_iters):
             dream_rollouts = dream(
                 world_model,
                 policy,
                 rollout_dataset,
                 num_trajectory_steps=dream_steps,
-                num_parallel_dreams=num_parallel_dreams,
-                grid_path=f"{experiment_dir}/dream_grid_{sess}-{dream_iter:03d}.mp4",
+                num_parallel_dreams=cfg.num_parallel_dreams,
+                sample_steps=cfg.sample_steps,
+                grid_path=f"{cfg.experiment_dir}/dream_grid_{sess}-{dream_iter:03d}.mp4",
                 save_seeds=dream_iter == 0,
             )
             metrics = update_policy(
@@ -534,7 +570,7 @@ def train():
                 dream_rollouts,
                 ppo_config,
             )
-            print(f"policy update (dream {dream_iter + 1}/{num_dream_iters}):")
+            print(f"policy update (dream {dream_iter + 1}/{cfg.num_dream_iters}):")
             pprint(metrics)
             global_step += ppo_config.num_iterations * ppo_config.update_epochs
 
@@ -542,7 +578,7 @@ def train():
         # frame_skip/continuous mirror make_env's doom path so eval dynamics match
         # the transitions the world model was trained on.
         eval_agent = EvalAgent(world_model, policy)
-        video_logger = VideoLogger("VizdoomBasic-v1", exp_folder=experiment_dir)
+        video_logger = VideoLogger(cfg.env_id, exp_folder=cfg.experiment_dir)
         video_logger.record_evaluation(
             eval_agent,
             global_step=global_step,
@@ -550,5 +586,48 @@ def train():
         )
 
 
+def _config_option(func):
+    """Eager --config option that merges a TOML's [dreamer] section into defaults.
+
+    Mirrors pretrainer's config plumbing but for the single DreamerConfig schema.
+    Explicit CLI flags still override values loaded from the file.
+    """
+
+    def _callback(ctx: click.Context, _param: click.Parameter, value: Path | None):
+        if value is None:
+            return
+        with value.open("rb") as f:
+            config = tomllib.load(f)
+        section = config.get("dreamer", config)
+        valid = {f.name for f in fields(DreamerConfig)}
+        unknown = set(section) - valid
+        if unknown:
+            raise click.ClickException(
+                f"Unknown options in config: {', '.join(sorted(unknown))}"
+            )
+        ctx.default_map = dict(section)
+
+    return click.option(
+        "--config",
+        type=click.Path(exists=True, dir_okay=False, path_type=Path),
+        is_eager=True,
+        expose_value=False,
+        callback=_callback,
+        help="Path to a dreamer config TOML file (options under [dreamer]).",
+    )(func)
+
+
+@click.command()
+@_config_option
+@_dataclass_options(DreamerConfig)
+@click.pass_context
+def main(ctx: click.Context, **kwargs) -> None:
+    """Train the Dreamer policy inside the pretrained world model."""
+    cfg = _from_resolved(DreamerConfig, ctx.params)
+    print("Using dreamer config:")
+    pprint(cfg)
+    train(cfg)
+
+
 if __name__ == "__main__":
-    train()
+    main()
