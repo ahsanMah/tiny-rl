@@ -1,4 +1,5 @@
 from collections import deque
+from pprint import pprint
 
 import gymnasium as gym
 import mlx.core as mx
@@ -13,6 +14,7 @@ from logger_utils import VideoLogger
 from ppo import Batch, Categorical, PPOConfig, RunningNorm, make_net, update
 from unet import UNet3D
 from vae import WaveletVAE, decode_latents, encode_clips, load_vae
+from video_utils import save_video_grid
 
 
 class WorldModel:
@@ -322,6 +324,8 @@ def dream(
     num_trajectory_steps: int = 256,
     num_parallel_dreams: int = 4,
     sample_steps: int = 16,
+    grid_path: str | None = None,
+    save_seeds: bool = False,
 ) -> tuple[mx.array, np.ndarray, np.ndarray, np.ndarray]:
     """Roll the policy forward *inside* the world model and return imagined
     experience in the same ``(embeddings, actions, rewards, dones)`` layout as
@@ -365,6 +369,13 @@ def dream(
 
     # Seed windows are already latent (the dataset carries the image encoder).
     seed_frames, seed_actions, _ = seed_rollout.sample_val_batch(num_parallel_dreams)
+
+    if grid_path is not None and save_seeds:
+        videos = world_model.decoder(seed_frames)  # (B, T, H, W, C)
+        mx.eval(videos)
+        _path = grid_path.replace(".mp4", "-seed.mp4")
+        save_video_grid(np.array(videos), _path, grid_size=4)
+
     frames = seed_frames[:, -context_size:]
     actions = np.array(seed_actions[:, -context_size:], dtype=np.int32)
     batch = int(frames.shape[0])
@@ -373,6 +384,7 @@ def dream(
     step_embeddings: list[mx.array] = []
     step_actions: list[np.ndarray] = []
     step_rewards: list[np.ndarray] = []
+    step_frames: list[mx.array] = []  # generated latent frame per step, for viz
 
     for _ in tqdm(range(num_trajectory_steps), desc="dreaming"):
         # 1. Pre-action state embedding: full window, last action NULLed.
@@ -408,6 +420,8 @@ def dream(
         step_embeddings.append(xmid)
         step_actions.append(act)
         step_rewards.append(np.array(reward))
+        if grid_path is not None:
+            step_frames.append(sample[:, -1:])
 
     # (T, B, ...) -> (B, T, ...) -> (B*T, ...): one ordered stream per dream,
     # dreams concatenated back-to-back so compute_gae scans each in order.
@@ -423,6 +437,14 @@ def dream(
     dones[:, -1] = 1.0
     dones_out = dones.reshape(-1)
 
+    # Decode the imagined latent trajectories into pixel videos and tile them
+    # into a 4x4 grid for inspection.
+    if grid_path is not None and step_frames:
+        latents = mx.concatenate(step_frames, axis=1)  # (B, T, ...latent...)
+        videos = world_model.decoder(latents)  # (B, T, H, W, C)
+        mx.eval(videos)
+        save_video_grid(np.array(videos), grid_path, grid_size=4)
+
     return embeddings, actions_out.astype(np.int32), rewards_out, dones_out
 
 
@@ -434,80 +456,98 @@ def train():
     # Online + EMA copies start from the same pretrained weights.
     model = load_model(load_dir)
     ema_model = load_model(load_dir)
+    model.set_dtype(mx.bfloat16)
+    ema_model.set_dtype(mx.bfloat16)
+
     vae = load_vae("logs/vizdoom-vae")
     world_model = WorldModel(ema_model, vae)
-
     ppo_config = PPOConfig(num_envs=1, update_epochs=10)
     world_model_trainer = FlowMatchingTrainer(
         model,
         ema_model,
-        learning_rate=3e-4,
+        learning_rate=1e-5,
         reward_loss_weight=1e-1,
+        weight_decay=1e-2,
+        ema_decay=0.99,
     )
+    experiment_dir = "logs/doom-dreamer-v1"
 
-    rollout_dataset, policy_rollouts = collect_and_encode_rollout(
-        gym_env, world_model, num_steps=200
-    )
-
-    # train world (diffusion) model using real frames
-    # wm_loss = update_world_model(world_model_trainer, rollout_dataset, num_steps=10)
-    # print(f"world model loss: {wm_loss:.4f}")
-
-    # train policy using world model embeddings
     print("building policy agent")
-    num_windows = int(policy_rollouts[0].shape[0])
+    rollout_dataset, policy_rollouts = collect_and_encode_rollout(
+        gym_env, world_model, num_steps=10
+    )
     embedding_dim = int(np.prod(policy_rollouts[0].shape[1:]))
     num_actions = int(gym_env.action_space.n)
     policy, value_net, normalizer, policy_opt, value_opt = build_policy_agent(
         embedding_dim, num_actions, ppo_config
     )
     print("policy agent built")
-    metrics = update_policy(
-        policy,
-        value_net,
-        normalizer,
-        policy_opt,
-        value_opt,
-        policy_rollouts,
-        ppo_config,
-    )
-    print(f"policy update (real): {metrics}")
 
-    # Dream loop: roll the policy forward inside the world model and train it on
-    # the imagined experience. Each dream produces the same embedding/action/
-    # reward/done tuples as the real rollout, so update_policy is reused as-is.
-    num_dream_iters = 5
-    dream_steps = 32
-    num_parallel_dreams = 8
-    for dream_iter in range(num_dream_iters):
-        dream_rollouts = dream(
-            world_model,
-            policy,
-            rollout_dataset,
-            num_trajectory_steps=dream_steps,
-            num_parallel_dreams=num_parallel_dreams,
+    gym_sessions = 5
+    global_step = 0
+    for sess in range(gym_sessions):
+        rollout_dataset, policy_rollouts = collect_and_encode_rollout(
+            gym_env, world_model, num_steps=1000
         )
+        # train world (diffusion) model using real frames
+        wm_loss = update_world_model(
+            world_model_trainer, rollout_dataset, num_steps=100, batch_size=32
+        )
+        print(f"world model loss: {wm_loss:.4f}")
+
+        # train policy using world model embeddings
         metrics = update_policy(
             policy,
             value_net,
             normalizer,
             policy_opt,
             value_opt,
-            dream_rollouts,
+            policy_rollouts,
             ppo_config,
         )
-        print(f"policy update (dream {dream_iter + 1}/{num_dream_iters}): {metrics}")
+        global_step += ppo_config.num_iterations * ppo_config.update_epochs
+        print("policy update (real):")
+        pprint(metrics)
 
-    # Evaluate the policy in the *real* env, recording videos via the logger.
-    # frame_skip/continuous mirror make_env's doom path so eval dynamics match
-    # the transitions the world model was trained on.
-    eval_agent = EvalAgent(world_model, policy)
-    video_logger = VideoLogger("VizdoomBasic-v1", exp_folder="logs/dreamer-eval")
-    video_logger.record_evaluation(
-        eval_agent,
-        global_step=0,
-        continuous=False,
-    )
+        # Dream loop: roll the policy forward inside the world model and train it on
+        # the imagined experience. Each dream produces the same embedding/action/
+        # reward/done tuples as the real rollout, so update_policy is reused as-is.
+        num_dream_iters = 5
+        dream_steps = 8 * (sess + 1)
+        num_parallel_dreams = 16
+        for dream_iter in range(num_dream_iters):
+            dream_rollouts = dream(
+                world_model,
+                policy,
+                rollout_dataset,
+                num_trajectory_steps=dream_steps,
+                num_parallel_dreams=num_parallel_dreams,
+                grid_path=f"{experiment_dir}/dream_grid_{sess}-{dream_iter:03d}.mp4",
+                save_seeds=dream_iter == 0,
+            )
+            metrics = update_policy(
+                policy,
+                value_net,
+                normalizer,
+                policy_opt,
+                value_opt,
+                dream_rollouts,
+                ppo_config,
+            )
+            print(f"policy update (dream {dream_iter + 1}/{num_dream_iters}):")
+            pprint(metrics)
+            global_step += ppo_config.num_iterations * ppo_config.update_epochs
+
+        # Evaluate the policy in the *real* env, recording videos via the logger.
+        # frame_skip/continuous mirror make_env's doom path so eval dynamics match
+        # the transitions the world model was trained on.
+        eval_agent = EvalAgent(world_model, policy)
+        video_logger = VideoLogger("VizdoomBasic-v1", exp_folder=experiment_dir)
+        video_logger.record_evaluation(
+            eval_agent,
+            global_step=global_step,
+            continuous=False,
+        )
 
 
 if __name__ == "__main__":
