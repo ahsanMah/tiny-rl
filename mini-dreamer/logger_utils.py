@@ -31,13 +31,14 @@ class RLLogger:
         self.writer.add_scalar("rollout/episode_reward", reward, global_step)
         self.writer.add_scalar("rollout/episode_length", length, global_step)
 
-    def log_train_metrics(self, global_step: int, metrics: Dict[str, Any]):
+    def log_train_metrics(self, global_step: int, metrics: Dict[str, Any], val=False):
         """
         Logs a dictionary of training metrics (losses, entropy, lr, etc.).
-        Metrics will automatically be grouped under the 'train/' prefix in TensorBoard.
+        Metrics will automatically be grouped under the 'train/val' prefix in TensorBoard.
         """
+        _name = "val" if val else "train"
         for key, value in metrics.items():
-            self.writer.add_scalar(f"train/{key}", float(value), global_step)
+            self.writer.add_scalar(f"{_name}/{key}", float(value), global_step)
 
     def log_validation_steps(self, global_step: int, metrics: Dict[float, Any]):
         """Logs validation losses keyed by diffusion timestep."""
@@ -85,11 +86,12 @@ class RLLogger:
             if arr.shape[-1] == 1:
                 arr = np.repeat(arr, 3, axis=-1)  # broadcast grayscale → RGB
             b, h, w, c = arr.shape
-            rows = b // num_cols
-            arr = arr[: rows * num_cols]
-            # (rows, num_cols, H, W, C) → (rows, H, num_cols, W, C) → (rows*H, num_cols*W, C)
-            arr = arr.reshape(rows, num_cols, h, w, c)
-            arr = arr.transpose(0, 2, 1, 3, 4).reshape(rows * h, num_cols * w, c)
+            cols = min(num_cols, b)
+            rows = b // cols
+            arr = arr[: rows * cols]
+            # (rows, cols, H, W, C) → (rows, H, cols, W, C) → (rows*H, cols*W, C)
+            arr = arr.reshape(rows, cols, h, w, c)
+            arr = arr.transpose(0, 2, 1, 3, 4).reshape(rows * h, cols * w, c)
             return arr.transpose(2, 0, 1)  # (C, H, W)
 
         self.writer.add_image(
@@ -167,18 +169,22 @@ class VideoLogger:
         env_name: str,
         exp_folder: str,
         num_eval_episodes: int = 4,
+        record_fps: int = 30,
     ):
 
         # Configuration
         self.env_name = env_name
-        self.num_eval_episodes = 4
+        self.num_eval_episodes = num_eval_episodes
         self.exp_folder = exp_folder
+        self.record_fps = record_fps
 
-    def record_evaluation(self, policy, global_step: int = 0):
+    def record_evaluation(self, policy, global_step: int = 0, **env_kwargs):
 
-        # Create environment with recording capabilities
+        # Create environment with recording capabilities. Extra ``env_kwargs``
+        # (e.g. continuous/frame_skip) are forwarded to ``gym.make`` so callers
+        # can match the env configuration their agent was trained on.
         env = gym.make(
-            self.env_name, render_mode="rgb_array"
+            self.env_name, render_mode="rgb_array", **env_kwargs
         )  # rgb_array needed for video recording
 
         # Add video recording for every episode
@@ -187,6 +193,7 @@ class VideoLogger:
             video_folder=self.exp_folder,  # Folder to save videos
             name_prefix=f"step-{global_step:05d}",  # Prefix for video filenames
             episode_trigger=lambda x: True,  # Record every episode
+            fps=self.record_fps,
         )
 
         # Add episode statistics tracking
@@ -197,6 +204,10 @@ class VideoLogger:
 
         for episode_num in range(self.num_eval_episodes):
             obs, info = env.reset()
+            # Let a stateful agent clear any per-episode context (e.g. the
+            # rolling frame window an embedding-space policy carries).
+            if hasattr(policy, "reset"):
+                policy.reset()
             episode_reward = 0
             step_count = 0
 
@@ -204,6 +215,8 @@ class VideoLogger:
             while not episode_over:
                 # Replace this with your trained agent's policy
                 action = policy.get_action(obs, sample=False)
+                # action = env.action_space.sample()
+                # print(f"{action = }")
 
                 obs, reward, terminated, truncated, info = env.step(action)
                 episode_reward += reward
@@ -212,7 +225,7 @@ class VideoLogger:
                 episode_over = terminated or truncated
 
             print(
-                f"Episode {episode_num + 1}: {step_count} steps, reward = {episode_reward}"
+                f"Episode {episode_num + 1}: {step_count} steps, reward = {episode_reward} - final action: {action}"
             )
 
         # Print summary statistics
