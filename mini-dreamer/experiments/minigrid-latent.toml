@@ -1,0 +1,56 @@
+[env]
+env_id = "MiniGrid-Empty-8x8-v0"
+
+[dataset]
+rollout_steps = 2000
+tile_size = 32
+seed = 0
+clip_length = 8
+clip_stride = 1
+preview_dir = "logs/minigrid-latent/previews"
+preview_clips = 4
+preview_fps = 2.0
+
+[vae_model]
+latent_channels = 8
+base_channels = 32
+num_downsamples = 2
+use_wavelet = true
+
+[vae_train]
+save_dir = "logs/minigrid-vae"
+vae_train_steps = 10000
+batch_size = 32
+learning_rate = 3e-4
+kl_weight = 1e-5
+recon_loss = "l2"
+log_every = 500
+log_tensorboard = true
+wavelet_loss = false
+detail_weight = 0.3
+
+[latent]
+vae_dir = "logs/minigrid-vae"
+
+[model]
+in_channels = 8
+base_channels = 32
+num_transformer_blocks = 4
+use_wavelet = false
+max_context_size = 7
+
+[train]
+save_dir = "logs/minigrid-latent"
+train_steps = 100
+batch_size = 32
+learning_rate = 3e-4
+log_every = 200
+log_tensorboard = true
+sampling_distribution = "logitnorm"
+
+[generate]
+load_dir = "logs/minigrid-latent"
+save_dir = "logs/minigrid-latent/generated"
+generate_new_frames = 2
+generate_num_steps = 32
+num_samples = 1

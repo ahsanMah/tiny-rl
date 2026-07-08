@@ -1,0 +1,9 @@
+- Do not modify code unless **explicitly** asked to
+- If user requests large changes, ask for clarification first
+  - make sure you reach a shared understanding
+- You can run the code with uv like so: `uv run ...`
+- Commit all changes as you go
+- When user asks to update the logbook
+  - Look at the git history since the last update to summarize the high level changes
+  - Highlight the problems that were encountered and subsequently fixed in future commits
+  - Keep a calm professional tone, absolutely no emojis
