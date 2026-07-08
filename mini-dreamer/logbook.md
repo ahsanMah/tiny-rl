@@ -2,6 +2,72 @@
 
 ---
 
+## 06/13 - Online Trainer: World Model + PPO Policy Loop
+
+A new `trainer.py` stitches the world model and a policy into a single online loop. The flow is:
+roll out the real env, encode it into per-step world-model state embeddings, update the diffusion
+world model on the real frames, and update a PPO policy on the embeddings.
+
+- A `WorldModel` wrapper bundles the diffusion UNet with the (optional) VAE and exposes an `encode`
+  path: frames are latent-encoded, then run through `UNet3D.encode` with `t=1` and a NULL-action
+  final context entry to produce the deterministic "state embedding for acting" (spatio-temporal
+  mean-pool of the bottleneck `xmid`).
+- `collect_and_encode_rollout` slides a `max_context_size + 1` window over a recorded rollout
+  (respecting episode boundaries) to emit one embedding per step, aligned with the action/reward at
+  the frame each window ends on. It returns both a `Dataset` of raw clips (for the world model) and
+  the `(embeddings, actions, rewards, dones)` stream (for the policy), reusing the existing `Dataset`
+  class rather than duplicating the data path.
+- PPO was integrated for the policy side. `record_rollouts` now optionally returns a `dones` array,
+  and a flat-MLP actor-critic runs over the flattened embeddings. A local `compute_gae` does the
+  reverse-scan advantage estimate over the single concatenated-episode stream, with `dones` acting as
+  the GAE reset mask. Optimizer/normalizer state is built once and reused across iterations.
+- Added `EvalAgent`, a stateful adapter so `VideoLogger.record_evaluation` can drive the
+  embedding-space policy on raw env frames: it keeps a rolling frame/action window (left-padded on
+  cold start, cleared on `reset`), preprocesses + pads each frame to match training, encodes it
+  through the world model, and defers to the policy.
+- `VideoLogger` was extended to support this: configurable `record_fps`, `**env_kwargs` forwarded to
+  `gym.make` so eval dynamics match the training env config, and a per-episode `policy.reset()` call
+  for stateful agents.
+
+## 06/12 - Doom Rollout Cleanup and Sampling Tweaks
+
+- Simplified the Doom rollout path in `data.py`.
+- Made the diffusion recompute explicit and lowered the number of visualization samples to speed up
+  the pretrainer's preview step.
+
+## 06/12 - Reward Head
+
+- Added a reward head to the world model. The reward loss is only computed for low-noise diffusion
+  steps during training, since reward is only well-defined near clean latents.
+
+## 06/11 - Null Actions and LR Scheduling
+
+- Introduced null/no-op actions and emitted action embeddings from the UNet, laying groundwork for
+  classifier-free-style action conditioning.
+- Added LR scheduling to the diffusion trainer (matching the VAE schedule pattern).
+
+## 06/10 - Latent Diffusion Pipeline
+
+- Refactored the dataset class to save rollouts to disk and load them on demand, cutting memory use.
+  Latent diffusion training is now working end-to-end on this dataset, and the VAE trainer was wired
+  to the same dataset.
+- Added a small input-noise augmentation for robustness and made the rollout warmup configurable.
+- Added divisible/`pad_multiple` padding and refreshed eval metrics.
+- Added an LR schedule for VAE training: linear warmup, peak hold, then linear decay.
+- Overall this helped to generate longer sequences, probably due to higher params to dims ratio and the tiny noise augmentation
+
+## 06/06 - VAE Training
+
+- Early experiments showed that small red agent was a bit difficult to reconstruct
+  - L2 only with tile size 8 (64x64) and 2x downsample captures but blurry
+  - We can capture it nicely even if using wavelet downsampling to (32x32)!
+    - Need to train slightly longer though
+    - Good compromise is 96x96 and wavelet
+- L1+L2 loss combined does *not* capture the red agent in minigrid
+  - Further exps show that L1 loss is actually slower to get to the same fidelity
+  - Cannot reconstruct green square easily either - and things are blurrier ..?
+
+
 ## 06/03 - Episode-Safe Rollouts, Doom Support, and New Experiment Configs
 
 Rollout handling now records episode boundaries and slices clips per-episode so training data no longer
