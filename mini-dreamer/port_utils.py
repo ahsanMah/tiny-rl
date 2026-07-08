@@ -98,8 +98,13 @@ def save_mlx_vae_reconstructions(
     mx.eval(recon)
     recon_np = np.asarray(recon)
 
-    imageio.imwrite(output_dir / "reconstruction_sheet.png", _reconstruction_sheet(clips[:num_samples], recon_np))
-    save_clip_previews(mx.array(recon_np), output_dir / "recon_clips", max_clips=num_samples, fps=8.0)
+    imageio.imwrite(
+        output_dir / "reconstruction_sheet.png",
+        _reconstruction_sheet(clips[:num_samples], recon_np),
+    )
+    save_clip_previews(
+        mx.array(recon_np), output_dir / "recon_clips", max_clips=num_samples, fps=8.0
+    )
     return recon_np
 
 
@@ -118,6 +123,9 @@ def _copy_conv_to_nnx(mlx_conv, jax_conv) -> None:
 
 def _copy_rmsnorm_to_nnx(mlx_norm, jax_norm) -> None:
     _set_nnx_param(jax_norm.scale, np.asarray(mlx_norm.weight))
+    # MLX defaults to eps=1e-5, NNX to 1e-6; the checkpoint was trained with
+    # MLX's value, so carry it over or outputs drift by ~1e-4.
+    jax_norm.epsilon = mlx_norm.eps
 
 
 def _copy_resblock_to_nnx(mlx_block, jax_block) -> None:
@@ -191,8 +199,14 @@ def compare_with_jax_vae(
         "recon_mean_abs_diff": float(np.mean(np.abs(mlx_recon_np - jax_recon_np))),
     }
     (output_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
-    imageio.imwrite(output_dir / "jax_reconstruction_sheet.png", _reconstruction_sheet(batch_np, jax_recon_np))
-    imageio.imwrite(output_dir / "diff_sheet.png", to_uint8_video(np.abs(mlx_recon_np - jax_recon_np) * 2.0 - 1.0)[0, 0])
+    imageio.imwrite(
+        output_dir / "jax_reconstruction_sheet.png",
+        _reconstruction_sheet(batch_np, jax_recon_np),
+    )
+    imageio.imwrite(
+        output_dir / "diff_sheet.png",
+        to_uint8_video(np.abs(mlx_recon_np - jax_recon_np) * 2.0 - 1.0)[0, 0],
+    )
 
     print("JAX VAE comparison:")
     for key, value in metrics.items():
@@ -208,8 +222,18 @@ def compare_with_jax_vae(
 
 @click.command()
 @click.option("--env-id", default="VizdoomBasic-v1", show_default=True)
-@click.option("--output-dir", type=click.Path(path_type=Path), default=DEFAULT_OUTPUT_DIR, show_default=True)
-@click.option("--vae-dir", type=click.Path(path_type=Path), default=DEFAULT_MLX_VAE_DIR, show_default=True)
+@click.option(
+    "--output-dir",
+    type=click.Path(path_type=Path),
+    default=DEFAULT_OUTPUT_DIR,
+    show_default=True,
+)
+@click.option(
+    "--vae-dir",
+    type=click.Path(path_type=Path),
+    default=DEFAULT_MLX_VAE_DIR,
+    show_default=True,
+)
 @click.option("--rollout-steps", default=500, show_default=True)
 @click.option("--seed", default=0, show_default=True)
 @click.option("--clip-length", default=8, show_default=True)
@@ -217,7 +241,11 @@ def compare_with_jax_vae(
 @click.option("--frame-skip", default=4, show_default=True)
 @click.option("--num-samples", default=8, show_default=True)
 @click.option("--compare-atol", default=1e-3, show_default=True)
-@click.option("--recompute", is_flag=True, help="Regenerate the VizDoom test set even if it already exists.")
+@click.option(
+    "--recompute",
+    is_flag=True,
+    help="Regenerate the VizDoom test set even if it already exists.",
+)
 def main(
     env_id: str,
     output_dir: Path,
@@ -241,8 +269,16 @@ def main(
         frame_skip=frame_skip,
         recompute=recompute,
     )
-    print(f"test set: {data_dir} clips={clips.shape} actions={actions.shape} rewards={rewards.shape}")
-    save_clip_previews(mx.array(clips), output_dir / "test-set-previews", max_clips=min(num_samples, len(clips)), fps=8.0, actions=actions)
+    print(
+        f"test set: {data_dir} clips={clips.shape} actions={actions.shape} rewards={rewards.shape}"
+    )
+    save_clip_previews(
+        mx.array(clips),
+        output_dir / "test-set-previews",
+        max_clips=min(num_samples, len(clips)),
+        fps=8.0,
+        actions=actions,
+    )
     save_mlx_vae_reconstructions(
         clips,
         vae_dir=vae_dir,
