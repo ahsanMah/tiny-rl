@@ -2,6 +2,18 @@
 
 ---
 
+## 07/08 - JAX VAE Port and Comparison Utility
+
+The VAE work was ported into a JAX-native implementation and paired with a small comparison helper
+for checking behavior against the existing model.
+
+- Added `vae_jax.py`, a JAX rewrite of the VAE path, including the converted wavelet/downsampling
+  pieces needed for the port.
+- Added `port_utils.py` helpers to run VAE checks and compare outputs during the migration.
+- Added JAX as a project dependency and updated the lockfile accordingly.
+- The comparison utility was introduced after the initial port so the translated code could be
+  sanity-checked against the existing implementation and refined where needed.
+
 ## 06/13 - Online Trainer: World Model + PPO Policy Loop
 
 A new `trainer.py` stitches the world model and a policy into a single online loop. The flow is:
