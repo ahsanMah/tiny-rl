@@ -112,34 +112,47 @@ class WaveletUpsample:
         return out.reshape(B, T, Hh * 2, Wh * 2, C)
 
 
-class ConvResBlock2D(nn.Module):
+class ConvResBlock2D(nnx.Module):
     """Per-frame 2D residual block (Conv2d analogue of ConvResBlock3D, no time-FiLM)."""
 
-    def __init__(self, in_channels: int, out_channels: int):
-        super().__init__()
+    def __init__(self, in_channels: int, out_channels: int, *, rngs: nnx.Rngs):
         self.shortcut = (
-            nn.Identity()
+            nnx.identity
             if in_channels == out_channels
-            else nn.Conv2d(in_channels, out_channels, kernel_size=1)
+            else nnx.Conv(in_channels, out_channels, kernel_size=(1, 1), rngs=rngs)
         )
-        self.norm1 = nn.RMSNorm(out_channels)
-        self.norm2 = nn.RMSNorm(out_channels)
-        self.conv1 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
-        self.act = nn.SiLU()
+        self.norm1 = nnx.RMSNorm(out_channels, rngs=rngs)
+        self.norm2 = nnx.RMSNorm(out_channels, rngs=rngs)
+        self.conv1 = nnx.Conv(
+            out_channels, out_channels, kernel_size=(3, 3), padding=1, rngs=rngs
+        )
+        self.conv2 = nnx.Conv(
+            out_channels,
+            out_channels,
+            kernel_size=(3, 3),
+            padding=1,
+            kernel_init=nnx.initializers.zeros_init(),
+            bias_init=nnx.initializers.zeros_init(),
+            rngs=rngs,
+        )
+        self.act = nnx.silu
 
-        zero_init = nn.init.constant(0.0)
-        self.conv2.weight = zero_init(self.conv2.weight)
-        self.conv2.bias = zero_init(self.conv2.bias)
-
-    def __call__(self, x: mx.array) -> mx.array:
+    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
         x = self.shortcut(x)
         h = self.conv1(self.act(self.norm1(x)))
         h = self.conv2(self.act(self.norm2(h)))
         return h + x
 
 
-class WaveletVAE(nn.Module):
+def _nearest_upsample_2d(x: jnp.ndarray, scale_factor: int = 2) -> jnp.ndarray:
+    """NHWC nearest-neighbor upsample, matching mx.nn.Upsample(mode='nearest')."""
+    B, H, W, C = x.shape
+    return jax.image.resize(
+        x, (B, H * scale_factor, W * scale_factor, C), method="nearest"
+    )
+
+
+class WaveletVAE(nnx.Module):
     """Per-frame 2D KL VAE with Haar wavelet pooling as first/last layer.
 
     Operates on clips ``(B, T, H, W, C)``; collapses ``(B, T) -> B*T`` for the
@@ -156,9 +169,9 @@ class WaveletVAE(nn.Module):
         num_downsamples: int = 2,
         use_wavelet: bool = True,
         latent_scale: float = 1.0,
+        rngs: nnx.Rngs,
         **kwargs,
     ):
-        super().__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.latent_channels = latent_channels
@@ -167,7 +180,7 @@ class WaveletVAE(nn.Module):
         self.use_wavelet = use_wavelet
         self.latent_scale = latent_scale
 
-        zero_init = nn.init.constant(0.0)
+        zero_init = nnx.initializers.zeros_init()
 
         enc_in = in_channels
         if use_wavelet:
@@ -179,37 +192,60 @@ class WaveletVAE(nn.Module):
             dec_out = out_channels
 
         # Encoder: stem -> [resblock + strided downsample] x num_downsamples -> mean/logvar.
-        self.enc_stem = nn.Conv2d(enc_in, base_channels, kernel_size=3, padding=1)
-        self.enc_blocks = []
-        self.enc_downs = []
+        self.enc_stem = nnx.Conv(
+            enc_in, base_channels, kernel_size=(3, 3), padding=1, rngs=rngs
+        )
+        enc_blocks = []
+        enc_downs = []
         ch = base_channels
         for _ in range(num_downsamples):
             out_ch = ch * 2
-            self.enc_blocks.append(ConvResBlock2D(ch, out_ch))
-            self.enc_downs.append(
-                nn.Conv2d(out_ch, out_ch, kernel_size=3, stride=2, padding=1)
+            enc_blocks.append(ConvResBlock2D(ch, out_ch, rngs=rngs))
+            enc_downs.append(
+                nnx.Conv(
+                    out_ch,
+                    out_ch,
+                    kernel_size=(3, 3),
+                    strides=(2, 2),
+                    padding=1,
+                    rngs=rngs,
+                )
             )
             ch = out_ch
-        self.enc_mid = ConvResBlock2D(ch, ch)
-        self.to_moments = nn.Conv2d(ch, latent_channels * 2, kernel_size=1)
-        self.to_moments.weight = zero_init(self.to_moments.weight)
-        self.to_moments.bias = zero_init(self.to_moments.bias)
+        self.enc_blocks = nnx.List(enc_blocks)
+        self.enc_downs = nnx.List(enc_downs)
+        self.enc_mid = ConvResBlock2D(ch, ch, rngs=rngs)
+        self.to_moments = nnx.Conv(
+            ch,
+            latent_channels * 2,
+            kernel_size=(1, 1),
+            kernel_init=zero_init,
+            bias_init=zero_init,
+            rngs=rngs,
+        )
 
         # Decoder: mirror (nearest upsample + conv).
-        self.from_latent = nn.Conv2d(latent_channels, ch, kernel_size=3, padding=1)
-        self.dec_mid = ConvResBlock2D(ch, ch)
-        self.dec_ups = []
-        self.dec_blocks = []
+        self.from_latent = nnx.Conv(
+            latent_channels, ch, kernel_size=(3, 3), padding=1, rngs=rngs
+        )
+        self.dec_mid = ConvResBlock2D(ch, ch, rngs=rngs)
+        dec_blocks = []
         for _ in range(num_downsamples):
             out_ch = ch // 2
-            self.dec_ups.append(nn.Upsample(scale_factor=2, mode="nearest"))
-            self.dec_blocks.append(ConvResBlock2D(ch, out_ch))
+            dec_blocks.append(ConvResBlock2D(ch, out_ch, rngs=rngs))
             ch = out_ch
-        self.dec_out = nn.Conv2d(ch, dec_out, kernel_size=3, padding=1)
-        self.dec_out.weight = zero_init(self.dec_out.weight)
-        self.dec_out.bias = zero_init(self.dec_out.bias)
+        self.dec_blocks = nnx.List(dec_blocks)
+        self.dec_out = nnx.Conv(
+            ch,
+            dec_out,
+            kernel_size=(3, 3),
+            padding=1,
+            kernel_init=zero_init,
+            bias_init=zero_init,
+            rngs=rngs,
+        )
 
-    def encode(self, frames: mx.array) -> tuple[mx.array, mx.array]:
+    def encode(self, frames: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
         """``(B, T, H, W, C)`` -> ``(mean, logvar)`` each ``(B, T, h, w, latent_channels)``."""
         B, T = frames.shape[0], frames.shape[1]
         if self.use_wavelet:
@@ -224,32 +260,36 @@ class WaveletVAE(nn.Module):
             moments[..., : self.latent_channels],
             moments[..., self.latent_channels :],
         )
-        logvar = mx.clip(logvar, -30.0, 20.0)
+        logvar = jnp.clip(logvar, -30.0, 20.0)
         mean = mean.reshape(B, T, *mean.shape[1:])
         logvar = logvar.reshape(B, T, *logvar.shape[1:])
         return mean, logvar
 
-    def reparameterize(self, mean: mx.array, logvar: mx.array) -> mx.array:
-        eps = mx.random.normal(mean.shape)
-        return mean + mx.exp(0.5 * logvar) * eps
+    def reparameterize(
+        self, mean: jnp.ndarray, logvar: jnp.ndarray, *, rngs: nnx.Rngs
+    ) -> jnp.ndarray:
+        eps = jax.random.normal(rngs.reparam(), mean.shape)
+        return mean + jnp.exp(0.5 * logvar) * eps
 
-    def decode(self, z: mx.array) -> mx.array:
+    def decode(self, z: jnp.ndarray) -> jnp.ndarray:
         """``(B, T, h, w, latent_channels)`` -> ``(B, T, H, W, C)``."""
         B, T = z.shape[0], z.shape[1]
         x = z.reshape(B * T, *z.shape[2:])
         h = self.from_latent(x)
         h = self.dec_mid(h)
-        for up, block in zip(self.dec_ups, self.dec_blocks):
-            h = block(up(h))
+        for block in self.dec_blocks:
+            h = block(_nearest_upsample_2d(h, scale_factor=2))
         out = self.dec_out(h)
         out = out.reshape(B, T, *out.shape[1:])
         if self.use_wavelet:
             out = self.unpool(out)
         return out
 
-    def __call__(self, frames: mx.array) -> tuple[mx.array, mx.array, mx.array]:
+    def __call__(
+        self, frames: jnp.ndarray, *, rngs: nnx.Rngs
+    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
         mean, logvar = self.encode(frames)
-        z = self.reparameterize(mean, logvar)
+        z = self.reparameterize(mean, logvar, rngs=rngs)
         recon = self.decode(z)
         return recon, mean, logvar
 
@@ -260,8 +300,8 @@ def _clone_vae(model_config_dict: dict, original_parameters) -> WaveletVAE:
     return clone
 
 
-def kl_divergence(mean: mx.array, logvar: mx.array) -> mx.array:
-    return -0.5 * mx.mean(1.0 + logvar - mean**2 - mx.exp(logvar))
+def kl_divergence(mean: jax.Array, logvar: jax.Array) -> jax.Array:
+    return -0.5 * jnp.mean(1.0 + logvar - mean**2 - jnp.exp(logvar))
 
 
 def linear_warmup_decay_schedule(
