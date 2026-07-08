@@ -180,11 +180,11 @@ def rollout_doom(
         rewards: (num_steps,) float32, summed over frame_skip.
         episode_ends: exclusive end indices of each episode into frames/actions.
     """
-    print("Using Doom Env")
+    # print("Using Doom Env")
     env.reset(seed=seed)
-    env.action_space.sample()
-    print(env.metadata)
-    pprint(env.spec)
+    # env.action_space.sample()
+    # print(env.metadata)
+    # pprint(env.spec)
     warmup_steps = 5
 
     def _warmup():
@@ -538,6 +538,9 @@ class Dataset:
         self.train_size = train_size
         self.val_size = int(self.val_videos.shape[0])
         self.num_channels = int(videos.shape[-1])
+
+        print(f"setup dataset from {data_dir}")
+        print(f"{self.train_size = } - {self.val_size = }")
 
     def _build_tensor(
         self,

@@ -363,6 +363,9 @@ class UNet3D(nn.Module):
         self.use_wavelet = use_wavelet
         self.null_action = num_actions
         self.time_embed = TimeEmbedding(time_embed_dim)
+        # Noise level of the conditioning frames (1.0 = clean), embedded so the
+        # model can calibrate how much to trust an imperfect history.
+        self.ctx_noise_embed = TimeEmbedding(time_embed_dim)
         self.context_embed = ActionEmbedding(time_embed_dim, num_actions=num_actions)
         conv_block: nn.Module = ConvResBlock3D
 
@@ -431,7 +434,11 @@ class UNet3D(nn.Module):
             )
 
     def encode(
-        self, x: mx.array, t: mx.array, context: mx.array
+        self,
+        x: mx.array,
+        t: mx.array,
+        context: mx.array,
+        t_ctx: mx.array | None = None,
     ) -> tuple[mx.array, tuple[mx.array, mx.array], mx.array]:
         """Down + mid path. Returns (xmid, skips, time_context).
 
@@ -440,6 +447,9 @@ class UNet3D(nn.Module):
         downstream heads (value, policy, reward). Call with clean frames,
         t=1, and a context ending in the NULL action to get a deterministic
         state embedding for acting.
+
+        ``t_ctx`` is the noise level of the conditioning frames (1.0 = clean);
+        when ``None`` the context is treated as clean.
         """
         if self.use_wavelet:
             x = self.prepool(x)
@@ -449,10 +459,16 @@ class UNet3D(nn.Module):
         elif t.ndim == 2 and t.shape[-1] == 1:
             t = t[:, 0]
 
+        if t_ctx is None:
+            t_ctx = mx.ones_like(t)
+        elif t_ctx.ndim == 0:
+            t_ctx = mx.broadcast_to(t_ctx, (x.shape[0],))
+
         t_emb = self.time_embed(t)
+        ctx_emb = self.ctx_noise_embed(t_ctx)
         context = self.context_embed(context)
         action_emb = context[:, -1, :]
-        time_context = (t_emb + action_emb) * 0.5
+        time_context = (t_emb + ctx_emb + action_emb) / 3.0
 
         x1 = self.res1(x, t_emb)
         x2 = self.res2(self.down1(x1), time_context)
@@ -490,8 +506,14 @@ class UNet3D(nn.Module):
         pooled = mx.mean(xmid, axis=(1, 2, 3))
         return self.reward_head(pooled)[:, 0]
 
-    def __call__(self, x: mx.array, t: mx.array, context: mx.array) -> mx.array:
-        xmid, skips, time_context = self.encode(x, t, context)
+    def __call__(
+        self,
+        x: mx.array,
+        t: mx.array,
+        context: mx.array,
+        t_ctx: mx.array | None = None,
+    ) -> mx.array:
+        xmid, skips, time_context = self.encode(x, t, context, t_ctx=t_ctx)
         return self.decode(xmid, skips, time_context)
 
 

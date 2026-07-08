@@ -40,8 +40,8 @@ class ModelConfig:
 @dataclass(frozen=True)
 class TrainConfig:
     train_steps: int = 1_000
-    batch_size: int = 1
-    learning_rate: float = 1e-3
+    batch_size: int = 32
+    learning_rate: float = 3e-4
     lr_final: float | None = None
     lr_warmup_steps: int = 500
     lr_hold_steps: int = 3000
@@ -49,6 +49,10 @@ class TrainConfig:
     action_dropout: float = 0.1
     reward_loss_weight: float = 0.0
     reward_t_threshold: float = 0.6
+    # Context-noise augmentation: conditioning frames are corrupted to a flow
+    # level sampled uniformly in [min_context_t, 1.0] (1.0 = clean). Lower =
+    # stronger augmentation against autoregressive drift; 1.0 disables it.
+    min_context_t: float = 0.5
     log_every: int = 50
     save_dir: str | Path | None = None
     load_dir: str | None = None
@@ -169,6 +173,7 @@ class FlowMatchingTrainer:
         action_dropout: float = 0.1,
         reward_loss_weight: float = 0.0,
         reward_t_threshold: float = 0.6,
+        min_context_t: float = 1.0,
         sampling_distribution: NoiseDistribution = "logitnorm",
         logit_norm_mu: float = 0.0,
         logit_norm_scale: float = 1.0,
@@ -183,6 +188,7 @@ class FlowMatchingTrainer:
         self.action_dropout = action_dropout
         self.reward_loss_weight = reward_loss_weight
         self.reward_t_threshold = reward_t_threshold
+        self.min_context_t = min_context_t
         self.optimizer = optim.AdamW(
             learning_rate=learning_rate, weight_decay=weight_decay
         )
@@ -230,6 +236,7 @@ class FlowMatchingTrainer:
         actions: mx.array,
         t: mx.array,
         *,
+        t_ctx: mx.array | None = None,
         rewards: mx.array | None = None,
         return_eval_aux: bool = False,
     ) -> tuple[mx.array, mx.array] | tuple[mx.array, mx.array, mx.array, mx.array]:
@@ -252,16 +259,22 @@ class FlowMatchingTrainer:
           variance explained, scale-free baseline.
         """
         mask = make_final_frame_mask(x1)
+        if t_ctx is None:
+            t_ctx = mx.ones_like(t)
 
-        # small noise added to conditioning frames for robustness
-        eps_noise = sample_noise(x1.shape, noise_distribution="normal") * 1e-2
-        x1 = x1 + eps_noise * (1 - mask)
-
-        noise = sample_noise(x1.shape, noise_distribution="normal") * mask
+        # Diffusion-forcing style corruption: the target (final) frame is noised
+        # to level ``t`` while the conditioning frames are noised to level
+        # ``t_ctx`` (1.0 = clean). Training on imperfect history teaches the
+        # model to denoise from its own (error-carrying) rollout frames instead
+        # of always-clean ground truth, which is what curbs autoregressive
+        # drift. ``level`` is ``t`` on the final frame and ``t_ctx`` elsewhere.
+        noise = sample_noise(x1.shape, noise_distribution="normal")
         t_view = mx.reshape(t, (x1.shape[0], 1, 1, 1, 1)) * mask
-        xt = (1.0 - t_view) * noise + t_view * x1 + (1 - mask) * x1
+        t_ctx_view = mx.reshape(t_ctx, (x1.shape[0], 1, 1, 1, 1)) * (1 - mask)
+        level = t_view + t_ctx_view
+        xt = (1.0 - level) * noise + level * x1
         target_velocity = mask * (x1 - noise)
-        xmid, skips, time_context = model.encode(xt, t, context=actions)
+        xmid, skips, time_context = model.encode(xt, t, context=actions, t_ctx=t_ctx)
         pred_velocity = model.decode(xmid, skips, time_context)
         loss = mx.mean((pred_velocity[:, -1:] - target_velocity[:, -1:]) ** 2)
         if not return_eval_aux:
@@ -272,7 +285,7 @@ class FlowMatchingTrainer:
                 reward_loss = mx.mean(keep * (pred_reward - rewards) ** 2)
             return loss + self.reward_loss_weight * reward_loss, reward_loss
 
-        x1_pred = xt[:, -1:] + (1.0 - t_view[:, -1:]) * pred_velocity[:, -1:]
+        x1_pred = xt[:, -1:] + (1.0 - level[:, -1:]) * pred_velocity[:, -1:]
         recon_mse = mx.mean((x1_pred - x1[:, -1:]) ** 2)
         target_var = mx.mean(target_velocity[:, -1:] ** 2)
         r2 = 1.0 - loss / mx.maximum(target_var, 1e-12)
@@ -314,6 +327,13 @@ class FlowMatchingTrainer:
             preds[timestep] = x1_pred
         return losses, psnrs, r2s, preds
 
+    def _sample_context_t(self, shape: tuple[int, ...]) -> mx.array:
+        """Sample the conditioning-frame noise level, uniform in
+        ``[min_context_t, 1.0]`` (1.0 = clean). ``min_context_t == 1.0``
+        disables context-noise augmentation (always-clean history)."""
+        lo = self.min_context_t
+        return lo + (1.0 - lo) * mx.random.uniform(shape=shape)
+
     def _dropout_actions(self, actions: mx.array) -> mx.array:
         """Replace each action slot with the NULL action independently with
         probability ``action_dropout``. Full-NULL contexts train the
@@ -335,8 +355,11 @@ class FlowMatchingTrainer:
         def _loss(batch, actions, rewards):
             # This is where the logit norm sampling may be used
             t = self.sampling_fn_for_t(batch.shape[:1])
+            t_ctx = self._sample_context_t(batch.shape[:1])
             actions = self._dropout_actions(actions)
-            return self._loss_at_t(self.model, batch, actions, t, rewards=rewards)
+            return self._loss_at_t(
+                self.model, batch, actions, t, t_ctx=t_ctx, rewards=rewards
+            )
 
         loss_and_grad_fn = nn.value_and_grad(self.model, _loss)
         (loss, reward_loss), grads = loss_and_grad_fn(batch, actions, rewards)
@@ -635,7 +658,7 @@ def train_on_dataset(
     full_model_config = {**input_config, **asdict(model_config)}
 
     if train_config.load_dir is not None:
-        model = load_model(train_config.load_dir)
+        model = load_model(train_config.load_dir, prefer_ema=False)
         print(f"resuming training from: {train_config.load_dir}")
     else:
         model = UNet3D(**full_model_config)
@@ -663,6 +686,7 @@ def train_on_dataset(
         action_dropout=train_config.action_dropout,
         reward_loss_weight=train_config.reward_loss_weight,
         reward_t_threshold=train_config.reward_t_threshold,
+        min_context_t=train_config.min_context_t,
     )
 
     checkpoint_interval = 1000
