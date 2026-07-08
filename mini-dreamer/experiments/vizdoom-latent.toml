@@ -1,0 +1,67 @@
+[env]
+env_id = "VizdoomBasic-v1"
+
+[dataset]
+rollout_steps = 5000
+seed = 0
+clip_length = 4
+clip_stride = 1
+preview_dir = "logs/vizdoom-latent/previews"
+preview_clips = 4
+preview_fps = 8.0
+frame_skip = 4
+pad_multiple = 32
+recompute = true
+
+[vae_model]
+latent_channels = 8
+base_channels = 32
+num_downsamples = 2
+use_wavelet = true
+
+[vae_train]
+save_dir = "logs/vizdoom-vae"
+vae_train_steps = 5000
+batch_size = 32
+learning_rate = 3e-4
+lr_final = 1e-5
+lr_warmup_steps = 500
+lr_hold_steps = 3000
+kl_weight = 1e-5
+recon_loss = "l2"
+log_every = 200
+log_tensorboard = true
+wavelet_loss = false
+detail_weight = 0.3
+
+[latent]
+vae_dir = "logs/vizdoom-vae"
+
+[model]
+in_channels = 8
+base_channels = 32
+num_transformer_blocks = 4
+use_wavelet = false
+max_context_size = 7
+predict_reward = true
+
+[train]
+save_dir = "logs/vizdoom-latent-v2"
+load_dir = "logs/vizdoom-latent-rewards"
+train_steps = 5000
+batch_size = 128
+log_every = 200
+log_tensorboard = true
+sampling_distribution = "logitnorm"
+learning_rate = 3e-4
+lr_final = 1e-5
+lr_warmup_steps = 500
+lr_hold_steps = 3000
+reward_loss_weight = 1e-1
+
+[generate]
+load_dir = "logs/vizdoom-latent-v2"
+save_dir = "logs/vizdoom-latent-v2/generated"
+generate_new_frames = 4
+generate_num_steps = 32
+num_samples = 8

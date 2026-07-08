@@ -1,0 +1,57 @@
+[env]
+env_id = "CarRacing-v3"
+
+[dataset]
+rollout_steps = 5000
+seed = 0
+clip_length = 4
+clip_stride = 1
+preview_dir = "logs/carracing-latent/previews"
+preview_clips = 4
+preview_fps = 8.0
+frame_skip = 4
+
+[vae_model]
+latent_channels = 8
+base_channels = 32
+num_downsamples = 2
+use_wavelet = true
+
+[vae_train]
+save_dir = "logs/carracing-vae"
+vae_train_steps = 10000
+batch_size = 64
+learning_rate = 3e-4
+kl_weight = 1e-5
+recon_loss = "l2"
+log_every = 500
+log_tensorboard = true
+wavelet_loss = false
+detail_weight = 0.3
+
+[latent]
+vae_dir = "logs/carracing-vae"
+
+[model]
+in_channels = 8
+base_channels = 32
+num_transformer_blocks = 4
+use_wavelet = false
+max_context_size = 7
+
+[train]
+save_dir = "logs/carracing-latent"
+# load_dir = "logs/carracing-v1-fixed"
+train_steps = 5000
+batch_size = 128
+learning_rate = 3e-4
+log_every = 200
+log_tensorboard = true
+sampling_distribution = "logitnorm"
+
+[generate]
+load_dir = "logs/carracing-latent"
+save_dir = "logs/carracing-latent/generated"
+generate_new_frames = 4
+generate_num_steps = 32
+num_samples = 8
