@@ -1,23 +1,23 @@
 import json
+import math
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from pprint import pprint
-from typing import Callable, Literal
+from types import SimpleNamespace
+from typing import Literal
 
 import jax
 import jax.numpy as jnp
-import mlx.core as mx
-import mlx.nn as nn
-import mlx.optimizers as optim
+import numpy as np
+import optax
 from flax import nnx
 from jax import lax
-from mlx.utils import tree_map
+from safetensors.flax import load_file, save_file
 
 from data import Dataset
-from diffusion import ema_update
 from logger_utils import RLLogger
-from unet import print_param_table
+from unet import format_param_table
 
 ReconLoss = Literal["l1", "l2", "l1+l2"]
 
@@ -294,10 +294,25 @@ class WaveletVAE(nnx.Module):
         return recon, mean, logvar
 
 
-def _clone_vae(model_config_dict: dict, original_parameters) -> WaveletVAE:
-    clone = WaveletVAE(**model_config_dict)
-    clone.update(tree_map(lambda x: x * 1.0, original_parameters))
-    return clone
+def ema_update(ema_model: nnx.Module, model: nnx.Module, decay: float) -> None:
+    """JAX port of ``diffusion.ema_update`` (that one operates on MLX modules)."""
+    ema_params = nnx.state(ema_model, nnx.Param)
+    params = nnx.state(model, nnx.Param)
+    nnx.update(
+        ema_model,
+        jax.tree.map(
+            lambda ema, current: decay * ema + (1.0 - decay) * current,
+            ema_params,
+            params,
+        ),
+    )
+
+
+def print_param_table(model: nnx.Module) -> None:
+    """Reuse ``unet.format_param_table`` via a ``.parameters()`` shim (it only
+    needs a nested dict of arrays with ``shape``/``dtype``)."""
+    params = nnx.state(model, nnx.Param).to_pure_dict()
+    print(format_param_table(SimpleNamespace(parameters=lambda: params)))
 
 
 def kl_divergence(mean: jax.Array, logvar: jax.Array) -> jax.Array:
@@ -311,7 +326,7 @@ def linear_warmup_decay_schedule(
     warmup_steps: int = 0,
     hold_steps: int = 0,
     final_lr: float | None = None,
-) -> float | Callable[[mx.array], mx.array]:
+) -> float | optax.Schedule:
     """Linear warmup from ``peak_lr / 10`` to ``peak_lr`` over ``warmup_steps``,
     hold at ``peak_lr`` for ``hold_steps``, then linear decay to ``final_lr``
     over the remaining steps.
@@ -324,9 +339,9 @@ def linear_warmup_decay_schedule(
     if warmup_steps <= 0 and final_lr is None:
         return peak_lr
 
-    constant = optim.linear_schedule(peak_lr, peak_lr, 1)
+    constant = optax.constant_schedule(peak_lr)
     tail = (
-        optim.linear_schedule(
+        optax.linear_schedule(
             peak_lr, final_lr, max(total_steps - warmup_steps - hold_steps, 1)
         )
         if final_lr is not None
@@ -340,24 +355,24 @@ def linear_warmup_decay_schedule(
         boundaries.insert(0, warmup_steps + hold_steps)
     if warmup_steps > 0:
         schedules.insert(
-            0, optim.linear_schedule(peak_lr / 10.0, peak_lr, warmup_steps)
+            0, optax.linear_schedule(peak_lr / 10.0, peak_lr, warmup_steps)
         )
         boundaries.insert(0, warmup_steps)
 
     if not boundaries:
         return tail
-    return optim.join_schedules(schedules, boundaries)
+    return optax.join_schedules(schedules, boundaries)
 
 
-class VAETrainer:
-    """Template: FlowMatchingTrainer. AdamW + grad-clip + EMA + compiled step."""
+class VAETrainer(nnx.Module):
+    """Template: FlowMatchingTrainer. AdamW + grad-clip + EMA + jitted step."""
 
     def __init__(
         self,
         model: WaveletVAE,
         ema_model: WaveletVAE,
         *,
-        learning_rate: float | Callable[[mx.array], mx.array] = 3e-4,
+        learning_rate: float | optax.Schedule = 3e-4,
         weight_decay: float = 1e-4,
         max_grad_norm: float = 2.0,
         ema_decay: float = 0.999,
@@ -365,6 +380,7 @@ class VAETrainer:
         recon_loss: ReconLoss = "l1",
         wavelet_loss: bool = False,
         detail_weight: float = 1.0,
+        rngs: nnx.Rngs,
     ):
         self.model = model
         self.ema_model = ema_model
@@ -379,32 +395,28 @@ class VAETrainer:
             model.out_channels
         )  # if wavelet_loss else None
         self.max_grad_norm = max_grad_norm
-        self.optimizer = optim.AdamW(
-            learning_rate=learning_rate, weight_decay=weight_decay
+        self.rngs = rngs
+        # Grad-clip + AdamW chain; nnx.jit on train_step plays the role of
+        # mx.compile (model/optimizer/EMA/rng state is tracked automatically).
+        self.optimizer = nnx.Optimizer(
+            model,
+            optax.chain(
+                optax.clip_by_global_norm(max_grad_norm),
+                optax.adamw(learning_rate=learning_rate, weight_decay=weight_decay),
+            ),
+            wrt=nnx.Param,
         )
 
-        train_state = [
-            self.model.state,
-            self.optimizer.state,
-            self.ema_model.state,
-            mx.random.state,
-        ]
-        self.compiled_train_step = mx.compile(
-            lambda batch: self.train_step(batch),
-            inputs=train_state,
-            outputs=train_state,
-        )
-
-    def _recon(self, recon: mx.array, x: mx.array) -> mx.array:
+    def _recon(self, recon: jax.Array, x: jax.Array) -> jax.Array:
         match self.recon_loss:
             case "l2":
-                return mx.mean((recon - x) ** 2)
+                return jnp.mean((recon - x) ** 2)
             case "l1":
-                return mx.mean(mx.abs(recon - x))
+                return jnp.mean(jnp.abs(recon - x))
             case "l1+l2":
-                return mx.mean(mx.abs(recon - x)) + mx.mean((recon - x) ** 2)
+                return jnp.mean(jnp.abs(recon - x)) + jnp.mean((recon - x) ** 2)
 
-    def _wavelet_detail(self, recon: mx.array, x: mx.array) -> mx.array:
+    def _wavelet_detail(self, recon: jax.Array, x: jax.Array) -> jax.Array:
         """Recon error on the single-level Haar high-frequency sub-bands (LH/HL/HH).
 
         Added on top of the pixel recon loss to up-weight high-frequency detail
@@ -417,8 +429,8 @@ class VAETrainer:
         wt = 2.0 * self.dwt(x)
         return self._recon(wr[..., C:], wt[..., C:])
 
-    def loss(self, batch: mx.array) -> mx.array:
-        recon, mean, logvar = self.model(batch)
+    def loss(self, model: WaveletVAE, batch: jax.Array, rngs: nnx.Rngs) -> jax.Array:
+        recon, mean, logvar = model(batch, rngs=rngs)
         recon_loss = self._recon(recon, batch)
         if self.wavelet_loss:
             recon_loss = recon_loss + self.detail_weight * self._wavelet_detail(
@@ -427,26 +439,30 @@ class VAETrainer:
         kl = kl_divergence(mean, logvar)
         return recon_loss + self.kl_weight * kl
 
-    def eval_loss(self, batch: mx.array) -> dict[str, mx.array]:
+    def eval_loss(self, batch: jax.Array) -> dict[str, jax.Array]:
         metrics = {}
-        recon, mean, logvar = self.model(batch)
+        recon, mean, logvar = self.model(batch, rngs=self.rngs)
         metrics["recon"] = recon
-        metrics["l2_loss"] = mx.mean((recon - batch) ** 2)
-        metrics["l1_loss"] = mx.mean(mx.abs(recon - batch))
+        metrics["l2_loss"] = jnp.mean((recon - batch) ** 2)
+        metrics["l1_loss"] = jnp.mean(jnp.abs(recon - batch))
         metrics["kl_loss"] = kl_divergence(mean, logvar)
         metrics["wavelet_loss"] = self._wavelet_detail(recon, batch)
         return metrics
 
-    def train_step(self, batch: mx.array) -> mx.array:
-        loss_and_grad_fn = nn.value_and_grad(self.model, self.loss)
-        loss, grads = loss_and_grad_fn(batch)
-        clipped_grads, _ = optim.clip_grad_norm(grads, max_norm=self.max_grad_norm)
-        self.optimizer.update(self.model, clipped_grads)
+    @nnx.jit
+    def train_step(self, batch: jax.Array) -> jax.Array:
+        # Draw the reparam key up front; the Rngs is rebuilt inside the grad
+        # trace since its counter cannot be mutated across trace levels.
+        key = self.rngs.reparam()
+        loss, grads = nnx.value_and_grad(
+            lambda model: self.loss(model, batch, nnx.Rngs(reparam=key))
+        )(self.model)
+        self.optimizer.update(self.model, grads)
         ema_update(self.ema_model, self.model, self.ema_decay)
         return loss
 
 
-def encode_clips(vae: WaveletVAE, clips: mx.array) -> mx.array:
+def encode_clips(vae: WaveletVAE, clips: jax.Array) -> jax.Array:
     """Per-frame encode ``(B, T, H, W, C)`` -> ``(B, T, h, w, latent_channels)``.
 
     Uses the posterior mean, scaled to ~unit variance by ``latent_scale``.
@@ -455,9 +471,31 @@ def encode_clips(vae: WaveletVAE, clips: mx.array) -> mx.array:
     return mean / vae.latent_scale
 
 
-def decode_latents(vae: WaveletVAE, latents: mx.array) -> mx.array:
+def decode_latents(vae: WaveletVAE, latents: jax.Array) -> jax.Array:
     """Per-frame decode ``(B, T, h, w, latent_channels)`` -> ``(B, T, H, W, C)``."""
     return vae.decode(latents * vae.latent_scale)
+
+
+def _flat_params(vae: WaveletVAE) -> dict[str, jax.Array]:
+    """Flatten trainable params to ``{'enc_stem.kernel': array, ...}`` for safetensors."""
+    return {
+        ".".join(map(str, path)): variable.value
+        for path, variable in nnx.to_flat_state(nnx.state(vae, nnx.Param))
+    }
+
+
+def _load_flat_params(vae: WaveletVAE, weights_path: str | Path) -> None:
+    tensors = load_file(str(weights_path))
+    flat = nnx.to_flat_state(nnx.state(vae, nnx.Param))
+    nnx.update(
+        vae,
+        nnx.from_flat_state(
+            [
+                (path, variable.replace(tensors[".".join(map(str, path))]))
+                for path, variable in flat
+            ]
+        ),
+    )
 
 
 def save_vae(
@@ -469,32 +507,34 @@ def save_vae(
 ) -> None:
     save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
-    vae.save_weights(str(save_dir / "model.safetensors"))
+    save_file(_flat_params(vae), str(save_dir / "model.safetensors"))
     if ema_model is not None:
-        ema_model.save_weights(str(save_dir / "ema_model.safetensors"))
+        save_file(_flat_params(ema_model), str(save_dir / "ema_model.safetensors"))
     (save_dir / "config.json").write_text(json.dumps(config, indent=2))
 
 
-def load_vae(save_dir: str | Path, *, prefer_ema: bool = True) -> WaveletVAE:
+def load_vae(
+    save_dir: str | Path, *, prefer_ema: bool = True, rngs: nnx.Rngs | None = None
+) -> WaveletVAE:
     save_dir = Path(save_dir)
     config = json.loads((save_dir / "config.json").read_text())
     config = {k: v for k, v in config.items() if k != "step"}
-    vae = WaveletVAE(**config)
+    vae = WaveletVAE(**config, rngs=rngs if rngs is not None else nnx.Rngs(0, reparam=1))
 
     model_path = save_dir / "model.safetensors"
     ema_path = save_dir / "ema_model.safetensors"
     weights_path = ema_path if prefer_ema and ema_path.exists() else model_path
-    vae.load_weights(str(weights_path))
+    _load_flat_params(vae, weights_path)
     return vae
 
 
 def _calibrate_latent_scale(vae: WaveletVAE, frames, batch_size: int = 16) -> float:
-    """`frames` may be an mx.array or a (possibly memory-mapped) numpy array."""
+    """`frames` may be a jax.Array or a (possibly memory-mapped) numpy array."""
     n = sum_ = sumsq = 0.0
     for i in range(0, frames.shape[0], batch_size):
-        mean, _ = vae.encode(mx.array(frames[i : i + batch_size]))
-        sum_ += float(mx.sum(mean))
-        sumsq += float(mx.sum(mean * mean))
+        mean, _ = vae.encode(jnp.asarray(np.asarray(frames[i : i + batch_size])))
+        sum_ += float(jnp.sum(mean))
+        sumsq += float(jnp.sum(mean * mean))
         n += mean.size
     var = sumsq / n - (sum_ / n) ** 2
     return var**0.5
@@ -530,8 +570,9 @@ def train_vae_on_dataset(
     }
     full_model_config = {**input_config, **asdict(model_config)}
 
-    model = WaveletVAE(**full_model_config)
-    ema_model = _clone_vae(full_model_config, model.parameters())
+    rngs = nnx.Rngs(0, reparam=1)
+    model = WaveletVAE(**full_model_config, rngs=rngs)
+    ema_model = nnx.clone(model)
     lr_schedule = linear_warmup_decay_schedule(
         train_config.learning_rate,
         total_steps=train_config.vae_train_steps,
@@ -548,6 +589,7 @@ def train_vae_on_dataset(
         recon_loss=train_config.recon_loss,
         wavelet_loss=train_config.wavelet_loss,
         detail_weight=train_config.detail_weight,
+        rngs=rngs,
     )
 
     print("dataset clips:", dataset.dataset_size)
@@ -555,7 +597,7 @@ def train_vae_on_dataset(
     print("val split:", dataset.val_size)
     print_param_table(model)
 
-    log10_max = 20.0 * float(mx.log10(mx.array(2.0)))
+    log10_max = 20.0 * math.log10(2.0)
     avg_loss = 0.0
     start = time.time()
     last_log_time = start
@@ -564,9 +606,8 @@ def train_vae_on_dataset(
 
     for step in range(1, train_config.vae_train_steps + 1):
         batch, *_ = dataset.sample_train_batch(batch_size)
-        loss = trainer.compiled_train_step(batch)
+        loss = trainer.train_step(jnp.asarray(np.array(batch)))
         avg_loss += loss
-        mx.async_eval(loss, avg_loss)
 
         if (
             step == 1
@@ -574,14 +615,14 @@ def train_vae_on_dataset(
             or step == train_config.vae_train_steps
         ):
             val_batch, *_ = dataset.sample_val_batch(min(batch_size, dataset.val_size))
+            val_batch = jnp.asarray(np.array(val_batch))
 
             eval_metrics = trainer.eval_loss(val_batch)
             recon = eval_metrics["recon"]
-            psnr = log10_max - 10.0 * mx.log10(
-                mx.maximum(eval_metrics["l2_loss"], 1e-12)
+            psnr = log10_max - 10.0 * jnp.log10(
+                jnp.maximum(eval_metrics["l2_loss"], 1e-12)
             )
             kl = eval_metrics["kl_loss"]
-            mx.async_eval(psnr, kl)
 
             window_steps = step - last_log_step
             loss_f = float(loss)
@@ -595,7 +636,7 @@ def train_vae_on_dataset(
             samples = window_steps * batch_size
             samples_per_sec = samples / max(now - last_log_time, 1e-8)
 
-            lr_f = float(trainer.optimizer.learning_rate)
+            lr_f = float(lr_schedule(step)) if callable(lr_schedule) else lr_schedule
             print(
                 f"step={step:5d} sample/s={samples_per_sec:.2f} "
                 f"loss={loss_f:.4f} avg={avg_loss_f:.4f} lr={lr_f:.2e} "
@@ -628,7 +669,6 @@ def train_vae_on_dataset(
                     {0.0: recon[:, -1]},
                 )
             avg_loss = 0.0
-            # mx.clear_cache()
             last_log_step = step
             last_log_time = time.time()
 
@@ -646,8 +686,10 @@ def train_vae_on_dataset(
 
 
 def _self_test() -> None:
-    mx.random.seed(0)
-    frames = mx.random.uniform(-1.0, 1.0, shape=(2, 4, 32, 32, 3))
+    rngs = nnx.Rngs(0, reparam=1)
+    frames = jax.random.uniform(
+        jax.random.key(0), shape=(2, 4, 32, 32, 3), minval=-1.0, maxval=1.0
+    )
     cfg = dict(
         in_channels=3,
         out_channels=3,
@@ -655,17 +697,19 @@ def _self_test() -> None:
         num_downsamples=1,
         use_wavelet=True,
     )
-    model = WaveletVAE(**cfg)
-    ema_model = _clone_vae(cfg, model.parameters())
-    trainer = VAETrainer(model, ema_model, learning_rate=3e-3, kl_weight=1e-6)
+    model = WaveletVAE(**cfg, rngs=rngs)
+    ema_model = nnx.clone(model)
+    trainer = VAETrainer(
+        model, ema_model, learning_rate=3e-3, kl_weight=1e-6, rngs=rngs
+    )
 
-    recon, _, _ = model(frames)
+    recon, _, _ = model(frames, rngs=rngs)
     assert recon.shape == frames.shape, (recon.shape, frames.shape)
-    mse_start = float(mx.mean((recon - frames) ** 2))
+    mse_start = float(jnp.mean((recon - frames) ** 2))
     for step in range(500):
-        loss = float(trainer.compiled_train_step(frames))
-    recon, _, _ = model(frames)
-    mse_end = float(mx.mean((recon - frames) ** 2))
+        loss = float(trainer.train_step(frames))
+    recon, _, _ = model(frames, rngs=rngs)
+    mse_end = float(jnp.mean((recon - frames) ** 2))
     print(f"recon MSE: start={mse_start:.5f} end={mse_end:.5f}")
     assert mse_end < mse_start, "recon MSE did not drop"
     print("self-test passed: recon MSE dropped.")
