@@ -4,7 +4,6 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from pprint import pprint
-from types import SimpleNamespace
 from typing import Literal
 
 import jax
@@ -13,11 +12,17 @@ import numpy as np
 import optax
 from flax import nnx
 from jax import lax
-from safetensors.flax import load_file, save_file
+from safetensors.flax import save_file
 
 from data import Dataset
+from jax_utils import (
+    ema_update,
+    flat_params,
+    linear_warmup_decay_schedule,
+    load_flat_params,
+    print_param_table,
+)
 from logger_utils import RLLogger
-from unet import format_param_table
 
 ReconLoss = Literal["l1", "l2", "l1+l2"]
 
@@ -294,74 +299,8 @@ class WaveletVAE(nnx.Module):
         return recon, mean, logvar
 
 
-def ema_update(ema_model: nnx.Module, model: nnx.Module, decay: float) -> None:
-    """JAX port of ``diffusion.ema_update`` (that one operates on MLX modules)."""
-    ema_params = nnx.state(ema_model, nnx.Param)
-    params = nnx.state(model, nnx.Param)
-    nnx.update(
-        ema_model,
-        jax.tree.map(
-            lambda ema, current: decay * ema + (1.0 - decay) * current,
-            ema_params,
-            params,
-        ),
-    )
-
-
-def print_param_table(model: nnx.Module) -> None:
-    """Reuse ``unet.format_param_table`` via a ``.parameters()`` shim (it only
-    needs a nested dict of arrays with ``shape``/``dtype``)."""
-    params = nnx.state(model, nnx.Param).to_pure_dict()
-    print(format_param_table(SimpleNamespace(parameters=lambda: params)))
-
-
 def kl_divergence(mean: jax.Array, logvar: jax.Array) -> jax.Array:
     return -0.5 * jnp.mean(1.0 + logvar - mean**2 - jnp.exp(logvar))
-
-
-def linear_warmup_decay_schedule(
-    peak_lr: float,
-    *,
-    total_steps: int,
-    warmup_steps: int = 0,
-    hold_steps: int = 0,
-    final_lr: float | None = None,
-) -> float | optax.Schedule:
-    """Linear warmup from ``peak_lr / 10`` to ``peak_lr`` over ``warmup_steps``,
-    hold at ``peak_lr`` for ``hold_steps``, then linear decay to ``final_lr``
-    over the remaining steps.
-
-    Every part is optional: ``warmup_steps=0`` skips the warmup, ``hold_steps=0``
-    starts the decay right after warmup, and ``final_lr=None`` holds the LR
-    constant after warmup. With everything disabled this returns the plain
-    ``peak_lr`` float (a fixed learning rate).
-    """
-    if warmup_steps <= 0 and final_lr is None:
-        return peak_lr
-
-    constant = optax.constant_schedule(peak_lr)
-    tail = (
-        optax.linear_schedule(
-            peak_lr, final_lr, max(total_steps - warmup_steps - hold_steps, 1)
-        )
-        if final_lr is not None
-        else constant
-    )
-
-    schedules = [tail]
-    boundaries: list[int] = []
-    if hold_steps > 0 and final_lr is not None:
-        schedules.insert(0, constant)
-        boundaries.insert(0, warmup_steps + hold_steps)
-    if warmup_steps > 0:
-        schedules.insert(
-            0, optax.linear_schedule(peak_lr / 10.0, peak_lr, warmup_steps)
-        )
-        boundaries.insert(0, warmup_steps)
-
-    if not boundaries:
-        return tail
-    return optax.join_schedules(schedules, boundaries)
 
 
 class VAETrainer(nnx.Module):
@@ -476,28 +415,6 @@ def decode_latents(vae: WaveletVAE, latents: jax.Array) -> jax.Array:
     return vae.decode(latents * vae.latent_scale)
 
 
-def _flat_params(vae: WaveletVAE) -> dict[str, jax.Array]:
-    """Flatten trainable params to ``{'enc_stem.kernel': array, ...}`` for safetensors."""
-    return {
-        ".".join(map(str, path)): variable.value
-        for path, variable in nnx.to_flat_state(nnx.state(vae, nnx.Param))
-    }
-
-
-def _load_flat_params(vae: WaveletVAE, weights_path: str | Path) -> None:
-    tensors = load_file(str(weights_path))
-    flat = nnx.to_flat_state(nnx.state(vae, nnx.Param))
-    nnx.update(
-        vae,
-        nnx.from_flat_state(
-            [
-                (path, variable.replace(tensors[".".join(map(str, path))]))
-                for path, variable in flat
-            ]
-        ),
-    )
-
-
 def save_vae(
     vae: WaveletVAE,
     save_dir: str | Path,
@@ -507,9 +424,9 @@ def save_vae(
 ) -> None:
     save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
-    save_file(_flat_params(vae), str(save_dir / "model.safetensors"))
+    save_file(flat_params(vae), str(save_dir / "model.safetensors"))
     if ema_model is not None:
-        save_file(_flat_params(ema_model), str(save_dir / "ema_model.safetensors"))
+        save_file(flat_params(ema_model), str(save_dir / "ema_model.safetensors"))
     (save_dir / "config.json").write_text(json.dumps(config, indent=2))
 
 
@@ -524,7 +441,7 @@ def load_vae(
     model_path = save_dir / "model.safetensors"
     ema_path = save_dir / "ema_model.safetensors"
     weights_path = ema_path if prefer_ema and ema_path.exists() else model_path
-    _load_flat_params(vae, weights_path)
+    load_flat_params(vae, weights_path)
     return vae
 
 
