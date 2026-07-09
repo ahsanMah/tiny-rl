@@ -20,6 +20,10 @@ from data import make_env, record_rollouts
 from vae import load_vae
 from video_utils import save_clip_previews, to_uint8_video
 
+
+def _max_abs_diff(a: object, b: object) -> float:
+    return float(np.max(np.abs(np.asarray(a) - np.asarray(b))))
+
 DEFAULT_MLX_VAE_DIR = Path(
     "/Users/smaug/dev/mini-dreamer-workspace/mini-dreamer/logs/vizdoom-vae"
 )
@@ -114,9 +118,30 @@ def _set_nnx_param(param, value) -> None:
     param.value = jnp.asarray(value)
 
 
+def _copy_linear_to_nnx(mlx_linear, jax_linear) -> None:
+    # MLX Linear stores O,I; Flax NNX Linear stores I,O.
+    _set_nnx_param(jax_linear.kernel, np.asarray(mlx_linear.weight).T)
+    if mlx_linear.bias is not None:
+        _set_nnx_param(jax_linear.bias, np.asarray(mlx_linear.bias))
+
+
+def _copy_embedding_to_nnx(mlx_embedding, jax_embedding) -> None:
+    # Both frameworks store embeddings as V,D.
+    _set_nnx_param(jax_embedding.embedding, np.asarray(mlx_embedding.weight))
+
+
 def _copy_conv_to_nnx(mlx_conv, jax_conv) -> None:
     # MLX Conv2d stores O,H,W,I; Flax NNX Conv stores H,W,I,O.
     _set_nnx_param(jax_conv.kernel, np.asarray(mlx_conv.weight).transpose(1, 2, 3, 0))
+    if mlx_conv.bias is not None:
+        _set_nnx_param(jax_conv.bias, np.asarray(mlx_conv.bias))
+
+
+def _copy_conv3d_to_nnx(mlx_conv, jax_conv) -> None:
+    # MLX Conv3d stores O,D,H,W,I; Flax NNX Conv stores D,H,W,I,O.
+    _set_nnx_param(
+        jax_conv.kernel, np.asarray(mlx_conv.weight).transpose(1, 2, 3, 4, 0)
+    )
     if mlx_conv.bias is not None:
         _set_nnx_param(jax_conv.bias, np.asarray(mlx_conv.bias))
 
@@ -191,6 +216,74 @@ def export_flax_vae_checkpoint(
         ema_model=_to_jax(prefer_ema=True) if ema_exists else None,
     )
     return Path(output_dir)
+
+
+def _copy_unet_time_embedding_to_nnx(mlx_time, jax_time) -> None:
+    jax_time.fourier.weight = np.asarray(mlx_time.fourier.weight)
+    _copy_linear_to_nnx(mlx_time.lin1, jax_time.lin1)
+    _copy_linear_to_nnx(mlx_time.lin2, jax_time.lin2)
+
+
+def compare_unet_jax_components(
+    *,
+    batch_size: int = 4,
+    dim: int = 16,
+    seed: int = 0,
+    atol: float = 1e-5,
+) -> dict[str, float]:
+    """Run deterministic MLX-vs-JAX parity checks for ported ``unet.py`` pieces.
+
+    This intentionally tests only components that exist in ``unet_jax.py`` so it
+    can be used incrementally while the port is still in progress. Add new blocks
+    here as their JAX counterparts are implemented.
+    """
+    import jax.numpy as jnp
+    from flax import nnx
+
+    import unet as mlx_unet
+    import unet_jax
+
+    metrics: dict[str, float] = {}
+    rngs = nnx.Rngs(seed, reparam=seed + 1, params=seed + 2)
+
+    # GaussianFourierEmbedding has no layout differences; copy the sampled MLX
+    # frequencies into the JAX module and compare scalar and batched calls.
+    mlx_fourier = mlx_unet.GaussianFourierEmbedding(dim)
+    jax_fourier = unet_jax.GaussianFourierEmbedding(dim, rngs=rngs)
+    jax_fourier.weight = np.asarray(mlx_fourier.weight)
+
+    t_np = np.linspace(0.0, 1.0, batch_size, dtype=np.float32)
+    mlx_out = mlx_fourier(mx.array(t_np))
+    jax_out = jax_fourier(jnp.asarray(t_np))
+    mx.eval(mlx_out)
+    metrics["gaussian_fourier_max_abs_diff"] = _max_abs_diff(mlx_out, jax_out)
+
+    mlx_scalar = mlx_fourier(mx.array(0.25, dtype=mx.float32))
+    jax_scalar = jax_fourier(jnp.asarray(0.25, dtype=jnp.float32))
+    mx.eval(mlx_scalar)
+    metrics["gaussian_fourier_scalar_max_abs_diff"] = _max_abs_diff(
+        mlx_scalar, jax_scalar
+    )
+
+    # TimeEmbedding is enabled once the corresponding JAX class lands.
+    if hasattr(unet_jax, "TimeEmbedding"):
+        mlx_time = mlx_unet.TimeEmbedding(dim)
+        jax_time = unet_jax.TimeEmbedding(dim, rngs=rngs)
+        _copy_unet_time_embedding_to_nnx(mlx_time, jax_time)
+        mlx_time_out = mlx_time(mx.array(t_np))
+        jax_time_out = jax_time(jnp.asarray(t_np))
+        mx.eval(mlx_time_out)
+        metrics["time_embedding_max_abs_diff"] = _max_abs_diff(
+            mlx_time_out, jax_time_out
+        )
+
+    print("JAX UNet component comparison:")
+    for key, value in metrics.items():
+        print(f"  {key}: {value:.8g}")
+    failures = {key: value for key, value in metrics.items() if value > atol}
+    if failures:
+        raise AssertionError(f"JAX UNet component comparison exceeded atol={atol}: {failures}")
+    return metrics
 
 
 def compare_with_jax_vae(
@@ -283,6 +376,12 @@ def compare_with_jax_vae(
 @click.option("--num-samples", default=8, show_default=True)
 @click.option("--compare-atol", default=1e-3, show_default=True)
 @click.option(
+    "--run-unet-tests",
+    is_flag=True,
+    help="Run incremental MLX-vs-JAX parity checks for ported unet.py components.",
+)
+@click.option("--unet-atol", default=1e-5, show_default=True)
+@click.option(
     "--recompute",
     is_flag=True,
     help="Regenerate the VizDoom test set even if it already exists.",
@@ -298,6 +397,8 @@ def main(
     frame_skip: int,
     num_samples: int,
     compare_atol: float,
+    run_unet_tests: bool,
+    unet_atol: float,
     recompute: bool,
 ) -> None:
     clips, actions, rewards, data_dir = create_vizdoom_test_set(
@@ -333,6 +434,8 @@ def main(
         num_samples=num_samples,
         atol=compare_atol,
     )
+    if run_unet_tests:
+        compare_unet_jax_components(atol=unet_atol)
 
 
 if __name__ == "__main__":
