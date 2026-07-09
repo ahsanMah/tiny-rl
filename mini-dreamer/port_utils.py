@@ -152,6 +152,47 @@ def _copy_mlx_vae_to_jax(mlx_vae, jax_vae) -> None:
     _copy_conv_to_nnx(mlx_vae.dec_out, jax_vae.dec_out)
 
 
+def export_flax_vae_checkpoint(
+    *,
+    vae_dir: str | Path = DEFAULT_MLX_VAE_DIR,
+    output_dir: str | Path = DEFAULT_OUTPUT_DIR / "flax-vae",
+) -> Path:
+    """Convert the MLX VAE checkpoint into a ``vae_jax.load_vae``-loadable one.
+
+    Loads the MLX weights (model and, if present, EMA) into JAX ``WaveletVAE``s
+    via the copy helpers (transposing conv kernels to NNX layout) and re-saves
+    them with ``vae_jax.save_vae``, preserving the checkpoint layout
+    (``model.safetensors`` / ``ema_model.safetensors`` / ``config.json``).
+
+    Note: safetensors only carries tensors, so the RMSNorm epsilon fix applied
+    by ``_copy_rmsnorm_to_nnx`` (MLX 1e-5 vs NNX default 1e-6) is *not* part of
+    the exported checkpoint; ``vae_jax.load_vae`` reconstructs with NNX defaults.
+    """
+    from flax import nnx
+
+    from vae_jax import WaveletVAE as JaxWaveletVAE
+    from vae_jax import save_vae as save_jax_vae
+
+    vae_dir = Path(vae_dir)
+    config = json.loads((vae_dir / "config.json").read_text())
+    model_config = {k: v for k, v in config.items() if k != "step"}
+
+    def _to_jax(prefer_ema: bool) -> JaxWaveletVAE:
+        mlx_vae = load_vae(vae_dir, prefer_ema=prefer_ema)
+        jax_vae = JaxWaveletVAE(**model_config, rngs=nnx.Rngs(0, reparam=1))
+        _copy_mlx_vae_to_jax(mlx_vae, jax_vae)
+        return jax_vae
+
+    ema_exists = (vae_dir / "ema_model.safetensors").exists()
+    save_jax_vae(
+        _to_jax(prefer_ema=False),
+        output_dir,
+        config=config,
+        ema_model=_to_jax(prefer_ema=True) if ema_exists else None,
+    )
+    return Path(output_dir)
+
+
 def compare_with_jax_vae(
     clips: np.ndarray,
     *,

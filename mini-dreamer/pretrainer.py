@@ -19,7 +19,7 @@ from diffusion import (
     train_on_dataset,
 )
 from logger_utils import RLLogger
-from vae import (
+from vae_jax import (
     VAEModelConfig,
     VAETrainConfig,
     decode_latents,
