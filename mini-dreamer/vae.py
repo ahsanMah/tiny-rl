@@ -12,7 +12,7 @@ import mlx.nn as nn
 import mlx.optimizers as optim
 from mlx.utils import tree_map
 
-from data import Dataset
+from diffusion import Dataset
 from diffusion import ema_update
 from logger_utils import RLLogger
 from unet import WaveletDownsampleConv, WaveletUpsample, print_param_table

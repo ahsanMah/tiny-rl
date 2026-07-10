@@ -14,7 +14,7 @@ from flax import nnx
 from jax import lax
 from safetensors.flax import save_file
 
-from data import Dataset
+from diffusion import Dataset
 from jax_utils import (
     ema_update,
     flat_params,

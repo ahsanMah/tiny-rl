@@ -14,7 +14,7 @@ import mlx.optimizers as optim
 import numpy as np
 from mlx.utils import tree_map
 
-from data import Dataset
+from data import _split_size, load_rollouts, sample_batch
 from logger_utils import RLLogger
 from unet import UNet3D, print_param_table
 from video_utils import (
@@ -25,6 +25,78 @@ from video_utils import (
 )
 
 NoiseDistribution = Literal["uniform", "logitnorm", "normal"]
+
+
+class Dataset:
+    """Train/val view over clip tensors already materialised in memory or on disk."""
+
+    def __init__(
+        self,
+        data_dir: str | Path,
+        *,
+        val_fraction: float = 0.05,
+        encoder: Callable | None = None,
+        memory_map: bool = False,
+    ):
+        videos, actions, rewards = load_rollouts(data_dir, mmap=memory_map)
+        self.has_rewards = rewards is not None
+        if rewards is None:
+            rewards = np.zeros(actions.shape, dtype=np.float32)
+
+        dataset_size = int(videos.shape[0])
+        val_size = _split_size(dataset_size, val_fraction)
+        train_size = dataset_size - val_size
+        self.encoder = encoder
+
+        self.train_videos = videos[:train_size]
+        self.train_actions = actions[:train_size]
+        self.train_rewards = rewards[:train_size]
+        self.val_videos = videos[train_size:]
+        self.val_actions = actions[train_size:]
+        self.val_rewards = rewards[train_size:]
+
+        self.dataset_size = dataset_size
+        self.train_size = train_size
+        self.val_size = int(self.val_videos.shape[0])
+        self.num_channels = int(videos.shape[-1])
+
+        print(f"setup dataset from {data_dir}")
+        print(f"{self.train_size = } - {self.val_size = }")
+
+    def _build_tensor(
+        self,
+        videos: np.ndarray,
+        actions: np.ndarray,
+        rewards: np.ndarray,
+    ) -> tuple[mx.array, mx.array, mx.array]:
+        video_batch = mx.array(videos)
+        action_batch = mx.array(actions)
+        reward_batch = mx.array(rewards)
+
+        if self.encoder is not None:
+            video_batch = self.encoder(video_batch)
+        return video_batch, action_batch, reward_batch
+
+    def sample_train_batch(
+        self, batch_size: int
+    ) -> tuple[mx.array, mx.array, mx.array]:
+        videos, actions, rewards = sample_batch(
+            self.train_videos, self.train_actions, batch_size, self.train_rewards
+        )
+        return self._build_tensor(videos, actions, rewards)
+
+    def sample_val_batch(self, batch_size: int) -> tuple[mx.array, mx.array, mx.array]:
+        videos, actions, rewards = sample_batch(
+            self.val_videos, self.val_actions, batch_size, self.val_rewards
+        )
+        return self._build_tensor(videos, actions, rewards)
+
+    def val_clips(self, num_clips: int) -> tuple[mx.array, mx.array, mx.array]:
+        return self._build_tensor(
+            self.val_videos[:num_clips],
+            self.val_actions[:num_clips],
+            self.val_rewards[:num_clips],
+        )
 
 
 @dataclass(frozen=True)

@@ -1,11 +1,8 @@
 from dataclasses import dataclass
 from pathlib import Path
 from pprint import pprint
-from typing import Callable
-
 import gymnasium as gym
 import minigrid  # noqa: F401  # registers MiniGrid envs in gymnasium
-import mlx.core as mx
 import numpy as np
 from minigrid.wrappers import RGBImgObsWrapper
 from vizdoom import gymnasium_wrapper
@@ -251,7 +248,7 @@ def actions_to_clips(
     *,
     clip_length: int,
     clip_stride: int | None = None,
-) -> mx.array:
+) -> np.ndarray:
     """Slice a 1-D action stream into (num_clips, clip_length) windows."""
     if actions.ndim != 1:
         raise ValueError(f"Expected actions with shape (T,), got {actions.shape}")
@@ -267,7 +264,7 @@ def actions_to_clips(
     for start in range(0, actions.shape[0] - clip_length + 1, clip_stride):
         clips.append(actions[start : start + clip_length])
 
-    return mx.array(np.stack(clips, axis=0))
+    return np.stack(clips, axis=0)
 
 
 def clip_starts_from_episodes(
@@ -504,76 +501,3 @@ def sample_batch(
     if rewards is None:
         return videos[indices], actions[indices]
     return videos[indices], actions[indices], rewards[indices]
-
-
-class Dataset:
-    """Train/val view over clip tensors already materialised in memory or on disk."""
-
-    def __init__(
-        self,
-        data_dir: str | Path,
-        *,
-        val_fraction: float = 0.05,
-        encoder: Callable | None = None,
-        memory_map: bool = False,
-    ):
-        videos, actions, rewards = load_rollouts(data_dir, mmap=memory_map)
-        self.has_rewards = rewards is not None
-        if rewards is None:
-            rewards = np.zeros(actions.shape, dtype=np.float32)
-
-        dataset_size = int(videos.shape[0])
-        val_size = _split_size(dataset_size, val_fraction)
-        train_size = dataset_size - val_size
-        self.encoder = encoder
-
-        self.train_videos = videos[:train_size]
-        self.train_actions = actions[:train_size]
-        self.train_rewards = rewards[:train_size]
-        self.val_videos = videos[train_size:]
-        self.val_actions = actions[train_size:]
-        self.val_rewards = rewards[train_size:]
-
-        self.dataset_size = dataset_size
-        self.train_size = train_size
-        self.val_size = int(self.val_videos.shape[0])
-        self.num_channels = int(videos.shape[-1])
-
-        print(f"setup dataset from {data_dir}")
-        print(f"{self.train_size = } - {self.val_size = }")
-
-    def _build_tensor(
-        self,
-        videos: np.ndarray,
-        actions: np.ndarray,
-        rewards: np.ndarray,
-    ) -> tuple[mx.array, mx.array, mx.array]:
-
-        video_batch = mx.array(videos)
-        action_batch = mx.array(actions)
-        reward_batch = mx.array(rewards)
-
-        if self.encoder is not None:
-            video_batch = self.encoder(video_batch)
-        return video_batch, action_batch, reward_batch
-
-    def sample_train_batch(
-        self, batch_size: int
-    ) -> tuple[mx.array, mx.array, mx.array]:
-        videos, actions, rewards = sample_batch(
-            self.train_videos, self.train_actions, batch_size, self.train_rewards
-        )
-        return self._build_tensor(videos, actions, rewards)
-
-    def sample_val_batch(self, batch_size: int) -> tuple[mx.array, mx.array, mx.array]:
-        videos, actions, rewards = sample_batch(
-            self.val_videos, self.val_actions, batch_size, self.val_rewards
-        )
-        return self._build_tensor(videos, actions, rewards)
-
-    def val_clips(self, num_clips: int) -> tuple[mx.array, mx.array, mx.array]:
-        return self._build_tensor(
-            self.val_videos[:num_clips],
-            self.val_actions[:num_clips],
-            self.val_rewards[:num_clips],
-        )

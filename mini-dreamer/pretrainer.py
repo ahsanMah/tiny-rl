@@ -9,8 +9,9 @@ from typing import Any
 import click
 import mlx.core as mx
 
-from data import Dataset, DatasetConfig, make_env, record_rollouts, sample_batch
+from data import DatasetConfig, make_env, record_rollouts, sample_batch
 from diffusion import (
+    Dataset,
     ModelConfig,
     TrainConfig,
     generate_env_video,

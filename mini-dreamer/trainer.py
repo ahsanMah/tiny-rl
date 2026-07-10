@@ -12,8 +12,8 @@ import numpy as np
 from mlx import nn
 from tqdm import tqdm
 
-from data import Dataset, make_env, pad_frames_to_multiple, record_rollouts
-from diffusion import FlowMatchingTrainer, load_model, sample_euler, save_model
+from data import make_env, pad_frames_to_multiple, record_rollouts
+from diffusion import Dataset, FlowMatchingTrainer, load_model, sample_euler, save_model
 from logger_utils import VideoLogger
 from ppo import Batch, Categorical, PPOConfig, RunningNorm, make_net, update
 from pretrainer import _dataclass_options, _from_resolved
