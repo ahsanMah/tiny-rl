@@ -290,60 +290,6 @@ class TransformerBlock(nn.Module):
         return self.ff(x)
 
 
-class WaveletDownsampleConv:
-    """Conv2d-based 2D Haar DWT. Grouped depthwise 2×2 strided conv variant of WaveletDownsample."""
-
-    def __init__(self, in_channels: int):
-        super().__init__()
-        base = mx.array(
-            [
-                [[0.25, 0.25], [0.25, 0.25]],  # LL
-                [[0.25, -0.25], [0.25, -0.25]],  # LH
-                [[0.25, 0.25], [-0.25, -0.25]],  # HL
-                [[0.25, -0.25], [-0.25, 0.25]],  # HH
-            ]
-        )[:, :, :, None]  # (4, 2, 2, 1)
-        # (4*C, 2, 2, 1) — same 4 filters tiled for each input channel
-        self.weight = mx.concatenate([base] * in_channels, axis=0)
-        self._groups = in_channels
-
-    def __call__(self, x: mx.array) -> mx.array:
-        B, T, H, W, C = x.shape
-        out = mx.conv2d(
-            x.reshape(B * T, H, W, C), self.weight, stride=2, groups=self._groups
-        )
-        # conv outputs (C, 4) interleaved per spatial position; transpose to (4, C) to match WaveletUpsample
-        out = (
-            out.reshape(B * T, H // 2, W // 2, C, 4)
-            .transpose(0, 1, 2, 4, 3)
-            .reshape(B * T, H // 2, W // 2, C * 4)
-        )
-        return out.reshape(B, T, H // 2, W // 2, C * 4)
-
-
-class WaveletUpsample:
-    """Inverse 2D Haar DWT: (B, T, H/2, W/2, 4C) → (B, T, H, W, C)."""
-
-    def __call__(self, x: mx.array) -> mx.array:
-        B, T, Hh, Wh, C4 = x.shape
-        C = C4 // 4
-        x = x.reshape(B * T, Hh, Wh, C4)
-        ll, lh, hl, hh = (
-            x[..., :C],
-            x[..., C : 2 * C],
-            x[..., 2 * C : 3 * C],
-            x[..., 3 * C :],
-        )
-
-        # Inverse along W: recover lo and hi rows
-        lo = mx.stack([ll + lh, ll - lh], axis=3).reshape(B * T, Hh, Wh * 2, C)
-        hi = mx.stack([hl + hh, hl - hh], axis=3).reshape(B * T, Hh, Wh * 2, C)
-
-        # Inverse along H: recover original rows
-        out = mx.stack([lo + hi, lo - hi], axis=2).reshape(B * T, Hh * 2, Wh * 2, C)
-        return out.reshape(B, T, Hh * 2, Wh * 2, C)
-
-
 class UNet3D(nn.Module):
     def __init__(
         self,
@@ -370,6 +316,9 @@ class UNet3D(nn.Module):
         conv_block: nn.Module = ConvResBlock3D
 
         if use_wavelet:
+            # Lazy import: vae.py imports from unet.py at module level.
+            from vae import WaveletDownsampleConv, WaveletUpsample
+
             self.prepool = WaveletDownsampleConv(in_channels)
             self.unpool = WaveletUpsample()
             in_channels = in_channels * 4

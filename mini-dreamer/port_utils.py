@@ -27,6 +27,9 @@ def _max_abs_diff(a: object, b: object) -> float:
 DEFAULT_MLX_VAE_DIR = Path(
     "/Users/smaug/dev/mini-dreamer-workspace/mini-dreamer/logs/vizdoom-vae"
 )
+DEFAULT_MLX_UNET_DIR = Path(
+    "/Users/smaug/dev/mini-dreamer-workspace/mini-dreamer/logs/vizdoom-latent-v2"
+)
 DEFAULT_OUTPUT_DIR = Path("logs/port-utils/vizdoom-vae")
 DEFAULT_DATA_DIR = DEFAULT_OUTPUT_DIR / "test-set"
 
@@ -219,9 +222,70 @@ def export_flax_vae_checkpoint(
 
 
 def _copy_unet_time_embedding_to_nnx(mlx_time, jax_time) -> None:
-    jax_time.fourier.weight = np.asarray(mlx_time.fourier.weight)
+    _set_nnx_param(jax_time.fourier.weight, np.asarray(mlx_time.fourier.weight))
     _copy_linear_to_nnx(mlx_time.lin1, jax_time.lin1)
     _copy_linear_to_nnx(mlx_time.lin2, jax_time.lin2)
+
+
+def _copy_action_embedding_to_nnx(mlx_embed, jax_embed) -> None:
+    if mlx_embed.categorical:
+        _copy_embedding_to_nnx(mlx_embed.embed, jax_embed.embed)
+    else:
+        _copy_linear_to_nnx(mlx_embed.embed, jax_embed.embed)
+
+
+def _copy_resblock3d_to_nnx(mlx_block, jax_block) -> None:
+    if hasattr(mlx_block.shortcut, "weight"):
+        _copy_conv3d_to_nnx(mlx_block.shortcut, jax_block.shortcut)
+    _copy_rmsnorm_to_nnx(mlx_block.norm1, jax_block.norm1)
+    _copy_rmsnorm_to_nnx(mlx_block.norm2, jax_block.norm2)
+    _copy_conv3d_to_nnx(mlx_block.conv1, jax_block.conv1)
+    _copy_conv3d_to_nnx(mlx_block.conv2, jax_block.conv2)
+    if hasattr(mlx_block, "to_film"):
+        _copy_linear_to_nnx(mlx_block.to_film, jax_block.to_film)
+
+
+def _copy_cross_attention_to_nnx(mlx_attn, jax_attn) -> None:
+    _copy_rmsnorm_to_nnx(mlx_attn.norm, jax_attn.norm)
+    for name in ("to_q", "to_k", "to_v", "to_out"):
+        _copy_linear_to_nnx(getattr(mlx_attn, name), getattr(jax_attn, name))
+
+
+def _copy_feedforward_to_nnx(mlx_ff, jax_ff) -> None:
+    _copy_rmsnorm_to_nnx(mlx_ff.norm, jax_ff.norm)
+    _copy_linear_to_nnx(mlx_ff.in_proj, jax_ff.in_proj)
+    _copy_linear_to_nnx(mlx_ff.out_proj, jax_ff.out_proj)
+
+
+def _copy_transformer_block_to_nnx(mlx_block, jax_block) -> None:
+    _copy_cross_attention_to_nnx(mlx_block.self_attn, jax_block.self_attn)
+    _copy_cross_attention_to_nnx(mlx_block.cross_attn, jax_block.cross_attn)
+    _copy_feedforward_to_nnx(mlx_block.ff, jax_block.ff)
+
+
+def _copy_upblock3d_to_nnx(mlx_block, jax_block) -> None:
+    _copy_conv3d_to_nnx(mlx_block.up_conv, jax_block.up_conv)
+    _copy_resblock3d_to_nnx(mlx_block.conv, jax_block.conv)
+
+
+def _copy_mlx_unet_to_jax(mlx_model, jax_model) -> None:
+    _copy_unet_time_embedding_to_nnx(mlx_model.time_embed, jax_model.time_embed)
+    _copy_unet_time_embedding_to_nnx(mlx_model.ctx_noise_embed, jax_model.ctx_noise_embed)
+    _copy_action_embedding_to_nnx(mlx_model.context_embed, jax_model.context_embed)
+    for name in ("res1", "res2", "res3", "mid_conv"):
+        _copy_resblock3d_to_nnx(getattr(mlx_model, name), getattr(jax_model, name))
+    for mlx_block, jax_block in zip(
+        mlx_model.mid_transformer_blocks, jax_model.mid_transformer_blocks
+    ):
+        _copy_transformer_block_to_nnx(mlx_block, jax_block)
+    _copy_upblock3d_to_nnx(mlx_model.up2, jax_model.up2)
+    _copy_upblock3d_to_nnx(mlx_model.up1, jax_model.up1)
+    _copy_conv3d_to_nnx(mlx_model.out_conv, jax_model.out_conv)
+    if mlx_model.has_reward_head:
+        # Sequential(RMSNorm, Linear, SiLU, Linear) in both frameworks.
+        _copy_rmsnorm_to_nnx(mlx_model.reward_head.layers[0], jax_model.reward_head.layers[0])
+        _copy_linear_to_nnx(mlx_model.reward_head.layers[1], jax_model.reward_head.layers[1])
+        _copy_linear_to_nnx(mlx_model.reward_head.layers[3], jax_model.reward_head.layers[3])
 
 
 def compare_unet_jax_components(
@@ -246,11 +310,26 @@ def compare_unet_jax_components(
     metrics: dict[str, float] = {}
     rngs = nnx.Rngs(seed, reparam=seed + 1, params=seed + 2)
 
+    from mlx.utils import tree_map
+
+    rng = np.random.default_rng(seed)
+
+    def _randomize_zero_params(mlx_module, scale: float = 0.02) -> None:
+        """Fill all-zero (zero-initialized) params with small noise so parity
+        checks exercise those branches instead of comparing zeros to zeros."""
+
+        def repl(p):
+            if p.size > 0 and float(mx.abs(p).max()) == 0.0:
+                return mx.random.normal(p.shape) * scale
+            return p
+
+        mlx_module.update(tree_map(repl, mlx_module.parameters()))
+
     # GaussianFourierEmbedding has no layout differences; copy the sampled MLX
     # frequencies into the JAX module and compare scalar and batched calls.
     mlx_fourier = mlx_unet.GaussianFourierEmbedding(dim)
     jax_fourier = unet_jax.GaussianFourierEmbedding(dim, rngs=rngs)
-    jax_fourier.weight = np.asarray(mlx_fourier.weight)
+    _set_nnx_param(jax_fourier.weight, np.asarray(mlx_fourier.weight))
 
     t_np = np.linspace(0.0, 1.0, batch_size, dtype=np.float32)
     mlx_out = mlx_fourier(mx.array(t_np))
@@ -265,16 +344,117 @@ def compare_unet_jax_components(
         mlx_scalar, jax_scalar
     )
 
-    # TimeEmbedding is enabled once the corresponding JAX class lands.
-    if hasattr(unet_jax, "TimeEmbedding"):
-        mlx_time = mlx_unet.TimeEmbedding(dim)
-        jax_time = unet_jax.TimeEmbedding(dim, rngs=rngs)
-        _copy_unet_time_embedding_to_nnx(mlx_time, jax_time)
-        mlx_time_out = mlx_time(mx.array(t_np))
-        jax_time_out = jax_time(jnp.asarray(t_np))
-        mx.eval(mlx_time_out)
-        metrics["time_embedding_max_abs_diff"] = _max_abs_diff(
-            mlx_time_out, jax_time_out
+    mlx_time = mlx_unet.TimeEmbedding(dim)
+    jax_time = unet_jax.TimeEmbedding(dim, rngs=rngs)
+    _copy_unet_time_embedding_to_nnx(mlx_time, jax_time)
+    mlx_time_out = mlx_time(mx.array(t_np))
+    jax_time_out = jax_time(jnp.asarray(t_np))
+    mx.eval(mlx_time_out)
+    metrics["time_embedding_max_abs_diff"] = _max_abs_diff(mlx_time_out, jax_time_out)
+
+    # ActionEmbedding: categorical lookup incl. the NULL slot, and continuous.
+    num_actions = 3
+    mlx_act = mlx_unet.ActionEmbedding(dim, num_actions=num_actions)
+    jax_act = unet_jax.ActionEmbedding(dim, num_actions=num_actions, rngs=rngs)
+    _copy_action_embedding_to_nnx(mlx_act, jax_act)
+    actions_np = rng.integers(0, num_actions + 1, size=(batch_size, 4))
+    metrics["action_embedding_max_abs_diff"] = _max_abs_diff(
+        mlx_act(mx.array(actions_np)), jax_act(jnp.asarray(actions_np))
+    )
+
+    mlx_act_cont = mlx_unet.ActionEmbedding(dim, action_dim=2)
+    jax_act_cont = unet_jax.ActionEmbedding(dim, action_dim=2, rngs=rngs)
+    _copy_action_embedding_to_nnx(mlx_act_cont, jax_act_cont)
+    cont_np = rng.standard_normal((batch_size, 4, 2)).astype(np.float32)
+    metrics["action_embedding_continuous_max_abs_diff"] = _max_abs_diff(
+        mlx_act_cont(mx.array(cont_np)), jax_act_cont(jnp.asarray(cont_np))
+    )
+
+    # ConvResBlock3D with FiLM conditioning and a non-identity shortcut.
+    x_np = rng.standard_normal((batch_size, 4, 8, 8, 3)).astype(np.float32)
+    temb_np = rng.standard_normal((batch_size, dim)).astype(np.float32)
+    mlx_res = mlx_unet.ConvResBlock3D(3, dim, time_embed_dim=dim)
+    jax_res = unet_jax.ConvResBlock3D(3, dim, time_embed_dim=dim, rngs=rngs)
+    _randomize_zero_params(mlx_res)
+    _copy_resblock3d_to_nnx(mlx_res, jax_res)
+    metrics["conv_resblock3d_max_abs_diff"] = _max_abs_diff(
+        mlx_res(mx.array(x_np), mx.array(temb_np)),
+        jax_res(jnp.asarray(x_np), jnp.asarray(temb_np)),
+    )
+
+    # UpBlock3D: nearest upsample + 1x1 conv + skip + resblock.
+    skip_np = rng.standard_normal((batch_size, 8, 16, 16, dim)).astype(np.float32)
+    xin_np = rng.standard_normal((batch_size, 4, 8, 8, 2 * dim)).astype(np.float32)
+    mlx_up = mlx_unet.UpBlock3D(2 * dim, dim, time_embed_dim=dim)
+    jax_up = unet_jax.UpBlock3D(2 * dim, dim, time_embed_dim=dim, rngs=rngs)
+    _randomize_zero_params(mlx_up)
+    _copy_upblock3d_to_nnx(mlx_up, jax_up)
+    metrics["upblock3d_max_abs_diff"] = _max_abs_diff(
+        mlx_up(mx.array(xin_np), mx.array(skip_np), mx.array(temb_np)),
+        jax_up(jnp.asarray(xin_np), jnp.asarray(skip_np), jnp.asarray(temb_np)),
+    )
+
+    # TransformerBlock (MQA self-attn + cross-attn + FF).
+    seq_np = rng.standard_normal((batch_size, 10, dim)).astype(np.float32)
+    ctx_np = rng.standard_normal((batch_size, 4, 2 * dim)).astype(np.float32)
+    mlx_tf = mlx_unet.TransformerBlock(dim, context_dim=2 * dim, num_heads=4)
+    jax_tf = unet_jax.TransformerBlock(dim, context_dim=2 * dim, num_heads=4, rngs=rngs)
+    _randomize_zero_params(mlx_tf)
+    _copy_transformer_block_to_nnx(mlx_tf, jax_tf)
+    metrics["transformer_block_max_abs_diff"] = _max_abs_diff(
+        mlx_tf(mx.array(seq_np), context=mx.array(ctx_np)),
+        jax_tf(jnp.asarray(seq_np), context=jnp.asarray(ctx_np)),
+    )
+
+    # Full UNet3D forward (covers avg-pool/upsample edge behavior), both
+    # wavelet modes, plus encode() bottleneck and the reward head.
+    clip_np = rng.standard_normal((2, 8, 16, 16, 3)).astype(np.float32)
+    t_full_np = rng.uniform(0.0, 1.0, size=(2, 1)).astype(np.float32)
+    unet_actions_np = rng.integers(0, num_actions + 1, size=(2, 4))
+    for use_wavelet in (False, True):
+        label = "wavelet" if use_wavelet else "pixel"
+        mlx_model = mlx_unet.UNet3D(
+            in_channels=3,
+            base_channels=16,
+            num_actions=num_actions,
+            use_wavelet=use_wavelet,
+            predict_reward=True,
+        )
+        jax_model = unet_jax.UNet3D(
+            in_channels=3,
+            base_channels=16,
+            num_actions=num_actions,
+            use_wavelet=use_wavelet,
+            predict_reward=True,
+            rngs=rngs,
+        )
+        _randomize_zero_params(mlx_model)
+        _copy_mlx_unet_to_jax(mlx_model, jax_model)
+
+        mlx_full = mlx_model(
+            mx.array(clip_np),
+            mx.array(t_full_np),
+            mx.array(unet_actions_np),
+            t_ctx=mx.array(0.5, dtype=mx.float32),
+        )
+        jax_full = jax_model(
+            jnp.asarray(clip_np),
+            jnp.asarray(t_full_np),
+            jnp.asarray(unet_actions_np),
+            t_ctx=jnp.asarray(0.5, dtype=jnp.float32),
+        )
+        mx.eval(mlx_full)
+        metrics[f"unet3d_{label}_max_abs_diff"] = _max_abs_diff(mlx_full, jax_full)
+
+        mlx_xmid, _, _ = mlx_model.encode(
+            mx.array(clip_np), mx.array(t_full_np), mx.array(unet_actions_np)
+        )
+        jax_xmid, _, _ = jax_model.encode(
+            jnp.asarray(clip_np), jnp.asarray(t_full_np), jnp.asarray(unet_actions_np)
+        )
+        metrics[f"unet3d_{label}_xmid_max_abs_diff"] = _max_abs_diff(mlx_xmid, jax_xmid)
+        metrics[f"unet3d_{label}_reward_max_abs_diff"] = _max_abs_diff(
+            mlx_model.predict_reward(mlx_xmid), jax_model.predict_reward(jax_xmid)
         )
 
     print("JAX UNet component comparison:")
@@ -283,6 +463,91 @@ def compare_unet_jax_components(
     failures = {key: value for key, value in metrics.items() if value > atol}
     if failures:
         raise AssertionError(f"JAX UNet component comparison exceeded atol={atol}: {failures}")
+    return metrics
+
+
+def compare_unet_jax_checkpoint(
+    clips: np.ndarray,
+    actions: np.ndarray,
+    *,
+    unet_dir: str | Path = DEFAULT_MLX_UNET_DIR,
+    vae_dir: str | Path = DEFAULT_MLX_VAE_DIR,
+    num_samples: int = 4,
+    prefer_ema: bool = True,
+    atol: float = 1e-4,
+    pad_multiple: int = 32,
+) -> dict[str, float]:
+    """Load the MLX UNet3D checkpoint into the JAX port and compare
+    ``encode()``/``decode()``/``predict_reward()`` on the fixed VizDoom test set.
+
+    Deterministic by construction: clips are encoded with the VAE posterior
+    mean (``encode_clips``), and the UNet gets a fixed ``t``, fixed ``t_ctx``
+    and the recorded actions — no sampling anywhere.
+
+    ``pad_multiple`` must match the training config (vizdoom-latent used 32);
+    smaller pads give latent sizes that don't round-trip the UNet's down/up path.
+    """
+    import jax.numpy as jnp
+    from flax import nnx
+
+    import unet_jax
+    from data import pad_frames_to_multiple
+    from diffusion import load_model as load_mlx_unet
+    from vae import encode_clips
+
+    unet_dir = Path(unet_dir)
+    mlx_model = load_mlx_unet(unet_dir, prefer_ema=prefer_ema)
+    config = json.loads((unet_dir / "config.json").read_text())
+    jax_model = unet_jax.UNet3D(**config, rngs=nnx.Rngs(0))
+    _copy_mlx_unet_to_jax(mlx_model, jax_model)
+
+    vae = load_vae(vae_dir, prefer_ema=prefer_ema)
+    # pad_frames_to_multiple takes (T, H, W, C); flatten the clip dims around it.
+    raw = clips[:num_samples]
+    padded = pad_frames_to_multiple(
+        raw.reshape(-1, *raw.shape[2:]), multiple=pad_multiple
+    )
+    batch_np = padded.reshape(*raw.shape[:2], *padded.shape[1:])
+    latents = encode_clips(vae, mx.array(batch_np))
+    mx.eval(latents)
+    latents_np = np.asarray(latents)
+    actions_np = np.asarray(actions[:num_samples])
+
+    t_np = np.full((num_samples, 1), 0.7, dtype=np.float32)
+    t_ctx = 0.5
+
+    mlx_xmid, mlx_skips, mlx_tc = mlx_model.encode(
+        mx.array(latents_np),
+        mx.array(t_np),
+        mx.array(actions_np),
+        t_ctx=mx.array(t_ctx, dtype=mx.float32),
+    )
+    mlx_out = mlx_model.decode(mlx_xmid, mlx_skips, mlx_tc)
+    mlx_reward = mlx_model.predict_reward(mlx_xmid)
+    mx.eval(mlx_xmid, mlx_out, mlx_reward)
+
+    jax_xmid, jax_skips, jax_tc = jax_model.encode(
+        jnp.asarray(latents_np),
+        jnp.asarray(t_np),
+        jnp.asarray(actions_np),
+        t_ctx=jnp.asarray(t_ctx, dtype=jnp.float32),
+    )
+    jax_out = jax_model.decode(jax_xmid, jax_skips, jax_tc)
+    jax_reward = jax_model.predict_reward(jax_xmid)
+
+    metrics = {
+        "xmid_max_abs_diff": _max_abs_diff(mlx_xmid, jax_xmid),
+        "decode_max_abs_diff": _max_abs_diff(mlx_out, jax_out),
+        "reward_max_abs_diff": _max_abs_diff(mlx_reward, jax_reward),
+    }
+    print(f"JAX UNet checkpoint comparison ({unet_dir}):")
+    for key, value in metrics.items():
+        print(f"  {key}: {value:.8g}")
+    failures = {key: value for key, value in metrics.items() if value > atol}
+    if failures:
+        raise AssertionError(
+            f"JAX UNet checkpoint comparison exceeded atol={atol}: {failures}"
+        )
     return metrics
 
 
@@ -382,6 +647,13 @@ def compare_with_jax_vae(
 )
 @click.option("--unet-atol", default=1e-5, show_default=True)
 @click.option(
+    "--unet-dir",
+    type=click.Path(path_type=Path),
+    default=DEFAULT_MLX_UNET_DIR,
+    show_default=True,
+)
+@click.option("--unet-ckpt-atol", default=1e-4, show_default=True)
+@click.option(
     "--recompute",
     is_flag=True,
     help="Regenerate the VizDoom test set even if it already exists.",
@@ -399,6 +671,8 @@ def main(
     compare_atol: float,
     run_unet_tests: bool,
     unet_atol: float,
+    unet_dir: Path,
+    unet_ckpt_atol: float,
     recompute: bool,
 ) -> None:
     clips, actions, rewards, data_dir = create_vizdoom_test_set(
@@ -436,6 +710,13 @@ def main(
     )
     if run_unet_tests:
         compare_unet_jax_components(atol=unet_atol)
+        compare_unet_jax_checkpoint(
+            clips,
+            actions,
+            unet_dir=unet_dir,
+            vae_dir=vae_dir,
+            atol=unet_ckpt_atol,
+        )
 
 
 if __name__ == "__main__":

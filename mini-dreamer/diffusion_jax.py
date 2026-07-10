@@ -131,7 +131,7 @@ def sample_euler_to_mp4(
         num_steps: Euler integration steps (= number of MP4 frames).
         fps: playback speed of the saved video.
     """
-    intermediates = sample_euler_jax(
+    intermediates = sample_euler(
         model,
         conditioning_clips,
         actions,
@@ -243,7 +243,7 @@ def generate_video(
         end = frames.shape[1] + 1  # frame index being generated, + 1 inclusive
         action_window = actions[:, max(0, end - max_context_size - 1) : end]
 
-        sample = sample_euler_jax(
+        sample = sample_euler(
             model,
             window,
             action_window,
