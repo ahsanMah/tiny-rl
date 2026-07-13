@@ -23,6 +23,77 @@ def make_final_frame_mask(x: jnp.ndarray) -> jnp.ndarray:
     frame_mask = (jnp.arange(x.shape[1]) == (x.shape[1] - 1)).astype(x.dtype)
     return jnp.reshape(frame_mask, (1, x.shape[1], 1, 1, 1))
 
+def _loss_at_t(
+    model: UNet3D,
+    x1: jnp.ndarray,
+    actions: jnp.ndarray,
+    t: jnp.ndarray,
+    *,
+    noise: jnp.ndarray,
+    t_ctx: jnp.ndarray | None = None,
+    rewards: jnp.ndarray | None = None,
+    reward_loss_weight: float = 0.0,
+    reward_t_threshold: float = 0.0,
+    return_eval_aux: bool = False,
+) -> (
+    tuple[jnp.ndarray, jnp.ndarray]
+    | tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]
+):
+    """Flow-matching loss at the given t.
+
+    Unlike the MLX version, ``noise`` is an explicit argument (same shape as
+    ``x1``) rather than sampled inside: this keeps the function pure
+    (jit-friendly) and lets parity tests inject identical noise into both
+    frameworks. The trainer's ``reward_loss_weight``/``reward_t_threshold``
+    come in as kwargs since this is a free function.
+
+    By default returns ``(total_loss, reward_loss)`` where ``total_loss``
+    is the flow loss plus ``reward_loss_weight * reward_loss``. The reward
+    loss is an MSE on the final frame's reward, computed only when
+    ``rewards`` (B,) is given and ``reward_loss_weight > 0``, and only over
+    batch elements with ``t >= reward_t_threshold`` (near-clean inputs —
+    heavily noised frames carry too little state to predict reward from).
+
+    If ``return_eval_aux`` is True, returns ``(loss, recon_mse, x1_pred,
+    r2)`` for eval/logging instead (flow loss only):
+
+    - ``recon_mse``: MSE of the one-step x1 reconstruction
+        ``x1_pred = xt + (1 - t) * v_pred``.
+    - ``x1_pred``: the prediction itself, shape ``(B, 1, H, W, C)``.
+    - ``r2``: ``1 - loss / E[target_velocity^2]`` — fraction of target
+        variance explained, scale-free baseline.
+    """
+    mask = make_final_frame_mask(x1)
+    if t_ctx is None:
+        t_ctx = jnp.ones_like(t)
+
+    # Diffusion-forcing style corruption: the target (final) frame is noised
+    # to level ``t`` while the conditioning frames are noised to level
+    # ``t_ctx`` (1.0 = clean). Training on imperfect history teaches the
+    # model to denoise from its own (error-carrying) rollout frames instead
+    # of always-clean ground truth, which is what curbs autoregressive
+    # drift. ``level`` is ``t`` on the final frame and ``t_ctx`` elsewhere.
+    t_view = jnp.reshape(t, (x1.shape[0], 1, 1, 1, 1)) * mask
+    t_ctx_view = jnp.reshape(t_ctx, (x1.shape[0], 1, 1, 1, 1)) * (1 - mask)
+    level = t_view + t_ctx_view
+    xt = (1.0 - level) * noise + level * x1
+    target_velocity = mask * (x1 - noise)
+    xmid, skips, time_context = model.encode(xt, t, context=actions, t_ctx=t_ctx)
+    pred_velocity = model.decode(xmid, skips, time_context)
+    loss = jnp.mean((pred_velocity[:, -1:] - target_velocity[:, -1:]) ** 2)
+    if not return_eval_aux:
+        reward_loss = jnp.array(0.0, dtype=loss.dtype)
+        if rewards is not None and reward_loss_weight > 0.0:
+            pred_reward = model.predict_reward(xmid)
+            keep = (t >= reward_t_threshold).astype(loss.dtype)
+            reward_loss = jnp.mean(keep * (pred_reward - rewards) ** 2)
+        return loss + reward_loss_weight * reward_loss, reward_loss
+
+    x1_pred = xt[:, -1:] + (1.0 - level[:, -1:]) * pred_velocity[:, -1:]
+    recon_mse = jnp.mean((x1_pred - x1[:, -1:]) ** 2)
+    target_var = jnp.mean(target_velocity[:, -1:] ** 2)
+    r2 = 1.0 - loss / jnp.maximum(target_var, 1e-12)
+    return loss, recon_mse, x1_pred, r2
 
 def sample_t_logit_normal(
     key: jax.Array,
