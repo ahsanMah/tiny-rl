@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import json
 from pathlib import Path
 from typing import Callable, Literal
@@ -7,12 +8,12 @@ from typing import Callable, Literal
 import jax
 import jax.numpy as jnp
 import numpy as np
+import optax
 from flax import nnx
-from jax import lax
-from jax import random
+from jax import lax, random
 from safetensors.flax import save_file
 
-from jax_utils import flat_params, load_flat_params
+from jax_utils import ema_update, flat_params, load_flat_params
 from unet_jax import UNet3D
 from video_utils import save_clip_previews, save_diffusion_mp4
 
@@ -22,6 +23,7 @@ NoiseDistribution = Literal["uniform", "logitnorm", "normal"]
 def make_final_frame_mask(x: jnp.ndarray) -> jnp.ndarray:
     frame_mask = (jnp.arange(x.shape[1]) == (x.shape[1] - 1)).astype(x.dtype)
     return jnp.reshape(frame_mask, (1, x.shape[1], 1, 1, 1))
+
 
 def _loss_at_t(
     model: UNet3D,
@@ -95,6 +97,7 @@ def _loss_at_t(
     r2 = 1.0 - loss / jnp.maximum(target_var, 1e-12)
     return loss, recon_mse, x1_pred, r2
 
+
 def sample_t_logit_normal(
     key: jax.Array,
     shape: tuple[int, ...],
@@ -131,6 +134,7 @@ def sample_noise(
         case _:
             raise ValueError(f"Unknown noise distribution: {noise_distribution}")
 
+
 def sample_euler(
     model: UNet3D,
     conditioning_clips: jnp.ndarray,
@@ -166,7 +170,7 @@ def sample_euler(
         x = xt_prev + dt * v[:, -1:]
         return x, x
 
-    ts = jnp.linspace(0,1,num_steps)
+    ts = jnp.linspace(0, 1, num_steps)
     x, intermediates = lax.scan(_step, init=x, xs=ts)
 
     if return_intermediates:
@@ -175,6 +179,139 @@ def sample_euler(
     samples = jnp.concatenate([conditioning_clips, x], axis=1)
     return samples
 
+class FlowMatchingTrainer(nnx.Module):
+    def __init__(
+        self,
+        model,
+        ema_model,
+        *,
+        learning_rate: float | optax.Schedule = 3e-4,
+        weight_decay: float = 1e-4,
+        max_grad_norm: float = 2.0,
+        ema_decay: float = 0.999,
+        action_dropout: float = 0.1,
+        reward_loss_weight: float = 0.0,
+        reward_t_threshold: float = 0.6,
+        min_context_t: float = 1.0,
+        sampling_distribution: NoiseDistribution = "logitnorm",
+        logit_norm_mu: float = 0.0,
+        logit_norm_scale: float = 1.0,
+        seed: int= 42,
+    ):
+        if reward_loss_weight > 0.0 and not getattr(model, "has_reward_head", False):
+            raise ValueError(
+                "reward_loss_weight > 0 requires a model built with predict_reward=True"
+            )
+        self.model = model
+        self.ema_model = ema_model
+        self.ema_decay = ema_decay
+        self.action_dropout = action_dropout
+        self.reward_loss_weight = reward_loss_weight
+        self.reward_t_threshold = reward_t_threshold
+        self.min_context_t = min_context_t
+        self.rng_key = nnx.Rngs(seed)
+
+        # Grad-clip + AdamW chain
+        self.optimizer = nnx.Optimizer(
+            model,
+            optax.chain(
+                optax.clip_by_global_norm(max_grad_norm),
+                optax.adamw(learning_rate=learning_rate, weight_decay=weight_decay),
+            ),
+            wrt=nnx.Param,
+        )
+
+        self.sampling_fn_for_t = functools.partial(
+            sample_noise,
+            noise_distribution=sampling_distribution,
+            mu=logit_norm_mu,
+            s=logit_norm_scale,
+        )
+        self.world_model_loss = functools.partial(
+            _loss_at_t,
+            reward_loss_weight=reward_loss_weight,
+            reward_t_threshold=reward_t_threshold,
+        )
+
+    @nnx.jit
+    def train_step(
+        self,
+        batch: jnp.ndarray,
+        actions: jnp.ndarray,
+        rewards: jnp.ndarray | None = None,
+    ) -> tuple[jnp.ndarray, jnp.ndarray]:
+
+        if rewards is not None and rewards.ndim == 2:
+            rewards = rewards[:, -1]  # reward of the final (denoised) frame
+
+        # This is where the logit norm sampling may be used
+        rng_key = self.rng_key.reparam()
+        rng_key, key = random.split(rng_key)
+        t = self.sampling_fn_for_t(key, batch.shape[:1])
+
+        # Uniformyl select noise timepoint for context frames
+        rng_key, key = random.split(rng_key)
+        t_ctx = random.uniform(key=key, shape=batch.shape[:1], minval=self.min_context_t, maxval=1.0)
+
+        # Random dropout for actions
+        rng_key, key = random.split(rng_key)
+        drop = random.uniform(key, shape=actions.shape) < self.action_dropout
+        null = jnp.full(shape=actions.shape, fill_value=self.model.null_action, dtype=actions.dtype)
+        actions = jnp.where(drop, null, actions)
+
+        rng_key, key = random.split(rng_key)
+        noise = random.normal(key, shape=batch.shape, dtype=batch.dtype)
+
+        loss, grads = nnx.value_and_grad(
+            lambda model: self.world_model_loss(model, batch, actions,t, noise=noise, t_ctx=t_ctx, rewards=rewards),
+            has_aux=True
+        )(self.model)
+
+        self.optimizer.update(self.model, grads)
+        ema_update(self.ema_model, self.model, self.ema_decay)
+        return loss
+
+    # !FIXME: TODO
+    # def eval_step(
+    #     self,
+    #     batch: jnp.ndarray,
+    #     actions: jnp.ndarray,
+    #     timesteps: jnp.ndarray,
+    # ) -> tuple[
+    #         dict[float, float],
+    #         dict[float, float],
+    #         dict[float, float],
+    #         dict[float, jnp.ndarray],
+    #     ]:
+    #     """Per-timestep validation metrics: ``(losses, psnrs, r2s, preds)``.
+
+    #     PSNR uses data range 2 since frames live in [-1, 1]. R² is
+    #     ``1 - loss / E[target_velocity^2]`` — fraction of target variance
+    #     explained. ``preds`` maps each timestep to the one-step x1 prediction
+    #     ``(B, 1, H, W, C)`` for that batch — useful for image logging.
+    #     """
+    #     losses: dict[float, float] = {}
+    #     psnrs: dict[float, float] = {}
+    #     r2s: dict[float, float] = {}
+    #     preds: dict[float, jnp.ndarray] = {}
+    #     log10_max = 20.0 * float(jnp.log10(jnp.array(2.0)))
+
+    #     rng_key = self.rng_key.reparam()
+    #     rng_key, key = random.split(rng_key)
+    #     noise = random.normal(key, shape=batch.shape, dtype=batch.dtype)
+
+    #     for timestep in timesteps[::-1]:
+    #         t = mx.full((batch.shape[0],), timestep, dtype=batch.dtype)
+    #         loss, recon_mse, x1_pred, r2 = _loss_at_t(
+    #             self.model, batch, actions, t, noise=noise, return_eval_aux=True
+    #         )
+    #         psnr = log10_max - 10.0 * jnp.log10(jnp.maximum(recon_mse, 1e-12))
+
+    #         losses[timestep] = loss
+    #         psnrs[timestep] = psnr
+    #         r2s[timestep] = r2
+    #         preds[timestep] = x1_pred
+    #     return losses, psnrs, r2s, preds
 
 def sample_euler_to_mp4(
     model: UNet3D,
