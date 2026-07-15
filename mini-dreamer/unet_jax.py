@@ -590,8 +590,6 @@ class UNet3D(nnx.Module):
 
 
 if __name__ == "__main__":
-    from jax_utils import print_param_table
-
     for use_wavelet in (False, True):
         label = "wavelet" if use_wavelet else "no wavelet"
         print(f"\n{'=' * 40}\n{label}\n{'=' * 40}")
@@ -609,4 +607,4 @@ if __name__ == "__main__":
         y = model(x, t, a)
         print(f"input: {x.shape}  output: {y.shape}")
 
-    print_param_table(model)
+    print(nnx.tabulate(model, x, t, a, depth=2))

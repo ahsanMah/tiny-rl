@@ -26,7 +26,6 @@ from jax_utils import (
     flat_params,
     linear_warmup_decay_schedule,
     load_flat_params,
-    print_param_table,
 )
 from logger_utils import RLLogger
 
@@ -589,7 +588,11 @@ def train_vae_on_dataset(
     print("dataset clips:", dataset.dataset_size)
     print("train split:", dataset.train_size)
     print("val split:", dataset.val_size)
-    print_param_table(model)
+    # Batch of 1: tabulate jit-traces every submodule with these shapes and
+    # none of it is reused by training, so keep the trace cheap.
+    table_batch, *_ = dataset.sample_val_batch(1)
+    table_batch = jnp.asarray(np.array(table_batch))
+    print(nnx.tabulate(model, table_batch, rngs=nnx.Rngs(0), depth=2))
 
     log10_max = 20.0 * math.log10(2.0)
     avg_loss = 0.0
