@@ -3,7 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import imageio.v2 as iio
-import mlx.core as mx
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
@@ -16,9 +15,9 @@ def make_random_video_dataset(
     width: int,
     channels: int,
     seed: int = 0,
-) -> mx.array:
-    mx.random.seed(seed)
-    return mx.random.normal((num_videos, frames, height, width, channels))
+) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    return rng.normal(size=(num_videos, frames, height, width, channels)).astype(np.float32)
 
 
 def load_video_frames(
@@ -84,7 +83,7 @@ def frames_to_clips(
     *,
     clip_length: int,
     clip_stride: int | None = None,
-) -> mx.array:
+) -> np.ndarray:
     if frames.ndim != 4:
         raise ValueError(f"Expected frames with shape (T, H, W, C), got {frames.shape}")
     if frames.shape[0] < clip_length:
@@ -103,7 +102,7 @@ def frames_to_clips(
     if not clips:
         raise ValueError("No clips could be formed from the loaded video")
 
-    return mx.array(np.stack(clips, axis=0))
+    return np.stack(clips, axis=0)
 
 
 def load_video_dataset(
@@ -114,7 +113,7 @@ def load_video_dataset(
     spatial_downsample: int = 2,
     clip_stride: int | None = None,
     max_clips: int | None = None,
-) -> tuple[mx.array, dict[str, float | tuple[int, int] | int]]:
+) -> tuple[np.ndarray, dict[str, float | tuple[int, int] | int]]:
     frames, info = load_video_frames(
         path,
         target_fps=target_fps,
@@ -159,8 +158,8 @@ def _annotate_action(frame: np.ndarray, action: int) -> np.ndarray:
 
 
 def save_diffusion_mp4(
-    context_frames: mx.array,
-    intermediates: list[mx.array],
+    context_frames: np.ndarray,
+    intermediates: list[np.ndarray],
     output_path: str | Path,
     *,
     fps: float = 8.0,
@@ -219,7 +218,7 @@ def save_diffusion_mp4(
 
 
 def save_video_grid(
-    videos: mx.array | np.ndarray,
+    videos: np.ndarray,
     output_path: str | Path,
     *,
     grid_size: int = 4,
@@ -253,12 +252,12 @@ def save_video_grid(
 
 
 def save_clip_previews(
-    clips: mx.array,
+    clips: np.ndarray,
     output_dir: str | Path,
     *,
     max_clips: int = 4,
     fps: float = 8.0,
-    actions: mx.array | np.ndarray | None = None,
+    actions: np.ndarray | None = None,
 ) -> None:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
