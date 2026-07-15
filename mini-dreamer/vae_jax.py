@@ -452,6 +452,7 @@ class VAETrainer(nnx.Module):
         kl = kl_divergence(mean, logvar)
         return recon_loss + self.kl_weight * kl
 
+    @nnx.jit
     def eval_loss(self, batch: jax.Array) -> dict[str, jax.Array]:
         metrics = {}
         recon, mean, logvar = self.model(batch, rngs=self.rngs)
@@ -460,8 +461,7 @@ class VAETrainer(nnx.Module):
         metrics["l1_loss"] = jnp.mean(jnp.abs(recon - batch))
         metrics["kl_loss"] = kl_divergence(mean, logvar)
         metrics["wavelet_loss"] = self._wavelet_detail(recon, batch)
-        if self.lpips_weight > 0.0:
-            metrics["lpips_loss"] = self._lpips(recon, batch)
+        metrics["lpips_loss"] = self._lpips(recon, batch)
         return metrics
 
     @nnx.jit
@@ -626,7 +626,7 @@ def train_vae_on_dataset(
             l2_loss_f = float(eval_metrics["l2_loss"])
             l1_loss_f = float(eval_metrics["l1_loss"])
             detail_loss_f = float(eval_metrics["wavelet_loss"])
-            lpips_loss_f = float(eval_metrics.get("lpips_loss", 0.0))
+            lpips_loss_f = float(eval_metrics["lpips_loss"])
 
             now = time.time()
             samples = window_steps * batch_size

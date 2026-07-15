@@ -445,6 +445,7 @@ def train_vae_cmd(ctx: click.Context, **kwargs) -> None:
         save_to_disk=True,
         save_dir=dataset_config.save_dir,
         pad_multiple=dataset_config.pad_multiple,
+        recompute=dataset_config.recompute
     )
     assert save_dir is not None, "Training should always load rollouts from disk"
     print(f"clips shape: {tuple(clips.shape)}")
