@@ -607,6 +607,61 @@ def train_vae_on_dataset(
     return model, ema_model, full_model_config
 
 
+def show_reconstruction_grid(
+    vae_dir: str | Path,
+    data_dir: str | Path,
+    *,
+    num_pairs: int = 8,
+    prefer_ema: bool = True,
+    save_path: str | Path | None = None,
+) -> None:
+    """Load a VAE and a rollout dataset, then show original/reconstruction pairs.
+
+    Plots the last frame of ``num_pairs`` validation clips (top row) against
+    their deterministic reconstructions through the posterior mean (bottom
+    row). Shows the figure interactively, or writes it to ``save_path`` if
+    given.
+    """
+    # Deferred: a module-level import would be circular (diffusion_jax ->
+    # jax_utils/unet_jax -> vae_jax).
+    from diffusion_jax import Dataset
+
+    import matplotlib.pyplot as plt
+
+    from video_utils import to_uint8_video
+
+    vae = load_vae(vae_dir, prefer_ema=prefer_ema)
+    dataset = Dataset(data_dir=data_dir, memory_map=True)
+    clips, *_ = dataset.val_clips(min(num_pairs, dataset.val_size))
+    frames = clips[:, -1:]  # (N, 1, H, W, C) — last frame of each clip
+    recon = decode_latents(vae, encode_clips(vae, frames))
+    psnr = 20.0 * math.log10(2.0) - 10.0 * float(
+        jnp.log10(jnp.maximum(jnp.mean((recon - frames) ** 2), 1e-12))
+    )
+
+    originals = to_uint8_video(np.asarray(frames[:, 0]))
+    recons = to_uint8_video(np.asarray(recon[:, 0]))
+
+    n = originals.shape[0]
+    fig, axes = plt.subplots(2, n, figsize=(1.6 * n, 3.6), squeeze=False)
+    for i in range(n):
+        for row, img in enumerate((originals[i], recons[i])):
+            ax = axes[row][i]
+            ax.imshow(img.squeeze(-1) if img.shape[-1] == 1 else img, cmap="gray")
+            ax.set_xticks([])
+            ax.set_yticks([])
+    axes[0][0].set_ylabel("original")
+    axes[1][0].set_ylabel("recon")
+    fig.suptitle(f"{vae_dir} — val PSNR {psnr:.2f}dB")
+    fig.tight_layout()
+
+    if save_path is not None:
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        print(f"saved reconstruction grid to: {save_path}")
+    else:
+        plt.show()
+
+
 def _self_test() -> None:
     rngs = nnx.Rngs(0, reparam=1)
     frames = jax.random.uniform(
@@ -641,4 +696,27 @@ def _self_test() -> None:
 
 
 if __name__ == "__main__":
-    _self_test()
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="VAE self-test (default) or reconstruction-grid viz."
+    )
+    sub = parser.add_subparsers(dest="cmd")
+    recon = sub.add_parser("recon", help="show original/reconstruction pairs")
+    recon.add_argument("--vae-dir", required=True, help="dir saved via save_vae")
+    recon.add_argument("--data-dir", required=True, help="rollout dir for Dataset")
+    recon.add_argument("--num-pairs", type=int, default=8)
+    recon.add_argument("--no-ema", action="store_true", help="use raw (non-EMA) weights")
+    recon.add_argument("--save", default=None, help="write PNG here instead of showing")
+    args = parser.parse_args()
+
+    if args.cmd == "recon":
+        show_reconstruction_grid(
+            args.vae_dir,
+            args.data_dir,
+            num_pairs=args.num_pairs,
+            prefer_ema=not args.no_ema,
+            save_path=args.save,
+        )
+    else:
+        _self_test()
