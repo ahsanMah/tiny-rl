@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Literal
 
 import jax
 import jax.numpy as jnp
+import lpips_jax
 import numpy as np
 import optax
 from flax import nnx
@@ -382,10 +383,8 @@ class VAETrainer(nnx.Module):
         self.wavelet_loss = wavelet_loss
         self.detail_weight = detail_weight
         self.lpips_weight = lpips_weight
-        if lpips_weight > 0.0:
-            import lpips_jax
+        self.lpips = lpips_jax.LPIPSEvaluator(replicate=False, net=lpips_net)
 
-            self.lpips = lpips_jax.LPIPSEvaluator(replicate=False, net=lpips_net)
         # Fixed Haar DWT for wavelet-domain recon loss (filters are constants,
         # not a trainable parameter — see WaveletDownsampleConv).
         self.dwt = WaveletDownsampleConv(
@@ -601,7 +600,7 @@ def train_vae_on_dataset(
 
     for step in range(1, train_config.vae_train_steps + 1):
         batch, *_ = dataset.sample_train_batch(batch_size)
-        loss = trainer.train_step(jnp.asarray(np.array(batch)))
+        loss = trainer.train_step(batch)
         avg_loss += loss
 
         if (
@@ -610,7 +609,6 @@ def train_vae_on_dataset(
             or step == train_config.vae_train_steps
         ):
             val_batch, *_ = dataset.sample_val_batch(min(batch_size, dataset.val_size))
-            val_batch = jnp.asarray(np.array(val_batch))
 
             eval_metrics = trainer.eval_loss(val_batch)
             recon = eval_metrics["recon"]
@@ -618,11 +616,17 @@ def train_vae_on_dataset(
                 jnp.maximum(eval_metrics["l2_loss"], 1e-12)
             )
             kl = eval_metrics["kl_loss"]
+            # Train PSNR on the batch just trained on, so the train/val gap
+            # (overfitting signal) is visible in tensorboard.
+            train_psnr = log10_max - 10.0 * jnp.log10(
+                jnp.maximum(trainer.eval_loss(batch)["l2_loss"], 1e-12)
+            )
 
             window_steps = step - last_log_step
             loss_f = float(loss)
             avg_loss_f = float(avg_loss) / window_steps
             psnr_f, kl_f = float(psnr), float(kl)
+            train_psnr_f = float(train_psnr)
             l2_loss_f = float(eval_metrics["l2_loss"])
             l1_loss_f = float(eval_metrics["l1_loss"])
             detail_loss_f = float(eval_metrics["wavelet_loss"])
@@ -636,6 +640,7 @@ def train_vae_on_dataset(
             print(
                 f"step={step:5d} sample/s={samples_per_sec:.2f} "
                 f"loss={loss_f:.4f} avg={avg_loss_f:.4f} lr={lr_f:.2e} "
+                f"train_psnr={train_psnr_f:.2f}dB "
                 f"val_psnr={psnr_f:.2f}dB val_kl={kl_f:.4f}"
             )
             if train_logger is not None:
@@ -646,6 +651,7 @@ def train_vae_on_dataset(
                         "loss": loss_f,
                         "avg_loss": avg_loss_f,
                         "learning_rate": lr_f,
+                        "psnr": train_psnr_f,
                     },
                 )
                 train_logger.log_train_metrics(
