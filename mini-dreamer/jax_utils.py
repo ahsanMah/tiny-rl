@@ -52,9 +52,9 @@ def linear_warmup_decay_schedule(
     constant after warmup. With everything disabled this returns the plain
     ``peak_lr`` float (a fixed learning rate).
     """
-    assert warmup_steps > 0 or final_lr is not None, "Schedule cannot be constant, need a warmup or decay"
-
     constant = optax.constant_schedule(peak_lr)
+    if warmup_steps <= 0 and final_lr is None:
+        return constant
     tail = (
         optax.linear_schedule(
             peak_lr, final_lr, max(total_steps - warmup_steps - hold_steps, 1)

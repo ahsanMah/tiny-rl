@@ -7,10 +7,10 @@ from pprint import pprint
 from typing import Any
 
 import click
-import mlx.core as mx
+import jax.numpy as jnp
 
 from data import DatasetConfig, make_env, record_rollouts, sample_batch
-from diffusion import (
+from diffusion_jax import (
     Dataset,
     ModelConfig,
     TrainConfig,
@@ -19,7 +19,6 @@ from diffusion import (
     save_model,
     train_on_dataset,
 )
-from logger_utils import RLLogger
 from vae_jax import (
     VAEModelConfig,
     VAETrainConfig,
@@ -267,8 +266,8 @@ def train_cmd(ctx: click.Context, **kwargs) -> None:
         b = min(train_config.batch_size, dataset_config.preview_clips)
         N, t, h, w, c = preview_clips.shape
         batched_clips = preview_clips.reshape(N // b, b, t, h, w, c)
-        preview_clips = map(lambda x: encode_clips(vae, mx.array(x)), batched_clips)
-        preview_clips = mx.concatenate(list(preview_clips))
+        preview_clips = map(lambda x: encode_clips(vae, jnp.asarray(x)), batched_clips)
+        preview_clips = jnp.concatenate(list(preview_clips))
         print(f"encoded latent clips shape: {tuple(preview_clips.shape)}")
 
         reconstructed = decode_fn(preview_clips)
@@ -359,8 +358,8 @@ def generate_cmd(ctx: click.Context, **kwargs) -> None:
         actions=action_clips,
         batch_size=sample_count,
     )
-    sample_clips = mx.array(sample_clips)
-    sample_action_clips = mx.array(sample_action_clips)
+    sample_clips = jnp.asarray(sample_clips)
+    sample_action_clips = jnp.asarray(sample_action_clips)
 
     decode_fn = None
     if latent_config.vae_dir is not None:
