@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import functools
 import json
 from pprint import pprint
@@ -111,6 +109,9 @@ class ModelConfig:
     num_transformer_blocks: int = 2
     use_wavelet: bool = False
     predict_reward: bool = False
+    # Compute dtype of the U-Net trunk ("float32" or "bfloat16"); params,
+    # optimizer state, EMA, norms, and embeddings stay fp32 (mixed precision).
+    dtype: str = "float32"
 
 
 @dataclass(frozen=True)
@@ -200,7 +201,12 @@ def _loss_at_t(
     target_velocity = mask * (x1 - noise)
     xmid, skips, time_context = model.encode(xt, t, context=actions, t_ctx=t_ctx)
     pred_velocity = model.decode(xmid, skips, time_context)
-    loss = jnp.mean((pred_velocity[:, -1:] - target_velocity[:, -1:]) ** 2)
+    # Reduce the loss in fp32: under bf16 compute the prediction comes back
+    # bf16, and a low-precision mean over many elements drifts.
+    velocity_err = (pred_velocity[:, -1:] - target_velocity[:, -1:]).astype(
+        jnp.float32
+    )
+    loss = jnp.mean(velocity_err**2)
     if not return_eval_aux:
         reward_loss = jnp.array(0.0, dtype=loss.dtype)
         if rewards is not None and reward_loss_weight > 0.0:
@@ -714,12 +720,6 @@ def train_on_dataset(
     print("val split:", dataset.val_size)
     # print(nnx.tabulate(model, x, t, a))
 
-    sample_count = min(train_config.num_gen_samples, dataset.val_size)
-    if train_config.save_dir is not None:
-        val_conditioning_clips, val_conditioning_actions, _ = dataset.val_clips(
-            sample_count
-        )
-
     avg_loss = 0.0
     start = time.time()
     last_log_time = start
@@ -814,21 +814,26 @@ def train_on_dataset(
             last_log_step = step
             last_log_time = time.time()
 
-    # if train_config.save_dir is not None:
-    #     samples = sample_euler(
-    #         trainer.model,
-    #         conditioning_clips=val_conditioning_clips[:, :-1],
-    #         actions=val_conditioning_actions,
-    #         num_steps=train_config.sample_steps,
-    #     )
+    if train_config.save_dir is not None:
+        sample_count = min(train_config.num_gen_samples, dataset.val_size)
+        val_conditioning_clips, val_conditioning_actions, _ = dataset.val_clips(
+            sample_count
+        )
 
-    #     save_clip_previews(
-    #         decoder(samples),
-    #         train_config.save_dir,
-    #         max_clips=sample_count,
-    #         fps=sample_fps,
-    #     )
-    #     print(f"saved samples to: {train_config.save_dir}")
+        samples = sample_euler(
+            trainer.model,
+            conditioning_clips=val_conditioning_clips[:, :-1],
+            actions=val_conditioning_actions,
+            num_steps=train_config.sample_steps,
+        )
+
+        save_clip_previews(
+            decoder(samples),
+            train_config.save_dir,
+            max_clips=sample_count,
+            fps=sample_fps,
+        )
+        print(f"saved samples to: {train_config.save_dir}")
 
     return trainer.model, trainer.ema_model, full_model_config
 

@@ -20,6 +20,62 @@ from vae_jax import WaveletDownsampleConv, WaveletUpsample
 
 RMS_NORM_EPS = 1e-5  # MLX nn.RMSNorm default; NNX defaults to 1e-6.
 
+def _is_tensor(node: object) -> bool:
+    return hasattr(node, "shape") and hasattr(node, "dtype")
+
+
+def _iter_param_tree(tree: object, prefix: str = ""):
+    if _is_tensor(tree):
+        yield prefix, tree
+        return
+
+    if isinstance(tree, dict):
+        for key, value in tree.items():
+            name = f"{prefix}.{key}" if prefix else str(key)
+            yield from _iter_param_tree(value, name)
+        return
+
+    if isinstance(tree, (list, tuple)):
+        for idx, value in enumerate(tree):
+            name = f"{prefix}[{idx}]" if prefix else f"[{idx}]"
+            yield from _iter_param_tree(value, name)
+        return
+
+def format_param_table(model: nnx.Module, *, sort: bool = False) -> str:
+    rows = []
+    for name, param in _iter_param_tree(model.parameters()):
+        shape = tuple(param.shape)
+        count = int(math.prod(shape)) if shape else 1
+        rows.append((name, shape, count))
+
+    if sort:
+        rows.sort(key=lambda row: row[0])
+
+    if rows:
+        name_width = max(len("Parameter"), max(len(name) for name, _, _ in rows))
+        shape_width = max(len("Shape"), max(len(str(shape)) for _, shape, _ in rows))
+        count_width = max(len("Count"), max(len(f"{count:,}") for _, _, count in rows))
+    else:
+        name_width = len("Parameter")
+        shape_width = len("Shape")
+        count_width = len("Count")
+
+    lines = [
+        f"{'Parameter'.ljust(name_width)}  {'Shape'.ljust(shape_width)}  {'Count'.rjust(count_width)}",
+        f"{'-' * name_width}  {'-' * shape_width}  {'-' * count_width}",
+    ]
+
+    for name, shape, count in rows:
+        lines.append(
+            f"{name.ljust(name_width)}  {str(shape).ljust(shape_width)}  {f'{count:,}'.rjust(count_width)}"
+        )
+
+    total = sum(count for _, _, count in rows)
+    lines.append(f"{'-' * name_width}  {'-' * shape_width}  {'-' * count_width}")
+    lines.append(
+        f"{'TOTAL'.ljust(name_width)}  {'-'.ljust(shape_width)}  {f'{total:,}'.rjust(count_width)}"
+    )
+    return "\n".join(lines)
 
 class GaussianFourierEmbedding(nnx.Module):
     def __init__(self, dim: int, *, rngs: nnx.Rngs, scale: float = 1.0):
@@ -99,6 +155,7 @@ class ConvResBlock3D(nnx.Module):
         out_channels: int,
         time_embed_dim: int | None = None,
         *,
+        dtype: jnp.dtype | None = None,
         rngs: nnx.Rngs,
     ):
         zero_init = nnx.initializers.zeros_init()
@@ -106,13 +163,26 @@ class ConvResBlock3D(nnx.Module):
         self.shortcut = (
             nnx.identity
             if in_channels == out_channels
-            else nnx.Conv(in_channels, out_channels, kernel_size=(1, 1, 1), rngs=rngs)
+            else nnx.Conv(
+                in_channels, out_channels, kernel_size=(1, 1, 1), dtype=dtype, rngs=rngs
+            )
         )
-        self.norm1 = nnx.RMSNorm(out_channels, epsilon=RMS_NORM_EPS, rngs=rngs)
-        self.norm2 = nnx.RMSNorm(out_channels, epsilon=RMS_NORM_EPS, rngs=rngs)
+        # Norms compute in fp32 regardless of the block's compute dtype; the
+        # following conv casts back down.
+        self.norm1 = nnx.RMSNorm(
+            out_channels, epsilon=RMS_NORM_EPS, dtype=jnp.float32, rngs=rngs
+        )
+        self.norm2 = nnx.RMSNorm(
+            out_channels, epsilon=RMS_NORM_EPS, dtype=jnp.float32, rngs=rngs
+        )
 
         self.conv1 = nnx.Conv(
-            out_channels, out_channels, kernel_size=(3, 3, 3), padding=1, rngs=rngs
+            out_channels,
+            out_channels,
+            kernel_size=(3, 3, 3),
+            padding=1,
+            dtype=dtype,
+            rngs=rngs,
         )
         self.conv2 = nnx.Conv(
             out_channels,
@@ -121,6 +191,7 @@ class ConvResBlock3D(nnx.Module):
             padding=1,
             kernel_init=zero_init,
             bias_init=zero_init,
+            dtype=dtype,
             rngs=rngs,
         )
         self.act = nnx.silu
@@ -131,6 +202,7 @@ class ConvResBlock3D(nnx.Module):
                 out_channels * 2,
                 kernel_init=zero_init,
                 bias_init=zero_init,
+                dtype=dtype,
                 rngs=rngs,
             )
             if time_embed_dim is not None
@@ -186,13 +258,18 @@ class UpBlock3D(nnx.Module):
         out_channels: int,
         time_embed_dim: int | None = None,
         *,
+        dtype: jnp.dtype | None = None,
         rngs: nnx.Rngs,
     ):
         self.up_conv = nnx.Conv(
-            in_channels, out_channels, kernel_size=(1, 1, 1), rngs=rngs
+            in_channels, out_channels, kernel_size=(1, 1, 1), dtype=dtype, rngs=rngs
         )
         self.conv = ConvResBlock3D(
-            out_channels, out_channels, time_embed_dim=time_embed_dim, rngs=rngs
+            out_channels,
+            out_channels,
+            time_embed_dim=time_embed_dim,
+            dtype=dtype,
+            rngs=rngs,
         )
 
     def __call__(
@@ -205,18 +282,28 @@ class UpBlock3D(nnx.Module):
 
 
 class CrossAttention(nnx.Module):
-    def __init__(self, dim: int, context_dim: int, num_heads: int = 4, *, rngs: nnx.Rngs):
+    def __init__(
+        self,
+        dim: int,
+        context_dim: int,
+        num_heads: int = 4,
+        *,
+        dtype: jnp.dtype | None = None,
+        rngs: nnx.Rngs,
+    ):
         """Implements MultiQuery Attention"""
         self.num_heads = num_heads
         self.scale = (dim // num_heads) ** -0.5
 
         zero_init = nnx.initializers.zeros_init()
-        self.norm = nnx.RMSNorm(dim, epsilon=RMS_NORM_EPS, rngs=rngs)
-        self.to_q = nnx.Linear(dim, dim, rngs=rngs)
-        self.to_k = nnx.Linear(context_dim, dim // num_heads, rngs=rngs)
-        self.to_v = nnx.Linear(context_dim, dim // num_heads, rngs=rngs)
+        self.norm = nnx.RMSNorm(
+            dim, epsilon=RMS_NORM_EPS, dtype=jnp.float32, rngs=rngs
+        )
+        self.to_q = nnx.Linear(dim, dim, dtype=dtype, rngs=rngs)
+        self.to_k = nnx.Linear(context_dim, dim // num_heads, dtype=dtype, rngs=rngs)
+        self.to_v = nnx.Linear(context_dim, dim // num_heads, dtype=dtype, rngs=rngs)
         self.to_out = nnx.Linear(
-            dim, dim, kernel_init=zero_init, bias_init=zero_init, rngs=rngs
+            dim, dim, kernel_init=zero_init, bias_init=zero_init, dtype=dtype, rngs=rngs
         )
 
     def __call__(
@@ -234,7 +321,9 @@ class CrossAttention(nnx.Module):
         k = k[:, None, :, :]
         v = v[:, None, :, :]
         scores = (q @ jnp.swapaxes(k, -1, -2)) * self.scale
-        out = jax.nn.softmax(scores, axis=-1) @ v
+        # Softmax in fp32 for numerical stability under low-precision compute.
+        attn = jax.nn.softmax(scores.astype(jnp.float32), axis=-1).astype(v.dtype)
+        out = attn @ v
         # (B, H, T, D_head) -> (B, T, H*D_head)
         out = out.transpose(0, 2, 1, 3).reshape(B, T, D)
         out = self.to_out(out)
@@ -243,14 +332,23 @@ class CrossAttention(nnx.Module):
 
 
 class FeedForward(nnx.Module):
-    def __init__(self, dim: int, mult: int = 4, *, rngs: nnx.Rngs):
+    def __init__(
+        self,
+        dim: int,
+        mult: int = 4,
+        *,
+        dtype: jnp.dtype | None = None,
+        rngs: nnx.Rngs,
+    ):
         hidden_dim = dim * mult
         zero_init = nnx.initializers.zeros_init()
-        self.norm = nnx.RMSNorm(dim, epsilon=RMS_NORM_EPS, rngs=rngs)
-        self.in_proj = nnx.Linear(dim, hidden_dim, rngs=rngs)
+        self.norm = nnx.RMSNorm(
+            dim, epsilon=RMS_NORM_EPS, dtype=jnp.float32, rngs=rngs
+        )
+        self.in_proj = nnx.Linear(dim, hidden_dim, dtype=dtype, rngs=rngs)
         self.act = nnx.silu
         self.out_proj = nnx.Linear(
-            hidden_dim, dim, kernel_init=zero_init, bias_init=zero_init, rngs=rngs
+            hidden_dim, dim, kernel_init=zero_init, bias_init=zero_init, dtype=dtype, rngs=rngs
         )
 
     def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
@@ -266,13 +364,16 @@ class TransformerBlock(nnx.Module):
         num_heads: int = 4,
         ff_mult: int = 4,
         *,
+        dtype: jnp.dtype | None = None,
         rngs: nnx.Rngs,
     ):
-        self.self_attn = CrossAttention(dim, context_dim=dim, num_heads=num_heads, rngs=rngs)
-        self.cross_attn = CrossAttention(
-            dim, context_dim=context_dim, num_heads=num_heads, rngs=rngs
+        self.self_attn = CrossAttention(
+            dim, context_dim=dim, num_heads=num_heads, dtype=dtype, rngs=rngs
         )
-        self.ff = FeedForward(dim, mult=ff_mult, rngs=rngs)
+        self.cross_attn = CrossAttention(
+            dim, context_dim=context_dim, num_heads=num_heads, dtype=dtype, rngs=rngs
+        )
+        self.ff = FeedForward(dim, mult=ff_mult, dtype=dtype, rngs=rngs)
 
     def __call__(self, x: jnp.ndarray, context: jnp.ndarray) -> jnp.ndarray:
         x = self.self_attn(x, context=x)
@@ -291,9 +392,16 @@ class UNet3D(nnx.Module):
         num_transformer_blocks: int = 2,
         use_wavelet: bool = False,
         predict_reward: bool = False,
+        dtype: str | jnp.dtype = "float32",
         rngs: nnx.Rngs,
         **kwargs,
     ):
+        # Mixed precision: ``dtype`` is the compute dtype of the conv/attention
+        # trunk (a string like "bfloat16" so it JSON round-trips through
+        # config.json); params, norms, softmax, and the time/action embeddings
+        # stay fp32. ``None`` keeps flax's default promotion (plain fp32).
+        dtype = jnp.dtype(dtype)
+        self.dtype = None if dtype == jnp.float32 else dtype
         time_embed_dim = base_channels * 4
         self.max_context_size = max_context_size
         self.use_wavelet = use_wavelet
@@ -312,14 +420,27 @@ class UNet3D(nnx.Module):
             in_channels = in_channels * 4
 
         out_channels = in_channels
+        compute_dtype = self.dtype
         self.res1 = ConvResBlock3D(
-            in_channels, base_channels, time_embed_dim=time_embed_dim, rngs=rngs
+            in_channels,
+            base_channels,
+            time_embed_dim=time_embed_dim,
+            dtype=compute_dtype,
+            rngs=rngs,
         )
         self.res2 = ConvResBlock3D(
-            base_channels, base_channels * 2, time_embed_dim=time_embed_dim, rngs=rngs
+            base_channels,
+            base_channels * 2,
+            time_embed_dim=time_embed_dim,
+            dtype=compute_dtype,
+            rngs=rngs,
         )
         self.res3 = ConvResBlock3D(
-            base_channels * 2, base_channels * 4, time_embed_dim=time_embed_dim, rngs=rngs
+            base_channels * 2,
+            base_channels * 4,
+            time_embed_dim=time_embed_dim,
+            dtype=compute_dtype,
+            rngs=rngs,
         )
 
         self.mid_transformer_blocks = nnx.List(
@@ -329,6 +450,7 @@ class UNet3D(nnx.Module):
                     context_dim=time_embed_dim,
                     num_heads=4,
                     ff_mult=4,
+                    dtype=compute_dtype,
                     rngs=rngs,
                 )
                 for _ in range(num_transformer_blocks)
@@ -336,18 +458,34 @@ class UNet3D(nnx.Module):
         )
 
         self.mid_conv = ConvResBlock3D(
-            base_channels * 4, base_channels * 4, time_embed_dim=time_embed_dim, rngs=rngs
+            base_channels * 4,
+            base_channels * 4,
+            time_embed_dim=time_embed_dim,
+            dtype=compute_dtype,
+            rngs=rngs,
         )
 
         self.up2 = UpBlock3D(
-            base_channels * 4, base_channels * 2, time_embed_dim=time_embed_dim, rngs=rngs
+            base_channels * 4,
+            base_channels * 2,
+            time_embed_dim=time_embed_dim,
+            dtype=compute_dtype,
+            rngs=rngs,
         )
         self.up1 = UpBlock3D(
-            base_channels * 2, base_channels, time_embed_dim=time_embed_dim, rngs=rngs
+            base_channels * 2,
+            base_channels,
+            time_embed_dim=time_embed_dim,
+            dtype=compute_dtype,
+            rngs=rngs,
         )
 
         self.out_conv = nnx.Conv(
-            base_channels, out_channels, kernel_size=(1, 1, 1), rngs=rngs
+            base_channels,
+            out_channels,
+            kernel_size=(1, 1, 1),
+            dtype=compute_dtype,
+            rngs=rngs,
         )
 
         self.has_reward_head = predict_reward

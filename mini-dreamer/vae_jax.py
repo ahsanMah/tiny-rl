@@ -1,10 +1,12 @@
+from __future__ import annotations
+
 import json
 import math
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from pprint import pprint
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import jax
 import jax.numpy as jnp
@@ -14,7 +16,10 @@ from flax import nnx
 from jax import lax
 from safetensors.flax import save_file
 
-from diffusion import Dataset
+# Type-only: a module-level import would be circular
+# (diffusion_jax -> jax_utils/unet_jax -> vae_jax).
+if TYPE_CHECKING:
+    from diffusion_jax import Dataset
 from jax_utils import (
     ema_update,
     flat_params,

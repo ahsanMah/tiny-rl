@@ -11,9 +11,6 @@ import optax
 from flax import nnx
 from safetensors.flax import load_file
 
-from unet import format_param_table
-
-
 def ema_update(ema_model: nnx.Module, model: nnx.Module, decay: float) -> None:
     """JAX port of ``diffusion.ema_update`` (that one operates on MLX modules)."""
     ema_params = nnx.state(ema_model, nnx.Param)
@@ -29,8 +26,12 @@ def ema_update(ema_model: nnx.Module, model: nnx.Module, decay: float) -> None:
 
 
 def print_param_table(model: nnx.Module) -> None:
-    """Reuse ``unet.format_param_table`` via a ``.parameters()`` shim (it only
-    needs a nested dict of arrays with ``shape``/``dtype``)."""
+    """Reuse ``unet_jax.format_param_table`` via a ``.parameters()`` shim (it
+    only needs a nested dict of arrays with ``shape``/``dtype``)."""
+    # Deferred import: module-level would be circular
+    # (unet_jax -> vae_jax -> jax_utils).
+    from unet_jax import format_param_table
+
     params = nnx.state(model, nnx.Param).to_pure_dict()
     print(format_param_table(SimpleNamespace(parameters=lambda: params)))
 
