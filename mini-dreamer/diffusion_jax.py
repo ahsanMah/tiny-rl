@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import functools
 import json
+from pprint import pprint
+import time
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable, Literal
 
@@ -13,11 +16,125 @@ from flax import nnx
 from jax import lax, random
 from safetensors.flax import save_file
 
-from jax_utils import ema_update, flat_params, load_flat_params
+from jax_utils import (
+    ema_update,
+    flat_params,
+    linear_warmup_decay_schedule,
+    load_flat_params,
+)
 from unet_jax import UNet3D
 from video_utils import save_clip_previews, save_diffusion_mp4
+from data import _split_size, load_rollouts, sample_batch
 
 NoiseDistribution = Literal["uniform", "logitnorm", "normal"]
+
+class Dataset:
+    """Train/val view over clip tensors already materialised in memory or on disk."""
+
+    def __init__(
+        self,
+        data_dir: str | Path,
+        *,
+        val_fraction: float = 0.05,
+        encoder: Callable | None = None,
+        memory_map: bool = False,
+    ):
+        videos, actions, rewards = load_rollouts(data_dir, mmap=memory_map)
+        self.has_rewards = rewards is not None
+        if rewards is None:
+            rewards = np.zeros(actions.shape, dtype=np.float32)
+
+        dataset_size = int(videos.shape[0])
+        val_size = _split_size(dataset_size, val_fraction)
+        train_size = dataset_size - val_size
+        self.encoder = encoder
+
+        self.train_videos = videos[:train_size]
+        self.train_actions = actions[:train_size]
+        self.train_rewards = rewards[:train_size]
+        self.val_videos = videos[train_size:]
+        self.val_actions = actions[train_size:]
+        self.val_rewards = rewards[train_size:]
+
+        self.dataset_size = dataset_size
+        self.train_size = train_size
+        self.val_size = int(self.val_videos.shape[0])
+        self.num_channels = int(videos.shape[-1])
+        # Env action-space size; an action id >= num_actions would index out
+        # of the model's embedding table (which NaNs silently under jit).
+        self.num_actions = int(actions.max()) + 1
+
+        print(f"setup dataset from {data_dir}")
+        print(f"{self.train_size = } - {self.val_size = }")
+
+    def _build_tensor(
+        self,
+        videos: np.ndarray,
+        actions: np.ndarray,
+        rewards: np.ndarray,
+    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        video_batch = jnp.array(videos)
+        action_batch = jnp.array(actions)
+        reward_batch = jnp.array(rewards)
+
+        if self.encoder is not None:
+            video_batch = self.encoder(video_batch)
+        return video_batch, action_batch, reward_batch
+
+    def sample_train_batch(
+        self, batch_size: int
+    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        videos, actions, rewards = sample_batch(
+            self.train_videos, self.train_actions, batch_size, self.train_rewards
+        )
+        return self._build_tensor(videos, actions, rewards)
+
+    def sample_val_batch(self, batch_size: int) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        videos, actions, rewards = sample_batch(
+            self.val_videos, self.val_actions, batch_size, self.val_rewards
+        )
+        return self._build_tensor(videos, actions, rewards)
+
+    def val_clips(self, num_clips: int) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        return self._build_tensor(
+            self.val_videos[:num_clips],
+            self.val_actions[:num_clips],
+            self.val_rewards[:num_clips],
+        )
+
+@dataclass(frozen=True)
+class ModelConfig:
+    in_channels: int = 3
+    base_channels: int = 16
+    max_context_size: int = 3
+    num_transformer_blocks: int = 2
+    use_wavelet: bool = False
+    predict_reward: bool = False
+
+
+@dataclass(frozen=True)
+class TrainConfig:
+    train_steps: int = 1_000
+    batch_size: int = 32
+    learning_rate: float = 3e-4
+    lr_final: float | None = None
+    lr_warmup_steps: int = 500
+    lr_hold_steps: int = 3000
+    ema_decay: float = 0.99
+    action_dropout: float = 0.1
+    reward_loss_weight: float = 0.0
+    reward_t_threshold: float = 0.6
+    # Context-noise augmentation: conditioning frames are corrupted to a flow
+    # level sampled uniformly in [min_context_t, 1.0] (1.0 = clean). Lower =
+    # stronger augmentation against autoregressive drift; 1.0 disables it.
+    min_context_t: float = 0.5
+    log_every: int = 50
+    save_dir: str | Path | None = None
+    load_dir: str | None = None
+    num_gen_samples: int = 4
+    sample_steps: int = 32
+    sampling_distribution: str = "uniform"
+    log_tensorboard: bool = False
 
 
 def make_final_frame_mask(x: jnp.ndarray) -> jnp.ndarray:
@@ -179,139 +296,6 @@ def sample_euler(
     samples = jnp.concatenate([conditioning_clips, x], axis=1)
     return samples
 
-class FlowMatchingTrainer(nnx.Module):
-    def __init__(
-        self,
-        model,
-        ema_model,
-        *,
-        learning_rate: float | optax.Schedule = 3e-4,
-        weight_decay: float = 1e-4,
-        max_grad_norm: float = 2.0,
-        ema_decay: float = 0.999,
-        action_dropout: float = 0.1,
-        reward_loss_weight: float = 0.0,
-        reward_t_threshold: float = 0.6,
-        min_context_t: float = 1.0,
-        sampling_distribution: NoiseDistribution = "logitnorm",
-        logit_norm_mu: float = 0.0,
-        logit_norm_scale: float = 1.0,
-        seed: int= 42,
-    ):
-        if reward_loss_weight > 0.0 and not getattr(model, "has_reward_head", False):
-            raise ValueError(
-                "reward_loss_weight > 0 requires a model built with predict_reward=True"
-            )
-        self.model = model
-        self.ema_model = ema_model
-        self.ema_decay = ema_decay
-        self.action_dropout = action_dropout
-        self.reward_loss_weight = reward_loss_weight
-        self.reward_t_threshold = reward_t_threshold
-        self.min_context_t = min_context_t
-        self.rng_key = nnx.Rngs(seed)
-
-        # Grad-clip + AdamW chain
-        self.optimizer = nnx.Optimizer(
-            model,
-            optax.chain(
-                optax.clip_by_global_norm(max_grad_norm),
-                optax.adamw(learning_rate=learning_rate, weight_decay=weight_decay),
-            ),
-            wrt=nnx.Param,
-        )
-
-        self.sampling_fn_for_t = functools.partial(
-            sample_noise,
-            noise_distribution=sampling_distribution,
-            mu=logit_norm_mu,
-            s=logit_norm_scale,
-        )
-        self.world_model_loss = functools.partial(
-            _loss_at_t,
-            reward_loss_weight=reward_loss_weight,
-            reward_t_threshold=reward_t_threshold,
-        )
-
-    @nnx.jit
-    def train_step(
-        self,
-        batch: jnp.ndarray,
-        actions: jnp.ndarray,
-        rewards: jnp.ndarray | None = None,
-    ) -> tuple[jnp.ndarray, jnp.ndarray]:
-
-        if rewards is not None and rewards.ndim == 2:
-            rewards = rewards[:, -1]  # reward of the final (denoised) frame
-
-        # This is where the logit norm sampling may be used
-        rng_key = self.rng_key.reparam()
-        rng_key, key = random.split(rng_key)
-        t = self.sampling_fn_for_t(key, batch.shape[:1])
-
-        # Uniformyl select noise timepoint for context frames
-        rng_key, key = random.split(rng_key)
-        t_ctx = random.uniform(key=key, shape=batch.shape[:1], minval=self.min_context_t, maxval=1.0)
-
-        # Random dropout for actions
-        rng_key, key = random.split(rng_key)
-        drop = random.uniform(key, shape=actions.shape) < self.action_dropout
-        null = jnp.full(shape=actions.shape, fill_value=self.model.null_action, dtype=actions.dtype)
-        actions = jnp.where(drop, null, actions)
-
-        rng_key, key = random.split(rng_key)
-        noise = random.normal(key, shape=batch.shape, dtype=batch.dtype)
-
-        loss, grads = nnx.value_and_grad(
-            lambda model: self.world_model_loss(model, batch, actions,t, noise=noise, t_ctx=t_ctx, rewards=rewards),
-            has_aux=True
-        )(self.model)
-
-        self.optimizer.update(self.model, grads)
-        ema_update(self.ema_model, self.model, self.ema_decay)
-        return loss
-
-    # !FIXME: TODO
-    # def eval_step(
-    #     self,
-    #     batch: jnp.ndarray,
-    #     actions: jnp.ndarray,
-    #     timesteps: jnp.ndarray,
-    # ) -> tuple[
-    #         dict[float, float],
-    #         dict[float, float],
-    #         dict[float, float],
-    #         dict[float, jnp.ndarray],
-    #     ]:
-    #     """Per-timestep validation metrics: ``(losses, psnrs, r2s, preds)``.
-
-    #     PSNR uses data range 2 since frames live in [-1, 1]. R² is
-    #     ``1 - loss / E[target_velocity^2]`` — fraction of target variance
-    #     explained. ``preds`` maps each timestep to the one-step x1 prediction
-    #     ``(B, 1, H, W, C)`` for that batch — useful for image logging.
-    #     """
-    #     losses: dict[float, float] = {}
-    #     psnrs: dict[float, float] = {}
-    #     r2s: dict[float, float] = {}
-    #     preds: dict[float, jnp.ndarray] = {}
-    #     log10_max = 20.0 * float(jnp.log10(jnp.array(2.0)))
-
-    #     rng_key = self.rng_key.reparam()
-    #     rng_key, key = random.split(rng_key)
-    #     noise = random.normal(key, shape=batch.shape, dtype=batch.dtype)
-
-    #     for timestep in timesteps[::-1]:
-    #         t = mx.full((batch.shape[0],), timestep, dtype=batch.dtype)
-    #         loss, recon_mse, x1_pred, r2 = _loss_at_t(
-    #             self.model, batch, actions, t, noise=noise, return_eval_aux=True
-    #         )
-    #         psnr = log10_max - 10.0 * jnp.log10(jnp.maximum(recon_mse, 1e-12))
-
-    #         losses[timestep] = loss
-    #         psnrs[timestep] = psnr
-    #         r2s[timestep] = r2
-    #         preds[timestep] = x1_pred
-    #     return losses, psnrs, r2s, preds
 
 def sample_euler_to_mp4(
     model: UNet3D,
@@ -522,3 +506,378 @@ def generate_env_video(
     )
     print(f"saved generated video to: {save_dir}")
     return generated
+
+
+class FlowMatchingTrainer(nnx.Module):
+    def __init__(
+        self,
+        model,
+        ema_model,
+        *,
+        learning_rate: float | optax.Schedule = 3e-4,
+        weight_decay: float = 1e-4,
+        max_grad_norm: float = 2.0,
+        ema_decay: float = 0.999,
+        action_dropout: float = 0.1,
+        reward_loss_weight: float = 0.0,
+        reward_t_threshold: float = 0.6,
+        min_context_t: float = 1.0,
+        sampling_distribution: NoiseDistribution = "logitnorm",
+        logit_norm_mu: float = 0.0,
+        logit_norm_scale: float = 1.0,
+        seed: int = 42,
+    ):
+        if reward_loss_weight > 0.0 and not getattr(model, "has_reward_head", False):
+            raise ValueError(
+                "reward_loss_weight > 0 requires a model built with predict_reward=True"
+            )
+        self.model = model
+        self.ema_model = ema_model
+        self.ema_decay = ema_decay
+        self.action_dropout = action_dropout
+        self.reward_loss_weight = reward_loss_weight
+        self.reward_t_threshold = reward_t_threshold
+        self.min_context_t = min_context_t
+        self.rng_key = nnx.Rngs(seed)
+
+        # Plain floats (not a jnp array) so they can key the eval_step dict
+        self.eval_timesteps = (0.01, 1.0 / 3.0, 2.0 / 3.0, 0.9)
+
+        # Grad-clip + AdamW chain
+        self.optimizer = nnx.Optimizer(
+            model,
+            optax.chain(
+                optax.clip_by_global_norm(max_grad_norm),
+                optax.adamw(learning_rate=learning_rate, weight_decay=weight_decay),
+            ),
+            wrt=nnx.Param,
+        )
+
+        self.sampling_fn_for_t = functools.partial(
+            sample_noise,
+            noise_distribution=sampling_distribution,
+            mu=logit_norm_mu,
+            s=logit_norm_scale,
+        )
+        self.world_model_loss = functools.partial(
+            _loss_at_t,
+            reward_loss_weight=reward_loss_weight,
+            reward_t_threshold=reward_t_threshold,
+        )
+
+    # todo look into jax.monitoring
+    @nnx.jit
+    def train_step(
+        self,
+        batch: jnp.ndarray,
+        actions: jnp.ndarray,
+        rewards: jnp.ndarray | None = None,
+    ) -> tuple[jnp.ndarray, jnp.ndarray]:
+
+        if rewards is not None and rewards.ndim == 2:
+            rewards = rewards[:, -1]  # reward of the final (denoised) frame
+
+        # This is where the logit norm sampling may be used
+        rng_key = self.rng_key.reparam()
+        rng_key, key = random.split(rng_key)
+        t = self.sampling_fn_for_t(key, batch.shape[:1])
+
+        # Uniformyl select noise timepoint for context frames
+        rng_key, key = random.split(rng_key)
+        t_ctx = random.uniform(
+            key=key, shape=batch.shape[:1], minval=self.min_context_t, maxval=1.0
+        )
+
+        # Random dropout for actions
+        rng_key, key = random.split(rng_key)
+        drop = random.uniform(key, shape=actions.shape) < self.action_dropout
+        null = jnp.full(
+            shape=actions.shape, fill_value=self.model.null_action, dtype=actions.dtype
+        )
+        actions = jnp.where(drop, null, actions)
+
+        rng_key, key = random.split(rng_key)
+        noise = random.normal(key, shape=batch.shape, dtype=batch.dtype)
+
+        loss, grads = nnx.value_and_grad(
+            lambda model: self.world_model_loss(
+                model, batch, actions, t, noise=noise, t_ctx=t_ctx, rewards=rewards
+            ),
+            has_aux=True,
+        )(self.model)
+
+        self.optimizer.update(self.model, grads)
+        ema_update(self.ema_model, self.model, self.ema_decay)
+        return loss
+
+
+    def eval_step(
+        self,
+        batch: jnp.ndarray,
+        actions: jnp.ndarray,
+    ) -> dict[float, tuple]:
+        """Per-timestep validation metrics: ``(losses, psnrs, r2s, preds)``.
+
+        PSNR uses data range 2 since frames live in [-1, 1]. R² is
+        ``1 - loss / E[target_velocity^2]`` — fraction of target variance
+        explained. ``preds`` maps each timestep to the one-step x1 prediction
+        ``(B, 1, H, W, C)`` for that batch — useful for image logging.
+        """
+        losses: dict[float, tuple] = {}
+
+        log10_max = 20.0 * float(jnp.log10(jnp.array(2.0)))
+
+        rng_key = self.rng_key.reparam()
+        rng_key, key = random.split(rng_key)
+        noise = random.normal(key, shape=batch.shape, dtype=batch.dtype)
+
+        for timestep in self.eval_timesteps:
+            t = jnp.full((batch.shape[0],), timestep, dtype=batch.dtype)
+            loss, recon_mse, x1_pred, r2 = _loss_at_t(
+                self.model, batch, actions, t, noise=noise, return_eval_aux=True
+            )
+            psnr = log10_max - 10.0 * jnp.log10(jnp.maximum(recon_mse, 1e-12))
+            losses[timestep] = (loss, psnr, r2, x1_pred)
+
+        return losses
+
+
+def train_on_dataset(
+    dataset: Dataset,
+    num_env_actions: int = 1,
+    model_config: ModelConfig | None = None,
+    train_config: TrainConfig | None = None,
+    sample_fps: float = 8.0,
+    decode_fn: Callable | None = None,
+):
+    model_config = ModelConfig() if model_config is None else model_config
+    train_config = TrainConfig() if train_config is None else train_config
+    train_logger = None
+    if train_config.log_tensorboard:
+        save_path = Path(train_config.save_dir)
+        train_logger = RLLogger(log_dir=str(save_path.parent), exp_name=save_path.name)
+
+    if decode_fn is not None:
+        decoder = decode_fn
+
+    print("Using train config:")
+    pprint(train_config)
+    print("Using model config:")
+    pprint(model_config)
+
+    input_config = {
+        "in_channels": dataset.num_channels,
+        "out_channels": dataset.num_channels,
+        "num_actions": num_env_actions,
+    }
+    full_model_config = {**input_config, **asdict(model_config)}
+
+    if train_config.load_dir is not None:
+        model = load_model(train_config.load_dir, prefer_ema=False)
+        print(f"resuming training from: {train_config.load_dir}")
+    else:
+        model = UNet3D(**full_model_config, rngs=nnx.Rngs(0))
+
+    ema_model = nnx.clone(model)
+
+    lr_schedule: optax.Schedule = linear_warmup_decay_schedule(
+        train_config.learning_rate,
+        total_steps=train_config.train_steps,
+        warmup_steps=train_config.lr_warmup_steps,
+        hold_steps=train_config.lr_hold_steps,
+        final_lr=train_config.lr_final,
+    )
+
+    if train_config.reward_loss_weight > 0.0 and not dataset.has_rewards:
+        raise ValueError(
+            "reward_loss_weight > 0 but the dataset has no rewards.npy — "
+            "re-record the rollouts to capture rewards"
+        )
+
+    trainer = FlowMatchingTrainer(
+        model,
+        ema_model,
+        learning_rate=lr_schedule,
+        action_dropout=train_config.action_dropout,
+        reward_loss_weight=train_config.reward_loss_weight,
+        reward_t_threshold=train_config.reward_t_threshold,
+        min_context_t=train_config.min_context_t,
+    )
+
+    checkpoint_interval = 1000
+    if train_config.save_dir is not None:
+        save_path = Path(train_config.save_dir) / "resume-ckpt"
+        print(f"periodically saving checkpoints to: {save_path}")
+
+    print("dataset clips:", dataset.dataset_size)
+    print("train split:", dataset.train_size)
+    print("val split:", dataset.val_size)
+    # print(nnx.tabulate(model, x, t, a))
+
+    sample_count = min(train_config.num_gen_samples, dataset.val_size)
+    if train_config.save_dir is not None:
+        val_conditioning_clips, val_conditioning_actions, _ = dataset.val_clips(
+            sample_count
+        )
+
+    avg_loss = 0.0
+    start = time.time()
+    last_log_time = start
+    last_log_step = 0
+    batch_size = train_config.batch_size
+
+    for step in range(1, train_config.train_steps + 1):
+        batch, batch_actions, batch_rewards = dataset.sample_train_batch(batch_size)
+        loss, reward_loss = trainer.train_step(batch, batch_actions, batch_rewards)
+        avg_loss += loss
+
+        if (
+            step == 1
+            or step % train_config.log_every == 0
+            or step == train_config.train_steps
+        ):
+            val_batch, val_batch_actions, _ = dataset.sample_val_batch(
+                min(train_config.batch_size, dataset.val_size)
+            )
+
+            val_metrics = trainer.eval_step(val_batch, val_batch_actions)
+
+            window_steps = step - last_log_step
+            avg_loss_f = float(avg_loss) / max(window_steps, 1)
+            now = time.time()
+            samples_per_sec = window_steps * batch_size / max(now - last_log_time, 1e-8)
+
+            # Recall that jax.tree.map aligns corresponding leaves across the input PyTrees
+            #  and passes them together to your function
+            reduced_metrics = jax.tree.map(
+                   # Mapped over leaf values e.g [loss_t1, loss_t2, loss_t3]
+                   lambda *xs: jnp.mean(jnp.stack(xs), axis=0),
+                   # This is where each timepoint tuple is passed as a separate arg
+                   # e.g. [loss_t1, psnr_t1,...], [loss_t2, psnr_t2, ...] ...
+                   *val_metrics.values(),
+               )
+            avg_val_loss, avg_val_psnr, avg_val_r2, _ = reduced_metrics
+            val_report = f"val=[loss={float(avg_val_loss):.4f} psnr={float(avg_val_psnr):.2f} r2={float(avg_val_r2):.3f}]"
+            print(
+                f"step={step:5d} sample/s={samples_per_sec:.2f} "
+                f"loss={float(loss):.4f} avg={avg_loss_f:.4f} {val_report}"
+            )
+
+            # window_steps = step - last_log_step
+            # loss_f = float(loss)
+            # avg_loss_f = float(avg_loss) / window_steps
+            # val_losses = {t: float(v) for t, v in val_losses.items()}
+            # val_psnrs = {t: float(v) for t, v in val_psnrs.items()}
+            # val_r2s = {t: float(v) for t, v in val_r2s.items()}
+            # avg_val_loss = sum(val_losses.values()) / len(val_losses)
+            # avg_val_psnr = sum(val_psnrs.values()) / len(val_psnrs)
+            # avg_val_r2 = sum(val_r2s.values()) / len(val_r2s)
+            # val_report = (
+            #     f"avg_val_t={avg_val_loss:.4f} avg_val_psnr={avg_val_psnr:.2f}dB "
+            #     f"avg_val_r2={avg_val_r2:.3f}"
+            # )
+
+            # now = time.time()
+            # samples = window_steps * batch_size
+            # samples_per_sec = samples / max(now - last_log_time, 1e-8)
+
+            # reward_report = ""
+            # train_metrics = {
+            #     "samples_per_second": samples_per_sec,
+            #     "loss": loss_f,
+            #     "avg_loss": avg_loss_f,
+            # }
+            # if train_config.reward_loss_weight > 0.0:
+            #     reward_loss_f = float(reward_loss)
+            #     reward_report = f" reward_loss={reward_loss_f:.4f}"
+            #     train_metrics["reward_loss"] = reward_loss_f
+
+            # print(
+            #     f"step={step:5d} sample/s={samples_per_sec:.2f} "
+            #     f"loss={loss_f:.4f} avg={avg_loss_f:.4f}{reward_report} {val_report}"
+            # )
+            # if train_logger is not None:
+            #     train_logger.log_train_metrics(step, train_metrics)
+            #     train_logger.log_train_metrics(
+            #         step,
+            #         {
+            #             "avg_loss_t": avg_val_loss,
+            #             "avg_psnr": avg_val_psnr,
+            #             "avg_r2": avg_val_r2,
+            #         },
+            #         val=True,
+            #     )
+            #     train_logger.log_validation_steps(step, val_losses)
+            #     train_logger.log_validation_psnrs(step, val_psnrs)
+            #     train_logger.log_validation_r2s(step, val_r2s)
+            #     _viz_samples = min(16, val_batch.shape[0])
+
+            #     train_logger.log_reconstructions(
+            #         step,
+            #         decoder(val_batch[:_viz_samples, -1:])[:, 0],
+            #         {t: decoder(p[:_viz_samples])[:, 0] for t, p in val_preds.items()},
+            #     )
+
+            # if step % checkpoint_interval == 0:
+            #     save_model(
+            #         model,
+            #         save_path,
+            #         config={"step": step, **asdict(train_config), **full_model_config},
+            #     )
+
+            avg_loss = 0.0
+            last_log_step = step
+            last_log_time = time.time()
+
+    # if train_config.save_dir is not None:
+    #     samples = sample_euler(
+    #         trainer.model,
+    #         conditioning_clips=val_conditioning_clips[:, :-1],
+    #         actions=val_conditioning_actions,
+    #         num_steps=train_config.sample_steps,
+    #     )
+
+    #     save_clip_previews(
+    #         decoder(samples),
+    #         train_config.save_dir,
+    #         max_clips=sample_count,
+    #         fps=sample_fps,
+    #     )
+    #     print(f"saved samples to: {train_config.save_dir}")
+
+    return trainer.model, trainer.ema_model, full_model_config
+
+def train_overfit_random(
+    *,
+    steps: int = 1_000,
+    batch_size: int = 1,
+    base_channels: int = 4,
+    learning_rate: float = 1e-3,
+    seed: int = 0,
+    log_every: int = 5,
+    sample_dir: str | Path | None = None,
+    num_samples: int = 4,
+    sample_steps: int = 32,
+    sample_fps: float = 8.0,
+    # The U-Net halves the time axis twice, so clips must be >= 4 frames;
+    # the vae dirs hold 2-frame VAE pairs and won't fit the world model.
+    data_dir: str | Path = "logs/port-utils/vizdoom-vae/test-set",
+):
+    dataset = Dataset(data_dir=data_dir, memory_map=True)
+    return train_on_dataset(
+        dataset,
+        num_env_actions=dataset.num_actions,
+        model_config=ModelConfig(base_channels=base_channels),
+        train_config=TrainConfig(
+            train_steps=steps,
+            batch_size=batch_size,
+            learning_rate=learning_rate,
+            log_every=log_every,
+            save_dir=sample_dir,
+            num_gen_samples=num_samples,
+            sample_steps=sample_steps,
+        ),
+    )
+
+if __name__ == "__main__":
+    train_overfit_random()
