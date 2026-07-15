@@ -1,9 +1,8 @@
 """Framework-generic JAX/NNX helpers shared by the ported trainers
-(vae_jax.py, diffusion_jax.py): EMA, LR schedule, safetensors save/load,
-and the param-table printer."""
+(vae_jax.py, diffusion_jax.py): EMA, LR schedule, and safetensors
+save/load."""
 
 from pathlib import Path
-from types import SimpleNamespace
 
 import jax
 import jax.numpy as jnp
@@ -23,17 +22,6 @@ def ema_update(ema_model: nnx.Module, model: nnx.Module, decay: float) -> None:
             params,
         ),
     )
-
-
-def print_param_table(model: nnx.Module) -> None:
-    """Reuse ``unet_jax.format_param_table`` via a ``.parameters()`` shim (it
-    only needs a nested dict of arrays with ``shape``/``dtype``)."""
-    # Deferred import: module-level would be circular
-    # (unet_jax -> vae_jax -> jax_utils).
-    from unet_jax import format_param_table
-
-    params = nnx.state(model, nnx.Param).to_pure_dict()
-    print(format_param_table(SimpleNamespace(parameters=lambda: params)))
 
 
 def linear_warmup_decay_schedule(

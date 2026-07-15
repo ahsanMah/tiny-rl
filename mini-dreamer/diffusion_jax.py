@@ -718,7 +718,10 @@ def train_on_dataset(
     print("dataset clips:", dataset.dataset_size)
     print("train split:", dataset.train_size)
     print("val split:", dataset.val_size)
-    # print(nnx.tabulate(model, x, t, a))
+    # Batch of 1: tabulate jit-traces every submodule with these shapes and
+    # none of it is reused by training, so keep the trace cheap.
+    table_batch, table_actions, _ = dataset.sample_val_batch(1)
+    print(nnx.tabulate(model, table_batch, jnp.ones((1,)), table_actions, depth=2))
 
     avg_loss = 0.0
     start = time.time()
