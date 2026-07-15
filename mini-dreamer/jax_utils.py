@@ -42,7 +42,7 @@ def linear_warmup_decay_schedule(
     warmup_steps: int = 0,
     hold_steps: int = 0,
     final_lr: float | None = None,
-) -> float | optax.Schedule:
+) -> optax.Schedule:
     """Linear warmup from ``peak_lr / 10`` to ``peak_lr`` over ``warmup_steps``,
     hold at ``peak_lr`` for ``hold_steps``, then linear decay to ``final_lr``
     over the remaining steps.
@@ -52,8 +52,7 @@ def linear_warmup_decay_schedule(
     constant after warmup. With everything disabled this returns the plain
     ``peak_lr`` float (a fixed learning rate).
     """
-    if warmup_steps <= 0 and final_lr is None:
-        return peak_lr
+    assert warmup_steps > 0 or final_lr is not None, "Schedule cannot be constant, need a warmup or decay"
 
     constant = optax.constant_schedule(peak_lr)
     tail = (
@@ -77,6 +76,7 @@ def linear_warmup_decay_schedule(
 
     if not boundaries:
         return tail
+
     return optax.join_schedules(schedules, boundaries)
 
 

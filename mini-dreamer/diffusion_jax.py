@@ -16,6 +16,7 @@ from flax import nnx
 from jax import lax, random
 from safetensors.flax import save_file
 
+from logger_utils import RLLogger
 from jax_utils import (
     ema_update,
     flat_params,
@@ -657,8 +658,7 @@ def train_on_dataset(
         save_path = Path(train_config.save_dir)
         train_logger = RLLogger(log_dir=str(save_path.parent), exp_name=save_path.name)
 
-    if decode_fn is not None:
-        decoder = decode_fn
+    decoder = decode_fn if decode_fn is not None else (lambda x: x)
 
     print("Using train config:")
     pprint(train_config)
@@ -749,81 +749,66 @@ def train_on_dataset(
 
             # Recall that jax.tree.map aligns corresponding leaves across the input PyTrees
             #  and passes them together to your function
+            val_losses = {t: float(m[0]) for t, m in val_metrics.items()}
+            val_psnrs = {t: float(m[1]) for t, m in val_metrics.items()}
+            val_r2s = {t: float(m[2]) for t, m in val_metrics.items()}
+            val_preds = {t: m[3] for t, m in val_metrics.items()}
             reduced_metrics = jax.tree.map(
                    # Mapped over leaf values e.g [loss_t1, loss_t2, loss_t3]
                    lambda *xs: jnp.mean(jnp.stack(xs), axis=0),
                    # This is where each timepoint tuple is passed as a separate arg
                    # e.g. [loss_t1, psnr_t1,...], [loss_t2, psnr_t2, ...] ...
-                   *val_metrics.values(),
+                   *((m[:3] for m in val_metrics.values())),
                )
-            avg_val_loss, avg_val_psnr, avg_val_r2, _ = reduced_metrics
+            avg_val_loss, avg_val_psnr, avg_val_r2 = reduced_metrics
             val_report = f"val=[loss={float(avg_val_loss):.4f} psnr={float(avg_val_psnr):.2f} r2={float(avg_val_r2):.3f}]"
+            reward_report = ""
+
+            train_metrics = {
+                "samples_per_second": samples_per_sec,
+                "loss": float(loss),
+                "avg_loss": avg_loss_f,
+            }
+
+            if train_config.reward_loss_weight > 0.0:
+                reward_loss_f = float(reward_loss)
+                reward_report = f" reward_loss={reward_loss_f:.4f}"
+                train_metrics["reward_loss"] = reward_loss_f
+
             print(
                 f"step={step:5d} sample/s={samples_per_sec:.2f} "
-                f"loss={float(loss):.4f} avg={avg_loss_f:.4f} {val_report}"
+                f"loss={train_metrics['loss']:.4f} avg={avg_loss_f:.4f}"
+                f"{reward_report} {val_report}"
             )
 
-            # window_steps = step - last_log_step
-            # loss_f = float(loss)
-            # avg_loss_f = float(avg_loss) / window_steps
-            # val_losses = {t: float(v) for t, v in val_losses.items()}
-            # val_psnrs = {t: float(v) for t, v in val_psnrs.items()}
-            # val_r2s = {t: float(v) for t, v in val_r2s.items()}
-            # avg_val_loss = sum(val_losses.values()) / len(val_losses)
-            # avg_val_psnr = sum(val_psnrs.values()) / len(val_psnrs)
-            # avg_val_r2 = sum(val_r2s.values()) / len(val_r2s)
-            # val_report = (
-            #     f"avg_val_t={avg_val_loss:.4f} avg_val_psnr={avg_val_psnr:.2f}dB "
-            #     f"avg_val_r2={avg_val_r2:.3f}"
-            # )
+            if train_logger is not None:
+                train_logger.log_train_metrics(step, train_metrics)
+                train_logger.log_train_metrics(
+                    step,
+                    {
+                        "avg_loss_t": avg_val_loss,
+                        "avg_psnr": avg_val_psnr,
+                        "avg_r2": avg_val_r2,
+                    },
+                    val=True,
+                )
+                train_logger.log_validation_steps(step, val_losses)
+                train_logger.log_validation_psnrs(step, val_psnrs)
+                train_logger.log_validation_r2s(step, val_r2s)
+                _viz_samples = min(16, val_batch.shape[0])
 
-            # now = time.time()
-            # samples = window_steps * batch_size
-            # samples_per_sec = samples / max(now - last_log_time, 1e-8)
+                train_logger.log_reconstructions(
+                    step,
+                    decoder(val_batch[:_viz_samples, -1:])[:, 0],
+                    {t: decoder(p[:_viz_samples])[:, 0] for t, p in val_preds.items()},
+                )
 
-            # reward_report = ""
-            # train_metrics = {
-            #     "samples_per_second": samples_per_sec,
-            #     "loss": loss_f,
-            #     "avg_loss": avg_loss_f,
-            # }
-            # if train_config.reward_loss_weight > 0.0:
-            #     reward_loss_f = float(reward_loss)
-            #     reward_report = f" reward_loss={reward_loss_f:.4f}"
-            #     train_metrics["reward_loss"] = reward_loss_f
-
-            # print(
-            #     f"step={step:5d} sample/s={samples_per_sec:.2f} "
-            #     f"loss={loss_f:.4f} avg={avg_loss_f:.4f}{reward_report} {val_report}"
-            # )
-            # if train_logger is not None:
-            #     train_logger.log_train_metrics(step, train_metrics)
-            #     train_logger.log_train_metrics(
-            #         step,
-            #         {
-            #             "avg_loss_t": avg_val_loss,
-            #             "avg_psnr": avg_val_psnr,
-            #             "avg_r2": avg_val_r2,
-            #         },
-            #         val=True,
-            #     )
-            #     train_logger.log_validation_steps(step, val_losses)
-            #     train_logger.log_validation_psnrs(step, val_psnrs)
-            #     train_logger.log_validation_r2s(step, val_r2s)
-            #     _viz_samples = min(16, val_batch.shape[0])
-
-            #     train_logger.log_reconstructions(
-            #         step,
-            #         decoder(val_batch[:_viz_samples, -1:])[:, 0],
-            #         {t: decoder(p[:_viz_samples])[:, 0] for t, p in val_preds.items()},
-            #     )
-
-            # if step % checkpoint_interval == 0:
-            #     save_model(
-            #         model,
-            #         save_path,
-            #         config={"step": step, **asdict(train_config), **full_model_config},
-            #     )
+            if train_config.save_dir is not None and step % checkpoint_interval == 0:
+                save_model(
+                    model,
+                    save_path,
+                    config={"step": step, **asdict(train_config), **full_model_config},
+                )
 
             avg_loss = 0.0
             last_log_step = step
@@ -855,7 +840,6 @@ def train_overfit_random(
     learning_rate: float = 1e-3,
     seed: int = 0,
     log_every: int = 5,
-    sample_dir: str | Path | None = None,
     num_samples: int = 4,
     sample_steps: int = 32,
     sample_fps: float = 8.0,
@@ -873,9 +857,10 @@ def train_overfit_random(
             batch_size=batch_size,
             learning_rate=learning_rate,
             log_every=log_every,
-            save_dir=sample_dir,
             num_gen_samples=num_samples,
             sample_steps=sample_steps,
+            save_dir="logs/port-utils/vizdoom-diffusion/overfit/",
+            log_tensorboard=True,
         ),
     )
 
