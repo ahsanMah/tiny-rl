@@ -518,6 +518,16 @@ wheels = [
 ]
 
 [[package]]
+name = "lpips-jax"
+version = "0.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "flax" },
+    { name = "jax" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/e4/4f/5d98bdde23129144b73bc992f759f04b5fbb0db3df3051114d7d30426e0b/lpips_jax-0.1.0.tar.gz", hash = "sha256:a286e44ce15db862b3b5244d175b0f9abbc13c0e737c8355a7dd69fb62fc693b", size = 63794605, upload-time = "2022-04-22T20:22:21.676Z" }
+
+[[package]]
 name = "markdown"
 version = "3.10.2"
 source = { registry = "https://pypi.org/simple" }
@@ -676,6 +686,7 @@ dependencies = [
     { name = "imageio-ffmpeg" },
     { name = "jax" },
     { name = "loguru" },
+    { name = "lpips-jax" },
     { name = "minigrid" },
     { name = "mlx" },
     { name = "safetensors" },
@@ -695,6 +706,7 @@ requires-dist = [
     { name = "imageio-ffmpeg", specifier = ">=0.6.0" },
     { name = "jax", specifier = ">=0.10.2" },
     { name = "loguru", specifier = ">=0.7.3" },
+    { name = "lpips-jax", specifier = ">=0.1.0" },
     { name = "minigrid", specifier = ">=3.1.0" },
     { name = "mlx", specifier = ">=0.31.2" },
     { name = "safetensors", specifier = ">=0.8.0" },

@@ -38,6 +38,9 @@ class VAEModelConfig:
     base_channels: int = 32
     num_downsamples: int = 2
     use_wavelet: bool = True
+    # Compute dtype of the conv trunk ("float32" or "bfloat16"); params,
+    # optimizer state, EMA, norms, and posterior moments stay fp32.
+    dtype: str = "float32"
 
 
 @dataclass(frozen=True)
@@ -52,6 +55,8 @@ class VAETrainConfig:
     recon_loss: ReconLoss = "l1"
     wavelet_loss: bool = False
     detail_weight: float = 0.0
+    lpips_weight: float = 0.0
+    lpips_net: str = "vgg16"  # "vgg16" or "alexnet"
     ema_decay: float = 0.99
     save_dir: str | None = None
     log_every: int = 50
@@ -125,16 +130,31 @@ class WaveletUpsample:
 class ConvResBlock2D(nnx.Module):
     """Per-frame 2D residual block (Conv2d analogue of ConvResBlock3D, no time-FiLM)."""
 
-    def __init__(self, in_channels: int, out_channels: int, *, rngs: nnx.Rngs):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        *,
+        dtype: jnp.dtype | None = None,
+        rngs: nnx.Rngs,
+    ):
         self.shortcut = (
             nnx.identity
             if in_channels == out_channels
-            else nnx.Conv(in_channels, out_channels, kernel_size=(1, 1), rngs=rngs)
+            else nnx.Conv(
+                in_channels, out_channels, kernel_size=(1, 1), dtype=dtype, rngs=rngs
+            )
         )
-        self.norm1 = nnx.RMSNorm(out_channels, rngs=rngs)
-        self.norm2 = nnx.RMSNorm(out_channels, rngs=rngs)
+        # Norms compute in fp32 regardless of the block's compute dtype.
+        self.norm1 = nnx.RMSNorm(out_channels, dtype=jnp.float32, rngs=rngs)
+        self.norm2 = nnx.RMSNorm(out_channels, dtype=jnp.float32, rngs=rngs)
         self.conv1 = nnx.Conv(
-            out_channels, out_channels, kernel_size=(3, 3), padding=1, rngs=rngs
+            out_channels,
+            out_channels,
+            kernel_size=(3, 3),
+            padding=1,
+            dtype=dtype,
+            rngs=rngs,
         )
         self.conv2 = nnx.Conv(
             out_channels,
@@ -143,6 +163,7 @@ class ConvResBlock2D(nnx.Module):
             padding=1,
             kernel_init=nnx.initializers.zeros_init(),
             bias_init=nnx.initializers.zeros_init(),
+            dtype=dtype,
             rngs=rngs,
         )
         self.act = nnx.silu
@@ -179,6 +200,7 @@ class WaveletVAE(nnx.Module):
         num_downsamples: int = 2,
         use_wavelet: bool = True,
         latent_scale: float = 1.0,
+        dtype: str | jnp.dtype = "float32",
         rngs: nnx.Rngs,
         **kwargs,
     ):
@@ -189,6 +211,13 @@ class WaveletVAE(nnx.Module):
         self.num_downsamples = num_downsamples
         self.use_wavelet = use_wavelet
         self.latent_scale = latent_scale
+        # Mixed precision: ``dtype`` is the compute dtype of the conv trunk (a
+        # string like "bfloat16" so it JSON round-trips through config.json);
+        # params, norms, and posterior moments stay fp32. ``None`` keeps
+        # flax's default promotion (plain fp32).
+        dtype = jnp.dtype(dtype)
+        self.dtype = None if dtype == jnp.float32 else dtype
+        compute_dtype = self.dtype
 
         zero_init = nnx.initializers.zeros_init()
 
@@ -203,14 +232,19 @@ class WaveletVAE(nnx.Module):
 
         # Encoder: stem -> [resblock + strided downsample] x num_downsamples -> mean/logvar.
         self.enc_stem = nnx.Conv(
-            enc_in, base_channels, kernel_size=(3, 3), padding=1, rngs=rngs
+            enc_in,
+            base_channels,
+            kernel_size=(3, 3),
+            padding=1,
+            dtype=compute_dtype,
+            rngs=rngs,
         )
         enc_blocks = []
         enc_downs = []
         ch = base_channels
         for _ in range(num_downsamples):
             out_ch = ch * 2
-            enc_blocks.append(ConvResBlock2D(ch, out_ch, rngs=rngs))
+            enc_blocks.append(ConvResBlock2D(ch, out_ch, dtype=compute_dtype, rngs=rngs))
             enc_downs.append(
                 nnx.Conv(
                     out_ch,
@@ -218,31 +252,40 @@ class WaveletVAE(nnx.Module):
                     kernel_size=(3, 3),
                     strides=(2, 2),
                     padding=1,
+                    dtype=compute_dtype,
                     rngs=rngs,
                 )
             )
             ch = out_ch
         self.enc_blocks = nnx.List(enc_blocks)
         self.enc_downs = nnx.List(enc_downs)
-        self.enc_mid = ConvResBlock2D(ch, ch, rngs=rngs)
+        self.enc_mid = ConvResBlock2D(ch, ch, dtype=compute_dtype, rngs=rngs)
+        # Posterior moments stay fp32 so KL / reparameterization / latent-scale
+        # calibration are exact.
         self.to_moments = nnx.Conv(
             ch,
             latent_channels * 2,
             kernel_size=(1, 1),
             kernel_init=zero_init,
             bias_init=zero_init,
+            dtype=jnp.float32,
             rngs=rngs,
         )
 
         # Decoder: mirror (nearest upsample + conv).
         self.from_latent = nnx.Conv(
-            latent_channels, ch, kernel_size=(3, 3), padding=1, rngs=rngs
+            latent_channels,
+            ch,
+            kernel_size=(3, 3),
+            padding=1,
+            dtype=compute_dtype,
+            rngs=rngs,
         )
-        self.dec_mid = ConvResBlock2D(ch, ch, rngs=rngs)
+        self.dec_mid = ConvResBlock2D(ch, ch, dtype=compute_dtype, rngs=rngs)
         dec_blocks = []
         for _ in range(num_downsamples):
             out_ch = ch // 2
-            dec_blocks.append(ConvResBlock2D(ch, out_ch, rngs=rngs))
+            dec_blocks.append(ConvResBlock2D(ch, out_ch, dtype=compute_dtype, rngs=rngs))
             ch = out_ch
         self.dec_blocks = nnx.List(dec_blocks)
         self.dec_out = nnx.Conv(
@@ -252,6 +295,7 @@ class WaveletVAE(nnx.Module):
             padding=1,
             kernel_init=zero_init,
             bias_init=zero_init,
+            dtype=compute_dtype,
             rngs=rngs,
         )
 
@@ -293,7 +337,9 @@ class WaveletVAE(nnx.Module):
         out = out.reshape(B, T, *out.shape[1:])
         if self.use_wavelet:
             out = self.unpool(out)
-        return out
+        # Return fp32 under bf16 compute: losses reduce in fp32 and callers
+        # (previews, numpy conversion) expect a numpy-compatible dtype.
+        return out.astype(jnp.float32) if self.dtype is not None else out
 
     def __call__(
         self, frames: jnp.ndarray, *, rngs: nnx.Rngs
@@ -324,6 +370,8 @@ class VAETrainer(nnx.Module):
         recon_loss: ReconLoss = "l1",
         wavelet_loss: bool = False,
         detail_weight: float = 1.0,
+        lpips_weight: float = 0.0,
+        lpips_net: str = "vgg16",
         rngs: nnx.Rngs,
     ):
         self.model = model
@@ -333,6 +381,11 @@ class VAETrainer(nnx.Module):
         self.recon_loss = recon_loss
         self.wavelet_loss = wavelet_loss
         self.detail_weight = detail_weight
+        self.lpips_weight = lpips_weight
+        if lpips_weight > 0.0:
+            import lpips_jax
+
+            self.lpips = lpips_jax.LPIPSEvaluator(replicate=False, net=lpips_net)
         # Fixed Haar DWT for wavelet-domain recon loss (filters are constants,
         # not a trainable parameter — see WaveletDownsampleConv).
         self.dwt = WaveletDownsampleConv(
@@ -373,6 +426,20 @@ class VAETrainer(nnx.Module):
         wt = 2.0 * self.dwt(x)
         return self._recon(wr[..., C:], wt[..., C:])
 
+    def _lpips(self, recon: jax.Array, x: jax.Array) -> jax.Array:
+        """Mean LPIPS distance over frames. Expects inputs in [-1, 1].
+
+        The pretrained VGG/AlexNet backbones take 3-channel NHWC images, so
+        clips collapse ``(B, T) -> B*T`` and grayscale is tiled to RGB.
+        """
+        B, T, H, W, C = x.shape
+        r = recon.reshape(B * T, H, W, C)
+        t = x.reshape(B * T, H, W, C)
+        if C == 1:
+            r = jnp.tile(r, (1, 1, 1, 3))
+            t = jnp.tile(t, (1, 1, 1, 3))
+        return jnp.mean(self.lpips(r, t))
+
     def loss(self, model: WaveletVAE, batch: jax.Array, rngs: nnx.Rngs) -> jax.Array:
         recon, mean, logvar = model(batch, rngs=rngs)
         recon_loss = self._recon(recon, batch)
@@ -380,6 +447,8 @@ class VAETrainer(nnx.Module):
             recon_loss = recon_loss + self.detail_weight * self._wavelet_detail(
                 recon, batch
             )
+        if self.lpips_weight > 0.0:
+            recon_loss = recon_loss + self.lpips_weight * self._lpips(recon, batch)
         kl = kl_divergence(mean, logvar)
         return recon_loss + self.kl_weight * kl
 
@@ -391,6 +460,8 @@ class VAETrainer(nnx.Module):
         metrics["l1_loss"] = jnp.mean(jnp.abs(recon - batch))
         metrics["kl_loss"] = kl_divergence(mean, logvar)
         metrics["wavelet_loss"] = self._wavelet_detail(recon, batch)
+        if self.lpips_weight > 0.0:
+            metrics["lpips_loss"] = self._lpips(recon, batch)
         return metrics
 
     @nnx.jit
@@ -511,6 +582,8 @@ def train_vae_on_dataset(
         recon_loss=train_config.recon_loss,
         wavelet_loss=train_config.wavelet_loss,
         detail_weight=train_config.detail_weight,
+        lpips_weight=train_config.lpips_weight,
+        lpips_net=train_config.lpips_net,
         rngs=rngs,
     )
 
@@ -553,6 +626,7 @@ def train_vae_on_dataset(
             l2_loss_f = float(eval_metrics["l2_loss"])
             l1_loss_f = float(eval_metrics["l1_loss"])
             detail_loss_f = float(eval_metrics["wavelet_loss"])
+            lpips_loss_f = float(eval_metrics.get("lpips_loss", 0.0))
 
             now = time.time()
             samples = window_steps * batch_size
@@ -582,6 +656,7 @@ def train_vae_on_dataset(
                         "l2_loss": l2_loss_f,
                         "l1_loss": l1_loss_f,
                         "detail_loss": detail_loss_f,
+                        "lpips_loss": lpips_loss_f,
                     },
                     val=True,
                 )
@@ -662,7 +737,9 @@ def show_reconstruction_grid(
         plt.show()
 
 
-def _self_test() -> None:
+def _self_test(
+    *, dtype: str = "float32", lpips_weight: float = 0.0, steps: int = 500
+) -> None:
     rngs = nnx.Rngs(0, reparam=1)
     frames = jax.random.uniform(
         jax.random.key(0), shape=(2, 4, 32, 32, 3), minval=-1.0, maxval=1.0
@@ -673,21 +750,31 @@ def _self_test() -> None:
         latent_channels=8,
         num_downsamples=1,
         use_wavelet=True,
+        dtype=dtype,
     )
     model = WaveletVAE(**cfg, rngs=rngs)
     ema_model = nnx.clone(model)
     trainer = VAETrainer(
-        model, ema_model, learning_rate=3e-3, kl_weight=1e-6, rngs=rngs
+        model,
+        ema_model,
+        learning_rate=3e-3,
+        kl_weight=1e-6,
+        lpips_weight=lpips_weight,
+        rngs=rngs,
     )
 
     recon, _, _ = model(frames, rngs=rngs)
     assert recon.shape == frames.shape, (recon.shape, frames.shape)
+    assert recon.dtype == jnp.float32, recon.dtype
     mse_start = float(jnp.mean((recon - frames) ** 2))
-    for step in range(500):
+    for step in range(steps):
         loss = float(trainer.train_step(frames))
     recon, _, _ = model(frames, rngs=rngs)
     mse_end = float(jnp.mean((recon - frames) ** 2))
-    print(f"recon MSE: start={mse_start:.5f} end={mse_end:.5f}")
+    print(
+        f"[dtype={dtype} lpips_weight={lpips_weight}] "
+        f"recon MSE: start={mse_start:.5f} end={mse_end:.5f}"
+    )
     assert mse_end < mse_start, "recon MSE did not drop"
     print("self-test passed: recon MSE dropped.")
 
@@ -720,3 +807,5 @@ if __name__ == "__main__":
         )
     else:
         _self_test()
+        _self_test(dtype="bfloat16")
+        _self_test(dtype="bfloat16", lpips_weight=0.5, steps=100)
