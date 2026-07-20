@@ -787,10 +787,6 @@ def _self_test(
     assert mse_end < mse_start, "recon MSE did not drop"
     print("self-test passed: recon MSE dropped.")
 
-
-# def self_wavelet_test() -> None:
-
-
 if __name__ == "__main__":
     import argparse
 
@@ -804,9 +800,22 @@ if __name__ == "__main__":
     recon.add_argument("--num-pairs", type=int, default=8)
     recon.add_argument("--no-ema", action="store_true", help="use raw (non-EMA) weights")
     recon.add_argument("--save", default=None, help="write PNG here instead of showing")
+
+    calibrate = sub.add_parser("calibrate", help="calibrate the latent scales")
+    calibrate.add_argument("--vae-dir", required=True, help="dir saved via save_vae")
+    calibrate.add_argument("--data-dir", required=True, help="rollout dir for Dataset")
     args = parser.parse_args()
 
-    if args.cmd == "recon":
+    if args.cmd == "calibrate":
+        from diffusion_jax import Dataset
+        vae = load_vae(args.vae_dir, prefer_ema=True)
+        dataset = Dataset(data_dir=args.data_dir, memory_map=True)
+        latent_scale = _calibrate_latent_scale(
+            vae, dataset.train_videos, batch_size=64
+        )
+        latent_scale = latent_scale if latent_scale > 1e-6 else 1.0
+        print(f"calibrated latent_scale={latent_scale}")
+    elif args.cmd == "recon":
         show_reconstruction_grid(
             args.vae_dir,
             args.data_dir,

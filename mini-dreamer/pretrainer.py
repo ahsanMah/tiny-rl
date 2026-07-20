@@ -236,7 +236,6 @@ def train_cmd(ctx: click.Context, **kwargs) -> None:
     )
     assert save_dir is not None, "Training should always load rollouts from disk"
     print(f"rollout resulted in {all_clips.shape[0]} clips")
-    exit()
 
     preview_clips = all_clips[: dataset_config.preview_clips]
     action_clips = all_actions[: dataset_config.preview_clips]
