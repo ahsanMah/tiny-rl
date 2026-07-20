@@ -219,7 +219,7 @@ def train_cmd(ctx: click.Context, **kwargs) -> None:
 
     print("Using data config:")
     pprint(dataset_config)
-    env = make_env(env_config.env_id)
+    env = make_env(env_config.env_id, dataset_config.frame_skip)
     print(f"env: {env_config.env_id}")
     all_clips, all_actions, _, save_dir = record_rollouts(
         env=env,
@@ -236,6 +236,7 @@ def train_cmd(ctx: click.Context, **kwargs) -> None:
     )
     assert save_dir is not None, "Training should always load rollouts from disk"
     print(f"rollout resulted in {all_clips.shape[0]} clips")
+    exit()
 
     preview_clips = all_clips[: dataset_config.preview_clips]
     action_clips = all_actions[: dataset_config.preview_clips]
