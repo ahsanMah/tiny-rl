@@ -432,7 +432,7 @@ def train_vae_cmd(ctx: click.Context, **kwargs) -> None:
 
     print("Using data config:")
     pprint(dataset_config)
-    env = make_env(env_config.env_id)
+    env = make_env(env_config.env_id, dataset_config.frame_skip)
     print(f"env: {env_config.env_id}")
     clips, _, _, save_dir = record_rollouts(
         env=env,
