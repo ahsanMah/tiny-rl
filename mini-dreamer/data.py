@@ -1,3 +1,4 @@
+import argparse
 from dataclasses import dataclass
 from pathlib import Path
 from pprint import pprint
@@ -42,6 +43,7 @@ def make_env(env_id: str, frame_skip: int = 1) -> gym.Env:
         return gym.make(env_id)
 
     if "doom" in env_id:
+        print(f"{frame_skip=}")
         return gym.make(env_id, continuous=False, frame_skip=frame_skip)
 
     return gym.make(env_id, continuous=False)
@@ -183,6 +185,9 @@ def rollout_doom(
     # print(env.metadata)
     # pprint(env.spec)
     warmup_steps = 5
+    # breakpoint()
+
+    # print("Available buttons:", [b.name for b in env.game.get_available_buttons()])
 
     def _warmup():
         for _ in range(warmup_steps):
@@ -212,6 +217,7 @@ def rollout_doom(
             episode_ends.append(len(frames))
 
         action = int(env.action_space.sample())
+        # print(action,":",reward)
 
     env.close()
 
@@ -501,3 +507,214 @@ def sample_batch(
     if rewards is None:
         return videos[indices], actions[indices]
     return videos[indices], actions[indices], rewards[indices]
+
+
+def reconstruct_stream_from_clips(
+    frames: np.ndarray,
+    actions: np.ndarray,
+    rewards: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[int]]:
+    """Rebuild the linear frame stream and episode boundaries from stride-1 clips.
+
+    ``clips_from_episodes`` slices the flat rollout into overlapping stride-1
+    windows that never cross an episode boundary, but does not persist
+    ``episode_ends``. Because the stride is 1, clip ``i`` shares its first
+    ``clip_length - 1`` frames with clip ``i - 1`` *unless* an episode boundary
+    was cut between them. We stitch the overlaps back together and treat each
+    non-overlapping seam as an episode end, recovering the exact boundaries.
+
+    Returns ``(frames, actions, rewards, episode_ends)`` matching the raw stream
+    layout produced by ``rollout_env`` (episode_ends are exclusive indices).
+    """
+    clip_length = frames.shape[1]
+    lin_f = list(frames[0])
+    lin_a = list(actions[0])
+    lin_r = list(rewards[0])
+    episode_ends: list[int] = []
+
+    for i in range(1, frames.shape[0]):
+        prev = np.stack(lin_f[-(clip_length - 1):]) if clip_length > 1 else None
+        contiguous = prev is not None and np.array_equal(frames[i, :-1], prev)
+        if contiguous:
+            lin_f.append(frames[i, -1])
+            lin_a.append(actions[i, -1])
+            lin_r.append(rewards[i, -1])
+        else:
+            episode_ends.append(len(lin_f))
+            lin_f.extend(frames[i])
+            lin_a.extend(actions[i])
+            lin_r.extend(rewards[i])
+
+    episode_ends.append(len(lin_f))
+    return (
+        np.stack(lin_f),
+        np.asarray(lin_a, dtype=np.int32),
+        np.asarray(lin_r, dtype=np.float32),
+        episode_ends,
+    )
+
+
+def _load_overlay_font(size: int = 20):
+    """A legible TrueType font, falling back to PIL's bitmap default."""
+    from PIL import ImageFont
+
+    for name in ("DejaVuSans-Bold.ttf", "Arial Bold.ttf", "Helvetica.ttc"):
+        try:
+            return ImageFont.truetype(name, size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
+
+
+def _frame_to_uint8(frame: np.ndarray) -> np.ndarray:
+    """Convert a [-1, 1] float frame to a uint8 RGB array."""
+    return np.clip((frame + 1.0) * 127.5, 0, 255).astype(np.uint8)
+
+
+def render_boundary_grid(
+    frames: np.ndarray,
+    actions: np.ndarray,
+    rewards: np.ndarray,
+    episode_ends: list[int],
+    *,
+    window: int = 3,
+    max_rows: int | None = None,
+    gap: int = 4,
+):
+    """Compose a grid image showing frames around each episode boundary.
+
+    Each row centers on one episode end: columns span ``[end - window, end +
+    window)``, so the left half is the tail of the ending episode and the right
+    half is the start of the next one. A thick separator marks the seam. Each
+    frame is overlaid (top-left) with its integer action, reward, and a ``DONE``
+    marker on the terminal frame. The terminal frame is bordered red, the first
+    frame of the next episode green.
+    """
+    from PIL import Image, ImageDraw
+
+    total = frames.shape[0]
+    dones = np.zeros(total, dtype=bool)
+    dones[np.asarray(episode_ends) - 1] = True
+    starts = {0, *episode_ends}  # index of each episode's first frame
+
+    # Boundaries worth showing: an episode actually ends and another begins.
+    boundaries = [e for e in episode_ends if 0 < e < total]
+    if not boundaries:
+        raise ValueError("No interior episode boundaries to visualize")
+    if max_rows is not None:
+        boundaries = boundaries[:max_rows]
+
+    height, width = frames.shape[1:3]
+    font = _load_overlay_font(max(14, width // 18))
+    cols = 2 * window
+    seam_gap = gap * 4  # wider gutter at the episode seam (between col w-1 and w)
+
+    def col_x(c: int) -> int:
+        # Columns at/after `window` are pushed right by the wider seam gutter.
+        extra = (seam_gap - gap) if c >= window else 0
+        return gap + c * (width + gap) + extra
+
+    grid_w = gap + cols * (width + gap) + (seam_gap - gap)
+    grid_h = gap + len(boundaries) * (height + gap)
+    canvas = Image.new("RGB", (grid_w, grid_h), (30, 30, 30))
+    draw = ImageDraw.Draw(canvas)
+
+    for row, end in enumerate(boundaries):
+        y = gap + row * (height + gap)
+        for c in range(cols):
+            idx = end - window + c
+            x = col_x(c)
+            if idx < 0 or idx >= total:
+                continue  # leave background where the window runs off the stream
+            cell = Image.fromarray(_frame_to_uint8(frames[idx]))
+            cdraw = ImageDraw.Draw(cell)
+            lines = [f"a={int(actions[idx])}", f"r={rewards[idx]:.2f}"]
+            if dones[idx]:
+                lines.append("DONE")
+            text = "\n".join(lines)
+            box = cdraw.multiline_textbbox((4, 4), text, font=font)
+            cdraw.rectangle(
+                (box[0] - 2, box[1] - 2, box[2] + 2, box[3] + 2), fill=(0, 0, 0)
+            )
+            cdraw.multiline_text(
+                (4, 4), text, font=font, fill=(255, 255, 0), spacing=2
+            )
+            if dones[idx]:
+                cdraw.rectangle((0, 0, width - 1, height - 1), outline=(255, 60, 60), width=4)
+            elif idx in starts:
+                cdraw.rectangle((0, 0, width - 1, height - 1), outline=(60, 220, 60), width=4)
+            canvas.paste(cell, (x, y))
+
+    return canvas
+
+
+def visualize_episode_boundaries(
+    data_dir: str | Path,
+    *,
+    window: int = 3,
+    max_rows: int | None = 8,
+    out_name: str = "episode_boundaries.png",
+) -> Path:
+    """Load a saved rollout, recover episode boundaries, and save a grid PNG.
+
+    The PNG is written into ``data_dir`` (the folder the data was loaded from).
+    """
+    data_dir = Path(data_dir)
+    frames, actions, rewards = load_rollouts(data_dir, mmap=True)
+    if rewards is None:
+        raise ValueError(f"{data_dir} has no rewards.npy to overlay")
+
+    if frames.ndim != 5:
+        raise ValueError(
+            f"Expected clip-shaped frames (N, L, H, W, C), got {frames.shape}"
+        )
+    frames, actions, rewards, episode_ends = reconstruct_stream_from_clips(
+        frames, actions, rewards
+    )
+    print(
+        f"Reconstructed {frames.shape[0]} frames over "
+        f"{len(episode_ends)} episodes from {data_dir}"
+    )
+
+    grid = render_boundary_grid(
+        frames,
+        actions,
+        rewards,
+        episode_ends,
+        window=window,
+        max_rows=max_rows,
+    )
+    out_path = data_dir / out_name
+    grid.save(out_path)
+    print(f"saved episode-boundary grid to: {out_path}")
+    return out_path
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Visualize frames around episode boundaries of a saved rollout."
+    )
+    parser.add_argument(
+        "--data-dir",
+        default="logs/vizdoom-vae-jax",
+        help="Folder holding frames.npy/actions.npy/rewards.npy (PNG saved here too)",
+    )
+    parser.add_argument(
+        "-k",
+        "--window",
+        type=int,
+        default=3,
+        help="Frames to show before and after each episode boundary",
+    )
+    parser.add_argument(
+        "--max-rows",
+        type=int,
+        default=8,
+        help="Cap on number of boundaries (rows); use 0 for all",
+    )
+    args = parser.parse_args()
+    visualize_episode_boundaries(
+        args.data_dir,
+        window=args.window,
+        max_rows=args.max_rows or None,
+    )
