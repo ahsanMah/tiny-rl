@@ -337,7 +337,7 @@ def generate_cmd(ctx: click.Context, **kwargs) -> None:
         f"loaded {'ckpt' if generate_config.not_use_ema else 'ema'} model from: {generate_config.load_dir}"
     )
 
-    env = make_env(env_config.env_id)
+    env = make_env(env_config.env_id, dataset_config.frame_skip)
     max_action_idx = -1
     clip_length = model.max_context_size
     clips, action_clips, _, _ = record_rollouts(
