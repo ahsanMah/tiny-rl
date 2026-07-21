@@ -58,6 +58,7 @@ class VAETrainConfig:
     lpips_weight: float = 0.0
     lpips_net: str = "vgg16"  # "vgg16" or "alexnet"
     ema_decay: float = 0.99
+    load_dir: str | None = None
     save_dir: str | None = None
     log_every: int = 50
     log_tensorboard: bool = False
@@ -504,12 +505,16 @@ def save_vae(
     (save_dir / "config.json").write_text(json.dumps(config, indent=2))
 
 
+def _load_vae_config(save_dir: str | Path) -> dict:
+    config = json.loads((Path(save_dir) / "config.json").read_text())
+    return {k: v for k, v in config.items() if k != "step"}
+
+
 def load_vae(
     save_dir: str | Path, *, prefer_ema: bool = True, rngs: nnx.Rngs | None = None
 ) -> WaveletVAE:
     save_dir = Path(save_dir)
-    config = json.loads((save_dir / "config.json").read_text())
-    config = {k: v for k, v in config.items() if k != "step"}
+    config = _load_vae_config(save_dir)
     vae = WaveletVAE(**config, rngs=rngs if rngs is not None else nnx.Rngs(0, reparam=1))
 
     model_path = save_dir / "model.safetensors"
@@ -562,7 +567,12 @@ def train_vae_on_dataset(
     full_model_config = {**input_config, **asdict(model_config)}
 
     rngs = nnx.Rngs(0, reparam=1)
-    model = WaveletVAE(**full_model_config, rngs=rngs)
+    if train_config.load_dir is not None:
+        full_model_config = _load_vae_config(train_config.load_dir)
+        model = load_vae(train_config.load_dir, prefer_ema=False, rngs=rngs)
+        print(f"warmstarting training from: {train_config.load_dir}")
+    else:
+        model = WaveletVAE(**full_model_config, rngs=rngs)
     ema_model = nnx.clone(model)
     lr_schedule = linear_warmup_decay_schedule(
         train_config.learning_rate,
