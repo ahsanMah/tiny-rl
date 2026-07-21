@@ -691,59 +691,103 @@ def train_vae_on_dataset(
     return model, ema_model, full_model_config
 
 
-def show_reconstruction_grid(
+def evaluate_reconstructions(
     vae_dir: str | Path,
     data_dir: str | Path,
     *,
     num_pairs: int = 8,
     prefer_ema: bool = True,
-    save_path: str | Path | None = None,
+    batch_size: int = 16,
 ) -> None:
-    """Load a VAE and a rollout dataset, then show original/reconstruction pairs.
+    """Evaluate deterministic VAE reconstructions on all validation clips.
 
-    Plots the last frame of ``num_pairs`` validation clips (top row) against
-    their deterministic reconstructions through the posterior mean (bottom
-    row). Shows the figure interactively, or writes it to ``save_path`` if
-    given.
+    The last frame of every validation clip is reconstructed through the
+    posterior mean. Results are written directly to ``vae_dir``.
     """
     # Deferred: a module-level import would be circular (diffusion_jax ->
     # jax_utils/unet_jax -> vae_jax).
     from diffusion_jax import Dataset
 
     import matplotlib.pyplot as plt
+    import seaborn as sns
 
     from video_utils import to_uint8_video
 
+    vae_dir = Path(vae_dir)
     vae = load_vae(vae_dir, prefer_ema=prefer_ema)
     dataset = Dataset(data_dir=data_dir, memory_map=True)
-    clips, *_ = dataset.val_clips(min(num_pairs, dataset.val_size))
-    frames = clips[:, -1:]  # (N, 1, H, W, C) — last frame of each clip
-    recon = decode_latents(vae, encode_clips(vae, frames))
-    psnr = 20.0 * math.log10(2.0) - 10.0 * float(
-        jnp.log10(jnp.maximum(jnp.mean((recon - frames) ** 2), 1e-12))
+    lpips = lpips_jax.LPIPSEvaluator(replicate=False, net="vgg16")
+    metric_values = {"mse": [], "l1": [], "psnr": [], "lpips": []}
+    grid_frames = grid_recons = None
+
+    for start in range(0, dataset.val_size, batch_size):
+        stop = min(start + batch_size, dataset.val_size)
+        clips = jnp.asarray(np.asarray(dataset.val_videos[start:stop]))
+        frames = clips[:, -1:]
+        recon = decode_latents(vae, encode_clips(vae, frames))
+        error = recon - frames
+        mse = jnp.mean(error**2, axis=(1, 2, 3, 4))
+        l1 = jnp.mean(jnp.abs(error), axis=(1, 2, 3, 4))
+        psnr = 20.0 * math.log10(2.0) - 10.0 * jnp.log10(jnp.maximum(mse, 1e-12))
+        B, _, H, W, C = frames.shape
+        lpips_recon = recon.reshape(B, H, W, C)
+        lpips_frames = frames.reshape(B, H, W, C)
+        if C == 1:
+            lpips_recon = jnp.tile(lpips_recon, (1, 1, 1, 3))
+            lpips_frames = jnp.tile(lpips_frames, (1, 1, 1, 3))
+        lpips_values = jnp.mean(lpips(lpips_recon, lpips_frames), axis=(1, 2, 3))
+
+        for name, values in zip(metric_values, (mse, l1, psnr, lpips_values)):
+            metric_values[name].extend(np.asarray(values).tolist())
+        if grid_frames is None:
+            grid_frames, grid_recons = frames[:num_pairs], recon[:num_pairs]
+
+    summaries = {
+        name: {
+            "mean": float(np.mean(values)),
+            "std": float(np.std(values)),
+            "min": float(np.min(values)),
+            "median": float(np.median(values)),
+            "max": float(np.max(values)),
+        }
+        for name, values in metric_values.items()
+    }
+    metrics_path = vae_dir / "reconstruction_metrics.json"
+    metrics_path.write_text(
+        json.dumps({"num_samples": dataset.val_size, "metrics": summaries}, indent=2)
     )
 
-    originals = to_uint8_video(np.asarray(frames[:, 0]))
-    recons = to_uint8_video(np.asarray(recon[:, 0]))
-
+    originals = to_uint8_video(np.asarray(grid_frames[:, 0]))
+    recons = to_uint8_video(np.asarray(grid_recons[:, 0]))
     n = originals.shape[0]
     fig, axes = plt.subplots(2, n, figsize=(1.6 * n, 3.6), squeeze=False)
     for i in range(n):
-        for row, img in enumerate((originals[i], recons[i])):
-            ax = axes[row][i]
-            ax.imshow(img.squeeze(-1) if img.shape[-1] == 1 else img, cmap="gray")
+        for row, image in enumerate((originals[i], recons[i])):
+            ax = axes[row, i]
+            ax.imshow(image.squeeze(-1) if image.shape[-1] == 1 else image, cmap="gray")
             ax.set_xticks([])
             ax.set_yticks([])
-    axes[0][0].set_ylabel("original")
-    axes[1][0].set_ylabel("recon")
-    fig.suptitle(f"{vae_dir} — val PSNR {psnr:.2f}dB")
+    axes[0, 0].set_ylabel("original")
+    axes[1, 0].set_ylabel("recon")
+    fig.suptitle(f"Validation PSNR: {summaries['psnr']['mean']:.2f} dB")
     fig.tight_layout()
+    grid_path = vae_dir / "reconstruction_grid.png"
+    fig.savefig(grid_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
 
-    if save_path is not None:
-        fig.savefig(save_path, dpi=150, bbox_inches="tight")
-        print(f"saved reconstruction grid to: {save_path}")
-    else:
-        plt.show()
+    fig, axes = plt.subplots(2, 2, figsize=(10, 7), squeeze=False)
+    for ax, (name, values) in zip(axes.flat, metric_values.items()):
+        sns.histplot(values, ax=ax, bins="auto")
+        ax.set_title(name.upper())
+        ax.set_xlabel(name)
+    fig.tight_layout()
+    histogram_path = vae_dir / "reconstruction_metrics_histograms.png"
+    fig.savefig(histogram_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+    print(f"saved reconstruction grid to: {grid_path}")
+    print(f"saved metrics summary to: {metrics_path}")
+    print(f"saved metric histograms to: {histogram_path}")
 
 
 def _self_test(
@@ -791,15 +835,14 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="VAE self-test (default) or reconstruction-grid viz."
+        description="VAE self-test (default), reconstruction evaluation, or calibration."
     )
     sub = parser.add_subparsers(dest="cmd")
-    recon = sub.add_parser("recon", help="show original/reconstruction pairs")
+    recon = sub.add_parser("eval", help="evaluate validation reconstructions")
     recon.add_argument("--vae-dir", required=True, help="dir saved via save_vae")
     recon.add_argument("--data-dir", required=True, help="rollout dir for Dataset")
     recon.add_argument("--num-pairs", type=int, default=8)
     recon.add_argument("--no-ema", action="store_true", help="use raw (non-EMA) weights")
-    recon.add_argument("--save", default=None, help="write PNG here instead of showing")
 
     calibrate = sub.add_parser("calibrate", help="calibrate the latent scales")
     calibrate.add_argument("--vae-dir", required=True, help="dir saved via save_vae")
@@ -815,13 +858,12 @@ if __name__ == "__main__":
         )
         latent_scale = latent_scale if latent_scale > 1e-6 else 1.0
         print(f"calibrated latent_scale={latent_scale}")
-    elif args.cmd == "recon":
-        show_reconstruction_grid(
+    elif args.cmd == "eval":
+        evaluate_reconstructions(
             args.vae_dir,
             args.data_dir,
             num_pairs=args.num_pairs,
             prefer_ema=not args.no_ema,
-            save_path=args.save,
         )
     else:
         _self_test()
