@@ -25,3 +25,16 @@ dependencies = [
 
 [tool.uv.sources]
 vizdoom = { git = "https://github.com/Farama-Foundation/ViZDoom"}
+
+[project.optional-dependencies]
+cuda = [
+    "jax[cuda13]",
+]
+tpu = [
+    "jax[tpu]",
+]
+
+[tool.uv]
+
+# Tells uv to inherit JAX if it is pre-baked into the environment/container
+system-site-packages = true
