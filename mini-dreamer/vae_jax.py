@@ -60,6 +60,7 @@ class VAETrainConfig:
     ema_decay: float = 0.99
     load_dir: str | None = None
     save_dir: str | None = None
+    checkpoint_every: int = 1_000
     log_every: int = 50
     log_tensorboard: bool = False
 
@@ -506,8 +507,14 @@ def save_vae(
 
 
 def _load_vae_config(save_dir: str | Path) -> dict:
+    """Read only model constructor options from a saved training config."""
     config = json.loads((Path(save_dir) / "config.json").read_text())
-    return {k: v for k, v in config.items() if k != "step"}
+    model_keys = set(VAEModelConfig.__dataclass_fields__) | {
+        "in_channels",
+        "out_channels",
+        "latent_scale",
+    }
+    return {key: value for key, value in config.items() if key in model_keys}
 
 
 def load_vae(
@@ -573,6 +580,14 @@ def train_vae_on_dataset(
         print(f"warmstarting training from: {train_config.load_dir}")
     else:
         model = WaveletVAE(**full_model_config, rngs=rngs)
+
+    run_config = {**asdict(train_config), **full_model_config}
+    if train_config.save_dir is not None:
+        config_path = Path(train_config.save_dir) / "config.json"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(json.dumps(run_config, indent=2))
+        print(f"saved training config to: {config_path}")
+
     ema_model = nnx.clone(model)
     lr_schedule = linear_warmup_decay_schedule(
         train_config.learning_rate,
@@ -603,6 +618,12 @@ def train_vae_on_dataset(
     table_batch, *_ = dataset.sample_val_batch(1)
     table_batch = jnp.asarray(np.array(table_batch))
     print(nnx.tabulate(model, table_batch, rngs=nnx.Rngs(0), depth=2))
+
+    checkpoint_interval = train_config.checkpoint_every
+    checkpoint_path = None
+    if train_config.save_dir is not None:
+        checkpoint_path = Path(train_config.save_dir) / "resume-ckpt"
+        print(f"periodically saving checkpoints to: {checkpoint_path}")
 
     log10_max = 20.0 * math.log10(2.0)
     avg_loss = 0.0
@@ -688,6 +709,14 @@ def train_vae_on_dataset(
             last_log_step = step
             last_log_time = time.time()
 
+        if checkpoint_path is not None and step % checkpoint_interval == 0:
+            save_vae(
+                model,
+                checkpoint_path,
+                config={"step": step, **run_config},
+                ema_model=ema_model,
+            )
+
     # Latent-scale calibration pass on the training data (uses EMA weights).
     latent_scale = _calibrate_latent_scale(
         ema_model, dataset.train_videos, batch_size=train_config.batch_size * 4
@@ -698,7 +727,7 @@ def train_vae_on_dataset(
     model.latent_scale = latent_scale
     ema_model.latent_scale = latent_scale
 
-    return model, ema_model, full_model_config
+    return model, ema_model, {**asdict(train_config), **full_model_config}
 
 
 def evaluate_reconstructions(
@@ -707,7 +736,7 @@ def evaluate_reconstructions(
     *,
     num_pairs: int = 8,
     prefer_ema: bool = True,
-    batch_size: int = 16,
+    batch_size: int = 8,
 ) -> None:
     """Evaluate deterministic VAE reconstructions on all validation clips.
 
@@ -725,7 +754,7 @@ def evaluate_reconstructions(
 
     vae_dir = Path(vae_dir)
     vae = load_vae(vae_dir, prefer_ema=prefer_ema)
-    dataset = Dataset(data_dir=data_dir, memory_map=True)
+    dataset = Dataset(data_dir=data_dir, memory_map=True, val_fraction=1.0)
     lpips = lpips_jax.LPIPSEvaluator(replicate=False, net="vgg16")
     metric_values = {"mse": [], "l1": [], "psnr": [], "lpips": []}
     grid_frames = grid_recons = None
