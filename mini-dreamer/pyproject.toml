@@ -34,7 +34,5 @@ tpu = [
     "jax[tpu]",
 ]
 
-[tool.uv]
-
-# Tells uv to inherit JAX if it is pre-baked into the environment/container
-system-site-packages = true
+# To run on a remote machine
+# uv venv --system-site-packages && uv sync --frozen --extra cuda
