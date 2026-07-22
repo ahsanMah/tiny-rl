@@ -28,7 +28,7 @@ dependencies = [
 
 [project.optional-dependencies]
 cuda = [
-    "jax[cuda12]",
+    "jax[cuda12-local]",
 ]
 tpu = [
     "jax[tpu]",
