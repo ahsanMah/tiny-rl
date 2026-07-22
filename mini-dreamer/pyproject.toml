@@ -24,11 +24,11 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-vizdoom = { git = "https://github.com/Farama-Foundation/ViZDoom"}
+# vizdoom = { git = "https://github.com/Farama-Foundation/ViZDoom"}
 
 [project.optional-dependencies]
 cuda = [
-    "jax[cuda13]",
+    "jax[cuda12]",
 ]
 tpu = [
     "jax[tpu]",
