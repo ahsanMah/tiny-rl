@@ -13,6 +13,7 @@ import jax.numpy as jnp
 import lpips_jax
 import numpy as np
 import optax
+import orbax.checkpoint as ocp
 from flax import nnx
 from jax import lax
 from safetensors.flax import save_file
@@ -506,6 +507,35 @@ def save_vae(
     (save_dir / "config.json").write_text(json.dumps(config, indent=2))
 
 
+def save_resume_checkpoint(
+    trainer: VAETrainer, step: int, ckpt_dir: str | Path
+) -> None:
+    """Persist the full training state (model, EMA, optimizer moments, rng
+    counters) plus ``step`` so training can resume bit-for-bit.
+
+    Distinct from ``save_vae``, which writes only the portable inference model.
+    Overwrites ``ckpt_dir`` in place each interval.
+    """
+    ckpt_dir = Path(ckpt_dir).absolute()
+    _, state = nnx.split(trainer)
+    checkpointer = ocp.StandardCheckpointer()
+    checkpointer.save(ckpt_dir / "state", state, force=True)
+    # Orbax writes asynchronously; block so the checkpoint is complete on disk
+    # (and any write errors surface) before we record the step.
+    checkpointer.wait_until_finished()
+    (ckpt_dir / "step.json").write_text(json.dumps({"step": step}))
+
+
+def restore_resume_checkpoint(trainer: VAETrainer, ckpt_dir: str | Path) -> int:
+    """Restore state saved by ``save_resume_checkpoint`` into ``trainer`` in
+    place; returns the completed ``step`` to resume after."""
+    ckpt_dir = Path(ckpt_dir).absolute()
+    graphdef, abstract_state = nnx.split(trainer)
+    restored = ocp.StandardCheckpointer().restore(ckpt_dir / "state", abstract_state)
+    nnx.update(trainer, restored)
+    return json.loads((ckpt_dir / "step.json").read_text())["step"]
+
+
 def _load_vae_config(save_dir: str | Path) -> dict:
     """Read only model constructor options from a saved training config."""
     config = json.loads((Path(save_dir) / "config.json").read_text())
@@ -573,8 +603,24 @@ def train_vae_on_dataset(
     }
     full_model_config = {**input_config, **asdict(model_config)}
 
+    # A resume checkpoint is strictly newer than a load_dir warmstart, so it
+    # wins: build a fresh-structured model here and let the restore below
+    # overwrite its state.
+    resume_ckpt_path = None
+    if train_config.save_dir is not None:
+        candidate = Path(train_config.save_dir) / "resume-ckpt"
+        if (candidate / "step.json").exists():
+            resume_ckpt_path = candidate
+
     rngs = nnx.Rngs(0, reparam=1)
-    if train_config.load_dir is not None:
+    if resume_ckpt_path is not None:
+        if train_config.load_dir is not None:
+            print(
+                f"resume checkpoint found at {resume_ckpt_path}; "
+                f"skipping warmstart from: {train_config.load_dir}"
+            )
+        model = WaveletVAE(**full_model_config, rngs=rngs)
+    elif train_config.load_dir is not None:
         full_model_config = _load_vae_config(train_config.load_dir)
         model = load_vae(train_config.load_dir, prefer_ema=False, rngs=rngs)
         print(f"warmstarting training from: {train_config.load_dir}")
@@ -621,9 +667,13 @@ def train_vae_on_dataset(
 
     checkpoint_interval = train_config.checkpoint_every
     checkpoint_path = None
+    start_step = 0
     if train_config.save_dir is not None:
         checkpoint_path = Path(train_config.save_dir) / "resume-ckpt"
         print(f"periodically saving checkpoints to: {checkpoint_path}")
+    if resume_ckpt_path is not None:
+        start_step = restore_resume_checkpoint(trainer, resume_ckpt_path)
+        print(f"resuming from checkpoint at step {start_step}")
 
     log10_max = 20.0 * math.log10(2.0)
     avg_loss = 0.0
@@ -632,7 +682,7 @@ def train_vae_on_dataset(
     last_log_step = 0
     batch_size = train_config.batch_size
 
-    for step in range(1, train_config.vae_train_steps + 1):
+    for step in range(start_step + 1, train_config.vae_train_steps + 1):
         batch, *_ = dataset.sample_train_batch(batch_size)
         loss = trainer.train_step(batch)
         avg_loss += loss
@@ -710,12 +760,7 @@ def train_vae_on_dataset(
             last_log_time = time.time()
 
         if checkpoint_path is not None and step % checkpoint_interval == 0:
-            save_vae(
-                model,
-                checkpoint_path,
-                config={"step": step, **run_config},
-                ema_model=ema_model,
-            )
+            save_resume_checkpoint(trainer, step, checkpoint_path)
 
     # Latent-scale calibration pass on the training data (uses EMA weights).
     latent_scale = _calibrate_latent_scale(
