@@ -28,11 +28,10 @@ class DatasetConfig:
     max_clips: int | None = None
     preview_fps: float = 2.0
     rollout_steps: int = 32
-    preview_dir: str | None = None
     preview_clips: int = 4
     frame_skip: int = 1
     save_to_disk: bool = False
-    save_dir: str | None = None
+    dataset_dir: str | None = None
     warmup_steps: int = 50
     pad_multiple: int | None = None
     recompute: bool = False

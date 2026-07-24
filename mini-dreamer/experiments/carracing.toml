@@ -6,7 +6,7 @@ rollout_steps = 20000
 seed = 0
 clip_length = 4
 clip_stride = 1
-preview_dir = "logs/carracing-v0/previews"
+dataset_dir = "logs/carracing-v0"
 preview_clips = 4
 preview_fps = 8.0
 

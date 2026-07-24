@@ -229,7 +229,7 @@ def train_cmd(ctx: click.Context, **kwargs) -> None:
         clip_length=dataset_config.clip_length,
         clip_stride=dataset_config.clip_stride,
         save_to_disk=True,
-        save_dir=dataset_config.save_dir,
+        save_dir=dataset_config.dataset_dir,
         warmup_steps=dataset_config.warmup_steps,
         pad_multiple=dataset_config.pad_multiple,
         recompute=dataset_config.recompute,
@@ -243,14 +243,19 @@ def train_cmd(ctx: click.Context, **kwargs) -> None:
     print(f"action clips shape: {tuple(action_clips.shape)}")
     del all_clips, all_actions
 
-    if dataset_config.preview_dir is not None:
+    preview_dir = (
+        f"{dataset_config.dataset_dir}/previews"
+        if dataset_config.dataset_dir is not None
+        else None
+    )
+    if preview_dir is not None:
         save_clip_previews(
             preview_clips,
-            dataset_config.preview_dir,
+            preview_dir,
             max_clips=dataset_config.preview_clips,
             fps=dataset_config.preview_fps,
         )
-        print(f"saved previews to: {dataset_config.preview_dir}")
+        print(f"saved previews to: {preview_dir}")
 
     decode_fn = lambda x: x
     encode_fn = lambda x: x
@@ -272,20 +277,20 @@ def train_cmd(ctx: click.Context, **kwargs) -> None:
 
         reconstructed = decode_fn(preview_clips)
 
-        if dataset_config.preview_dir is not None:
+        if preview_dir is not None:
             save_clip_previews(
                 preview_clips.mean(axis=-1, keepdims=True),
-                f"{dataset_config.preview_dir}/latents",
+                f"{preview_dir}/latents",
                 max_clips=dataset_config.preview_clips,
                 fps=dataset_config.preview_fps,
             )
             save_clip_previews(
                 reconstructed[: dataset_config.preview_clips],
-                f"{dataset_config.preview_dir}/reconstructions",
+                f"{preview_dir}/reconstructions",
                 max_clips=dataset_config.preview_clips,
                 fps=dataset_config.preview_fps,
             )
-            print(f"saved previews to: {dataset_config.preview_dir}")
+            print(f"saved previews to: {preview_dir}")
 
     dataset = Dataset(
         data_dir=save_dir,
@@ -443,7 +448,7 @@ def train_vae_cmd(ctx: click.Context, **kwargs) -> None:
         clip_stride=dataset_config.clip_stride,
         warmup_steps=dataset_config.warmup_steps,
         save_to_disk=True,
-        save_dir=dataset_config.save_dir,
+        save_dir=dataset_config.dataset_dir,
         pad_multiple=dataset_config.pad_multiple,
         recompute=dataset_config.recompute
     )
