@@ -2,6 +2,48 @@
 
 ---
 
+## 07/20 - VizDoom Action Mapping and Firing Cooldown
+
+A frame-by-frame data inspection utility was added to `data.py` for stepping through saved rollouts
+around episode boundaries. Since the on-disk dataset stores only stride-1 clips and does not persist
+episode ends, the utility reconstructs the linear stream and recovers the boundaries from the
+non-overlapping seams between adjacent clips. Rows of the output grid center on episode boundaries
+and each frame is overlaid with its action, reward, and terminal flag.
+
+Using this utility to check action-to-frame alignment on `VizdoomBasic-v1` surfaced a mismatch in
+our assumptions about the action space. The `Discrete(4)` action does not map to buttons in the
+order they are declared. Reading the wrapper's button map directly and confirming it against the
+env behavior gives:
+
+- action 0: no-op
+- action 1: ATTACK (fire)
+- action 2: MOVE_RIGHT
+- action 3: MOVE_LEFT
+
+The fire action is 1, not 3. Earlier visual guesses attributed firing to action 3, which is
+actually strafe-left and never discharges the weapon.
+
+Two further mechanics explain why pressing the fire action frequently appears to do nothing:
+
+- **Firing cooldown.** Holding ATTACK on every frame produces a strictly periodic 14-frame cycle:
+  7 frames of muzzle flash followed by 7 frames of cooldown. A shot can only begin once every 14
+  frames, so fire inputs landing during the cooldown window have no visible effect.
+- **Ammo depletion.** The `AMMO2` game variable starts at 50 and decreases by one per shot. Once it
+  reaches zero, ATTACK produces nothing.
+
+A subtle consequence for the dataset: because a single shot spans seven frames while actions are
+re-sampled independently every frame, the muzzle flash smears across six subsequent frames carrying
+unrelated actions. This washes out any per-frame correlation between the fire action and the flash,
+which initially made firing look action-independent until the analysis was locked to flash onset.
+
+This cooldown-induced sparsity can be mitigated by increasing the frame-skip value. With a larger
+frame skip, each stored frame advances several game tics, so the seven-tic cooldown occupies fewer
+stored frames and consecutive fire actions land on distinct shot cycles more often, improving the
+visible alignment between the fire action and the muzzle flash. The measurements above were taken at
+`frame_skip=1`, which matches the observed 14-frame minimum shot spacing in the saved data.
+
+---
+
 ## 07/08 - JAX VAE Port and Comparison Utility
 
 The VAE work was ported into a JAX-native implementation and paired with a small comparison helper
