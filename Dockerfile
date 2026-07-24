@@ -22,8 +22,8 @@ RUN uv venv && uv pip install jupyterlab
 RUN git clone https://github.com/ahsanMah/tiny-rl.git ~/tiny-rl; \
 cd ~/tiny-rl/mini-dreamer && \
 git checkout jax-dreams && \
-uv add jax[cuda13-local] && \
-uv sync --extra cuda
+uv add jax[cuda13] && \
+uv sync
 
 
 # Add the container start script
