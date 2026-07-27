@@ -752,8 +752,9 @@ def train_vae_on_dataset(
                 )
                 train_logger.log_reconstructions(
                     step,
-                    val_batch[:, -1],
-                    {0.0: recon[:, -1]},
+                    val_batch[:16, -1],
+                    {0.0: recon[:16, -1]},
+                    num_cols=4
                 )
             avg_loss = 0.0
             last_log_step = step
@@ -764,7 +765,7 @@ def train_vae_on_dataset(
 
     # Latent-scale calibration pass on the training data (uses EMA weights).
     latent_scale = _calibrate_latent_scale(
-        ema_model, dataset.train_videos, batch_size=train_config.batch_size * 4
+        ema_model, dataset.train_videos, batch_size=train_config.batch_size
     )
     latent_scale = latent_scale if latent_scale > 1e-6 else 1.0
     print(f"calibrated latent_scale={latent_scale:.4f}")
