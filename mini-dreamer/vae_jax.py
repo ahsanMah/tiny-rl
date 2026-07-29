@@ -916,6 +916,48 @@ def _self_test(
     assert mse_end < mse_start, "recon MSE did not drop"
     print("self-test passed: recon MSE dropped.")
 
+def benchmark(fn, *args, n_warmup: int = 5, n_iters: int = 30,
+              calls_per_iter: int = 1) -> dict:
+    import statistics
+    """Benchmark `fn(*args)`, returning timing stats in milliseconds."""
+    for _ in range(n_warmup):
+        out = fn(*args)
+    jax.block_until_ready(out)
+
+    samples_ms = []
+    for _ in range(n_iters):
+        t0 = time.perf_counter()
+        for _ in range(calls_per_iter):
+            out = fn(*args)
+        jax.block_until_ready(out)
+        samples_ms.append((time.perf_counter() - t0) * 1e3 / calls_per_iter)
+
+    return {
+        "median_ms": statistics.median(samples_ms),
+        "min_ms": min(samples_ms),
+        "iqr_ms": np.subtract(*np.percentile(samples_ms, [75, 25])),
+        "n": n_iters,
+    }
+
+def profile_vae(vae_dir):
+    vae = load_vae(args.vae_dir, prefer_ema=True)
+    tag = args.vae_dir.split("/")[-2]
+
+    x = jnp.ones((1,1, 224, 320, 3), dtype=jnp.float32)
+    rngs = nnx.Rngs(0, reparam=1)
+    t0 = time.perf_counter()
+    vae = jax.jit(lambda x, rngs: vae(x, rngs=rngs)).lower(x, rngs).compile()
+    print(f"compiled in {(time.perf_counter() - t0) :.3f}s")
+
+    stats = benchmark(vae, x, rngs)
+    print(stats)
+
+    with jax.profiler.trace(f"./vae-profile/{tag}/"):
+        for i in range(5):
+            with jax.profiler.TraceAnnotation(f"fwd_call_{i}"):
+                rec = vae(x, rngs)
+                jax.block_until_ready(rec)
+
 if __name__ == "__main__":
     import argparse
 
@@ -932,9 +974,14 @@ if __name__ == "__main__":
     calibrate = sub.add_parser("calibrate", help="calibrate the latent scales")
     calibrate.add_argument("--vae-dir", required=True, help="dir saved via save_vae")
     calibrate.add_argument("--data-dir", required=True, help="rollout dir for Dataset")
+
+    profile = sub.add_parser("profile", help="profile the vae config")
+    profile.add_argument("--vae-dir", required=True, help="dir saved via save_vae")
     args = parser.parse_args()
 
-    if args.cmd == "calibrate":
+    if args.cmd == "profile":
+        profile_vae(args.vae_dir)
+    elif args.cmd == "calibrate":
         from diffusion_jax import Dataset
         vae = load_vae(args.vae_dir, prefer_ema=True)
         dataset = Dataset(data_dir=args.data_dir, memory_map=True)
