@@ -404,7 +404,7 @@ def record_rollouts(
 
     if save_to_disk:
         assert save_dir is not None
-        if Path(f"save_dir/{FRAMES_FILE}").exists() and not recompute:
+        if Path(f"{save_dir}/{FRAMES_FILE}").exists() and not recompute:
             print(f"Loading precomputed rollouts from {save_dir}")
             result = (*load_rollouts(save_dir), save_dir)
             return (*result, None) if return_dones else result
