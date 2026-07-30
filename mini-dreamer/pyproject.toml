@@ -21,6 +21,7 @@ dependencies = [
     "tensorboardx>=2.6.5",
     "tqdm>=4.68.2",
     "vizdoom",
+    "xprof>=2.22.3",
 ]
 
 [tool.uv.sources]
