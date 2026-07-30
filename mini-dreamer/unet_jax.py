@@ -3,8 +3,6 @@
 Layout notes (mirroring vae_jax.py):
 - MLX and JAX both use channels-last, so clips stay ``(B, S, H, W, C)`` and
   ``nnx.Conv`` with a 3-tuple kernel is a drop-in for ``nn.Conv3d``.
-- MLX RMSNorm defaults to ``eps=1e-5`` vs NNX's ``1e-6``; safetensors doesn't
-  carry the epsilon, so it is baked into the constructors here.
 - Zero-inits (FiLM proj, residual conv2, attention/FF out projections, reward
   head tail) are reproduced with ``nnx.initializers.zeros_init()``.
 """
@@ -18,8 +16,6 @@ from flax import nnx
 from jax import lax
 
 from vae_jax import WaveletDownsampleConv, WaveletUpsample
-
-RMS_NORM_EPS = 1e-5  # MLX nn.RMSNorm default; NNX defaults to 1e-6.
 
 # Attention backend for jax.nn.dot_product_attention. This is a property of the
 # machine, not of the model, so it lives in the environment
@@ -175,12 +171,8 @@ class ConvResBlock3D(nnx.Module):
         )
         # Norms compute in fp32 regardless of the block's compute dtype; the
         # following conv casts back down.
-        self.norm1 = nnx.RMSNorm(
-            out_channels, epsilon=RMS_NORM_EPS, dtype=jnp.float32, rngs=rngs
-        )
-        self.norm2 = nnx.RMSNorm(
-            out_channels, epsilon=RMS_NORM_EPS, dtype=jnp.float32, rngs=rngs
-        )
+        self.norm1 = nnx.RMSNorm(out_channels, dtype=jnp.float32, rngs=rngs)
+        self.norm2 = nnx.RMSNorm(out_channels, dtype=jnp.float32, rngs=rngs)
 
         self.conv1 = nnx.Conv(
             out_channels,
@@ -307,9 +299,7 @@ class CrossAttention(nnx.Module):
         self.attn_impl = attn_impl
 
         zero_init = nnx.initializers.zeros_init()
-        self.norm = nnx.RMSNorm(
-            dim, epsilon=RMS_NORM_EPS, dtype=jnp.float32, rngs=rngs
-        )
+        self.norm = nnx.RMSNorm(dim, dtype=jnp.float32, rngs=rngs)
         self.to_q = nnx.Linear(dim, dim, dtype=dtype, rngs=rngs)
         self.to_k = nnx.Linear(context_dim, dim // num_heads, dtype=dtype, rngs=rngs)
         self.to_v = nnx.Linear(context_dim, dim // num_heads, dtype=dtype, rngs=rngs)
@@ -375,9 +365,7 @@ class FeedForward(nnx.Module):
     ):
         hidden_dim = dim * mult
         zero_init = nnx.initializers.zeros_init()
-        self.norm = nnx.RMSNorm(
-            dim, epsilon=RMS_NORM_EPS, dtype=jnp.float32, rngs=rngs
-        )
+        self.norm = nnx.RMSNorm(dim, dtype=jnp.float32, rngs=rngs)
         self.in_proj = nnx.Linear(dim, hidden_dim, dtype=dtype, rngs=rngs)
         self.act = nnx.silu
         self.out_proj = nnx.Linear(
@@ -526,7 +514,7 @@ class UNet3D(nnx.Module):
             mid_channels = base_channels * 4
             zero_init = nnx.initializers.zeros_init()
             self.reward_head = nnx.Sequential(
-                nnx.RMSNorm(mid_channels, epsilon=RMS_NORM_EPS, rngs=rngs),
+                nnx.RMSNorm(mid_channels, rngs=rngs),
                 nnx.Linear(mid_channels, mid_channels, rngs=rngs),
                 nnx.silu,
                 nnx.Linear(
