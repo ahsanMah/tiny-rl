@@ -7,6 +7,7 @@ from pprint import pprint
 from typing import Any
 
 import click
+import jax
 import jax.numpy as jnp
 
 from data import DatasetConfig, make_env, record_rollouts, sample_batch
@@ -294,7 +295,7 @@ def train_cmd(ctx: click.Context, **kwargs) -> None:
 
     dataset = Dataset(
         data_dir=save_dir,
-        encoder=encode_fn,
+        encoder=jax.jit(encode_fn),
         memory_map=True,
     )
 
