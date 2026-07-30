@@ -10,6 +10,7 @@ Layout notes (mirroring vae_jax.py):
 """
 
 import math
+import os
 
 import jax
 import jax.numpy as jnp
@@ -19,6 +20,11 @@ from jax import lax
 from vae_jax import WaveletDownsampleConv, WaveletUpsample
 
 RMS_NORM_EPS = 1e-5  # MLX nn.RMSNorm default; NNX defaults to 1e-6.
+
+# Attention backend for jax.nn.dot_product_attention. This is a property of the
+# machine, not of the model, so it lives in the environment
+ATTN_IMPL = os.environ.get("ATTN_IMPL", "xla")
+assert ATTN_IMPL in ("xla", "cudnn"), f"unsupported ATTN_IMPL: {ATTN_IMPL!r}"
 
 def _is_tensor(node: object) -> bool:
     return hasattr(node, "shape") and hasattr(node, "dtype")
@@ -289,11 +295,16 @@ class CrossAttention(nnx.Module):
         num_heads: int = 4,
         *,
         dtype: jnp.dtype | None = None,
+        attn_impl: str = ATTN_IMPL,
         rngs: nnx.Rngs,
     ):
         """Implements MultiQuery Attention"""
         self.num_heads = num_heads
         self.scale = (dim // num_heads) ** -0.5
+        # Defaults to the process-wide ATTN_IMPL; overridable per instance so
+        # benchmarks can A/B backends in a single process.
+        assert attn_impl in ("xla", "cudnn"), f"unsupported attn_impl: {attn_impl!r}"
+        self.attn_impl = attn_impl
 
         zero_init = nnx.initializers.zeros_init()
         self.norm = nnx.RMSNorm(
@@ -306,7 +317,7 @@ class CrossAttention(nnx.Module):
             dim, dim, kernel_init=zero_init, bias_init=zero_init, dtype=dtype, rngs=rngs
         )
 
-    def __call__(
+    def slow_call(
         self, x: jnp.ndarray, context: jnp.ndarray, mask: str | None = None
     ) -> jnp.ndarray:
         assert mask is None, "masking is not used by UNet3D and is not ported"
@@ -326,6 +337,28 @@ class CrossAttention(nnx.Module):
         out = attn @ v
         # (B, H, T, D_head) -> (B, T, H*D_head)
         out = out.transpose(0, 2, 1, 3).reshape(B, T, D)
+        out = self.to_out(out)
+
+        return out + x
+
+    def __call__(
+        self, x: jnp.ndarray, context: jnp.ndarray, mask: str | None = None
+    ) -> jnp.ndarray:
+        assert mask is None, "masking is not used by UNet3D and is not ported"
+        B, T, D = x.shape
+        num_heads = self.num_heads
+        q = self.to_q(self.norm(x))
+        k = self.to_k(context)
+        v = self.to_v(context)
+        # (B, T, D) -> (B, T, H, D_head); the single K/V head broadcasts over H
+        q = q.reshape(B, T, num_heads, -1)
+        # B T 1 D ==> G = 1
+        k  = jnp.expand_dims(k, axis=2)
+        v  = jnp.expand_dims(v, axis=2)
+
+        out = jax.nn.dot_product_attention(q, k, v, implementation=self.attn_impl)
+        # (B, T, 1, D_head) -> (B, T, H*D_head)
+        out = out.reshape(B, T, D)
         out = self.to_out(out)
 
         return out + x
