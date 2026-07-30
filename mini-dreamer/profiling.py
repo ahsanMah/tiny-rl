@@ -52,11 +52,11 @@ def benchmark_attention():
 
     @jax.jit
     def naive(state, x, context):
-        return nnx.merge(graphdef, state)(x, context)
+        return nnx.merge(graphdef, state).slow_call(x, context)
 
     @jax.jit
     def fused(state, x, context):
-        return nnx.merge(graphdef, state).fast_call(x, context)
+        return nnx.merge(graphdef, state)(x, context)
 
     # bf16 attention accumulates error over the softmax reduction, so the
     # tolerance scales with the compute dtype, not with the implementation.
