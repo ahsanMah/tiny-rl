@@ -2,11 +2,11 @@
 env_id = "VizdoomBasic-v1"
 
 [dataset]
-rollout_steps = 500
+rollout_steps = 15000
 seed = 0
 clip_length = 4
 clip_stride = 1
-dataset_dir = "workspace/logs/vizdoom-rollouts/"
+dataset_dir = "/workspace/logs/vizdoom-rollouts/"
 preview_clips = 4
 preview_fps = 8.0
 frame_skip = 8
@@ -35,24 +35,24 @@ log_tensorboard = true
 lpips_weight = 0.3
 
 [latent]
-vae_dir = "remote/vizdoom-vae-v3-tuned/"
+vae_dir = "/workspace/logs/vizdoom-vae-v3-tuned/"
 
 
 [model]
 in_channels = 16
-base_channels = 8
-num_transformer_blocks = 1
+base_channels = 32
+num_transformer_blocks = 4
 use_wavelet = false
 max_context_size = 7
 predict_reward = true
 dtype = "bfloat16"
 
 [train]
-save_dir = "logs/vizdoom-latent-v3"
+save_dir = "/workspace/logs/vizdoom-latent-v3"
 # load_dir = "logs/vizdoom-latent-rewards"
 train_steps = 5000
 batch_size = 128
-log_every = 5
+log_every = 200
 log_tensorboard = true
 sampling_distribution = "logitnorm"
 learning_rate = 3e-4
