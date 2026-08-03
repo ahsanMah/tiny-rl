@@ -17,9 +17,12 @@ from safetensors.flax import save_file
 from logger_utils import RLLogger
 from jax_utils import (
     ema_update,
+    find_resume_checkpoint,
     flat_params,
     linear_warmup_decay_schedule,
     load_flat_params,
+    restore_resume_checkpoint,
+    save_resume_checkpoint,
 )
 from unet_jax import UNet3D
 from video_utils import save_clip_previews, save_diffusion_mp4
@@ -132,6 +135,7 @@ class TrainConfig:
     # stronger augmentation against autoregressive drift; 1.0 disables it.
     min_context_t: float = 0.5
     log_every: int = 50
+    checkpoint_every: int = 1_000
     save_dir: str | Path | None = None
     load_dir: str | None = None
     num_gen_samples: int = 4
@@ -371,6 +375,18 @@ def save_model(
     (save_dir / "config.json").write_text(json.dumps(config, indent=2))
 
 
+def _load_model_config(save_dir: str | Path) -> dict:
+    """Read only model constructor options from a saved training config
+    (which also carries the train-config keys and the resume ``step``)."""
+    config = json.loads((Path(save_dir) / "config.json").read_text())
+    model_keys = set(ModelConfig.__dataclass_fields__) | {
+        "in_channels",
+        "out_channels",
+        "num_actions",
+    }
+    return {key: value for key, value in config.items() if key in model_keys}
+
+
 def load_model(
     save_dir: str | Path, *, prefer_ema: bool = True, seed: int = 0
 ) -> UNet3D:
@@ -382,8 +398,7 @@ def load_model(
     with fresh `nnx.Rngs(seed)` init, then every param is overwritten.
     """
     save_dir = Path(save_dir)
-    config = json.loads((save_dir / "config.json").read_text())
-    model = UNet3D(**config, rngs=nnx.Rngs(seed))
+    model = UNet3D(**_load_model_config(save_dir), rngs=nnx.Rngs(seed))
 
     model_path = save_dir / "model.safetensors"
     ema_path = save_dir / "ema_model.safetensors"
@@ -679,11 +694,31 @@ def train_on_dataset(
     }
     full_model_config = {**input_config, **asdict(model_config)}
 
-    if train_config.load_dir is not None:
+    # A resume checkpoint is strictly newer than a load_dir warmstart, so it
+    # wins: build a fresh-structured model here and let the restore below
+    # overwrite its state.
+    resume_ckpt_path = find_resume_checkpoint(train_config.save_dir)
+
+    if resume_ckpt_path is not None:
+        if train_config.load_dir is not None:
+            print(
+                f"resume checkpoint found at {resume_ckpt_path}; "
+                f"skipping warmstart from: {train_config.load_dir}"
+            )
+        model = UNet3D(**full_model_config, rngs=nnx.Rngs(0))
+    elif train_config.load_dir is not None:
+        full_model_config = _load_model_config(train_config.load_dir)
         model = load_model(train_config.load_dir, prefer_ema=False)
-        print(f"resuming training from: {train_config.load_dir}")
+        print(f"warmstarting training from: {train_config.load_dir}")
     else:
         model = UNet3D(**full_model_config, rngs=nnx.Rngs(0))
+
+    run_config = {**asdict(train_config), **full_model_config}
+    if train_config.save_dir is not None:
+        config_path = Path(train_config.save_dir) / "config.json"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(json.dumps(run_config, indent=2, default=str))
+        print(f"saved training config to: {config_path}")
 
     ema_model = nnx.clone(model)
 
@@ -711,10 +746,15 @@ def train_on_dataset(
         min_context_t=train_config.min_context_t,
     )
 
-    checkpoint_interval = 1000
+    checkpoint_interval = train_config.checkpoint_every
+    checkpoint_path = None
+    start_step = 0
     if train_config.save_dir is not None:
-        save_path = Path(train_config.save_dir) / "resume-ckpt"
-        print(f"periodically saving checkpoints to: {save_path}")
+        checkpoint_path = Path(train_config.save_dir) / "resume-ckpt"
+        print(f"periodically saving checkpoints to: {checkpoint_path}")
+    if resume_ckpt_path is not None:
+        start_step = restore_resume_checkpoint(trainer, resume_ckpt_path)
+        print(f"resuming from checkpoint at step {start_step}")
 
     print("dataset clips:", dataset.dataset_size)
     print("train split:", dataset.train_size)
@@ -730,7 +770,7 @@ def train_on_dataset(
     last_log_step = 0
     batch_size = train_config.batch_size
 
-    for step in range(1, train_config.train_steps + 1):
+    for step in range(start_step + 1, train_config.train_steps + 1):
         batch, batch_actions, batch_rewards = dataset.sample_train_batch(batch_size)
         loss, reward_loss = trainer.train_step(batch, batch_actions, batch_rewards)
         avg_loss += loss
@@ -807,16 +847,12 @@ def train_on_dataset(
                     {t: decoder(p[:_viz_samples])[:, 0] for t, p in val_preds.items()},
                 )
 
-            if train_config.save_dir is not None and step % checkpoint_interval == 0:
-                save_model(
-                    model,
-                    save_path,
-                    config={"step": step, **asdict(train_config), **full_model_config},
-                )
-
             avg_loss = 0.0
             last_log_step = step
             last_log_time = time.time()
+
+        if checkpoint_path is not None and step % checkpoint_interval == 0:
+            save_resume_checkpoint(trainer, step, checkpoint_path)
 
     if train_config.save_dir is not None:
         sample_count = min(train_config.num_gen_samples, dataset.val_size)

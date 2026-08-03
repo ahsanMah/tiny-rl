@@ -2,11 +2,13 @@
 (vae_jax.py, diffusion_jax.py): EMA, LR schedule, and safetensors
 save/load."""
 
+import json
 from pathlib import Path
 
 import jax
 import jax.numpy as jnp
 import optax
+import orbax.checkpoint as ocp
 from flax import nnx
 from safetensors.flax import load_file
 
@@ -89,3 +91,38 @@ def load_flat_params(model: nnx.Module, weights_path: str | Path) -> None:
             ]
         ),
     )
+
+
+def save_resume_checkpoint(trainer: nnx.Module, step: int, ckpt_dir: str | Path) -> None:
+    """Persist the full training state (model, EMA, optimizer moments, rng
+    counters) plus ``step`` so training can resume bit-for-bit.
+
+    Distinct from the per-model safetensors save, which writes only the
+    portable inference model. Overwrites ``ckpt_dir`` in place each interval.
+    """
+    ckpt_dir = Path(ckpt_dir).absolute()
+    _, state = nnx.split(trainer)
+    checkpointer = ocp.StandardCheckpointer()
+    checkpointer.save(ckpt_dir / "state", state, force=True)
+    # Orbax writes asynchronously; block so the checkpoint is complete on disk
+    # (and any write errors surface) before we record the step.
+    checkpointer.wait_until_finished()
+    (ckpt_dir / "step.json").write_text(json.dumps({"step": step}))
+
+
+def restore_resume_checkpoint(trainer: nnx.Module, ckpt_dir: str | Path) -> int:
+    """Restore state saved by ``save_resume_checkpoint`` into ``trainer`` in
+    place; returns the completed ``step`` to resume after."""
+    ckpt_dir = Path(ckpt_dir).absolute()
+    _, abstract_state = nnx.split(trainer)
+    restored = ocp.StandardCheckpointer().restore(ckpt_dir / "state", abstract_state)
+    nnx.update(trainer, restored)
+    return json.loads((ckpt_dir / "step.json").read_text())["step"]
+
+
+def find_resume_checkpoint(save_dir: str | Path | None) -> Path | None:
+    """Return ``save_dir/resume-ckpt`` if it holds a completed checkpoint."""
+    if save_dir is None:
+        return None
+    candidate = Path(save_dir) / "resume-ckpt"
+    return candidate if (candidate / "step.json").exists() else None

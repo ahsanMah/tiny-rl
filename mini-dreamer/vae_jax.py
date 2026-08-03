@@ -13,7 +13,6 @@ import jax.numpy as jnp
 import lpips_jax
 import numpy as np
 import optax
-import orbax.checkpoint as ocp
 from flax import nnx
 from jax import lax
 from safetensors.flax import save_file
@@ -24,9 +23,12 @@ if TYPE_CHECKING:
     from diffusion_jax import Dataset
 from jax_utils import (
     ema_update,
+    find_resume_checkpoint,
     flat_params,
     linear_warmup_decay_schedule,
     load_flat_params,
+    restore_resume_checkpoint,
+    save_resume_checkpoint,
 )
 from logger_utils import RLLogger
 
@@ -507,35 +509,6 @@ def save_vae(
     (save_dir / "config.json").write_text(json.dumps(config, indent=2))
 
 
-def save_resume_checkpoint(
-    trainer: VAETrainer, step: int, ckpt_dir: str | Path
-) -> None:
-    """Persist the full training state (model, EMA, optimizer moments, rng
-    counters) plus ``step`` so training can resume bit-for-bit.
-
-    Distinct from ``save_vae``, which writes only the portable inference model.
-    Overwrites ``ckpt_dir`` in place each interval.
-    """
-    ckpt_dir = Path(ckpt_dir).absolute()
-    _, state = nnx.split(trainer)
-    checkpointer = ocp.StandardCheckpointer()
-    checkpointer.save(ckpt_dir / "state", state, force=True)
-    # Orbax writes asynchronously; block so the checkpoint is complete on disk
-    # (and any write errors surface) before we record the step.
-    checkpointer.wait_until_finished()
-    (ckpt_dir / "step.json").write_text(json.dumps({"step": step}))
-
-
-def restore_resume_checkpoint(trainer: VAETrainer, ckpt_dir: str | Path) -> int:
-    """Restore state saved by ``save_resume_checkpoint`` into ``trainer`` in
-    place; returns the completed ``step`` to resume after."""
-    ckpt_dir = Path(ckpt_dir).absolute()
-    graphdef, abstract_state = nnx.split(trainer)
-    restored = ocp.StandardCheckpointer().restore(ckpt_dir / "state", abstract_state)
-    nnx.update(trainer, restored)
-    return json.loads((ckpt_dir / "step.json").read_text())["step"]
-
-
 def _load_vae_config(save_dir: str | Path) -> dict:
     """Read only model constructor options from a saved training config."""
     config = json.loads((Path(save_dir) / "config.json").read_text())
@@ -606,11 +579,7 @@ def train_vae_on_dataset(
     # A resume checkpoint is strictly newer than a load_dir warmstart, so it
     # wins: build a fresh-structured model here and let the restore below
     # overwrite its state.
-    resume_ckpt_path = None
-    if train_config.save_dir is not None:
-        candidate = Path(train_config.save_dir) / "resume-ckpt"
-        if (candidate / "step.json").exists():
-            resume_ckpt_path = candidate
+    resume_ckpt_path = find_resume_checkpoint(train_config.save_dir)
 
     rngs = nnx.Rngs(0, reparam=1)
     if resume_ckpt_path is not None:
