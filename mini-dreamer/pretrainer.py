@@ -249,7 +249,7 @@ def train_cmd(ctx: click.Context, **kwargs) -> None:
         if dataset_config.dataset_dir is not None
         else None
     )
-    if preview_dir is not None:
+    if preview_dir is not None and not Path(preview_dir).exists():
         save_clip_previews(
             preview_clips,
             preview_dir,
@@ -269,28 +269,35 @@ def train_cmd(ctx: click.Context, **kwargs) -> None:
             return encode_clips(vae, clips)
 
         vae = load_vae(latent_config.vae_dir, prefer_ema=True)
-        b = min(train_config.batch_size, dataset_config.preview_clips)
-        N, t, h, w, c = preview_clips.shape
-        batched_clips = preview_clips.reshape(N // b, b, t, h, w, c)
-        preview_clips = map(lambda x: encode_clips(vae, jnp.asarray(x)), batched_clips)
-        preview_clips = jnp.concatenate(list(preview_clips))
-        print(f"encoded latent clips shape: {tuple(preview_clips.shape)}")
 
-        reconstructed = decode_fn(preview_clips)
+        latent_preview_dir = f"{preview_dir}/latents" if preview_dir else None
+        recon_preview_dir = f"{preview_dir}/reconstructions" if preview_dir else None
+        need_latent_previews = latent_preview_dir is not None and not Path(latent_preview_dir).exists()
+        need_recon_previews = recon_preview_dir is not None and not Path(recon_preview_dir).exists()
 
-        if preview_dir is not None:
-            save_clip_previews(
-                preview_clips.mean(axis=-1, keepdims=True),
-                f"{preview_dir}/latents",
-                max_clips=dataset_config.preview_clips,
-                fps=dataset_config.preview_fps,
-            )
-            save_clip_previews(
-                reconstructed[: dataset_config.preview_clips],
-                f"{preview_dir}/reconstructions",
-                max_clips=dataset_config.preview_clips,
-                fps=dataset_config.preview_fps,
-            )
+        if need_latent_previews or need_recon_previews:
+            b = min(train_config.batch_size, dataset_config.preview_clips)
+            N, t, h, w, c = preview_clips.shape
+            batched_clips = preview_clips.reshape(N // b, b, t, h, w, c)
+            preview_clips = map(lambda x: encode_clips(vae, jnp.asarray(x)), batched_clips)
+            preview_clips = jnp.concatenate(list(preview_clips))
+            print(f"encoded latent clips shape: {tuple(preview_clips.shape)}")
+
+            if need_latent_previews:
+                save_clip_previews(
+                    preview_clips.mean(axis=-1, keepdims=True),
+                    latent_preview_dir,
+                    max_clips=dataset_config.preview_clips,
+                    fps=dataset_config.preview_fps,
+                )
+            if need_recon_previews:
+                reconstructed = decode_fn(preview_clips)
+                save_clip_previews(
+                    reconstructed[: dataset_config.preview_clips],
+                    recon_preview_dir,
+                    max_clips=dataset_config.preview_clips,
+                    fps=dataset_config.preview_fps,
+                )
             print(f"saved previews to: {preview_dir}")
 
     if latent_config.vae_dir is not None:

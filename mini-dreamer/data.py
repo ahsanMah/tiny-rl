@@ -22,7 +22,7 @@ from vizdoom import gymnasium_wrapper
 FRAMES_FILE = "frames.npy"
 ACTIONS_FILE = "actions.npy"
 REWARDS_FILE = "rewards.npy"
-
+LATENT_CACHE_META = "latent_cache_meta.json"
 
 @dataclass(frozen=True)
 class DatasetConfig:
@@ -692,9 +692,6 @@ def visualize_episode_boundaries(
     grid.save(out_path)
     print(f"saved episode-boundary grid to: {out_path}")
     return out_path
-
-
-LATENT_CACHE_META = "latent_cache_meta.json"
 
 
 def _hash_file(path: Path) -> str:
