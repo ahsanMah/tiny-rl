@@ -1,7 +1,12 @@
 import argparse
+import hashlib
+import json
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from pprint import pprint
+from typing import Callable
+
 import gymnasium as gym
 import minigrid  # noqa: F401  # registers MiniGrid envs in gymnasium
 import numpy as np
@@ -687,6 +692,121 @@ def visualize_episode_boundaries(
     grid.save(out_path)
     print(f"saved episode-boundary grid to: {out_path}")
     return out_path
+
+
+LATENT_CACHE_META = "latent_cache_meta.json"
+
+
+def _hash_file(path: Path) -> str:
+    """Return `sha256:<hex>` for a file, reading in 8 MiB chunks."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(8 * 1024 * 1024):
+            h.update(chunk)
+    return f"sha256:{h.hexdigest()}"
+
+
+def _vae_weights_hash(vae_dir: Path) -> str:
+    """Hash the VAE weights file used for inference."""
+    ema_path = vae_dir / "ema_model.safetensors"
+    model_path = vae_dir / "model.safetensors"
+    weights_path = ema_path if ema_path.exists() else model_path
+    if not weights_path.exists():
+        raise FileNotFoundError(f"No VAE weights found in {vae_dir}")
+    return _hash_file(weights_path)
+
+
+def _latent_cache_dir(rollout_dir: Path, vae_dir: str) -> Path:
+    """Derive the latent cache subdirectory name from the VAE path."""
+    # Use the last component(s) of the vae_dir as a human-readable tag.
+    vae_name = Path(vae_dir).name
+    return rollout_dir / f"latents-{vae_name}"
+
+
+def cache_latents(
+    rollout_dir: str | Path,
+    vae_dir: str,
+    encode_fn: Callable[[np.ndarray], np.ndarray],
+    batch_size: int = 64,
+) -> Path:
+    """Encode all clips and save as a latent cache. Returns the cache dir.
+
+    If a valid cache already exists (matching weights hash), returns
+    immediately. Otherwise encodes all clips in batches, writes
+    ``frames.npy`` (latents), symlinks ``actions.npy`` / ``rewards.npy``,
+    and records provenance in ``latent_cache_meta.json``.
+    """
+    rollout_dir = Path(rollout_dir)
+    cache_dir = _latent_cache_dir(rollout_dir, vae_dir)
+    vae_path = Path(vae_dir)
+    weights_hash = _vae_weights_hash(vae_path)
+
+    # Check for valid existing cache.
+    meta_path = cache_dir / LATENT_CACHE_META
+    if meta_path.exists():
+        meta = json.loads(meta_path.read_text())
+        if meta.get("weights_hash") == weights_hash:
+            print(f"latent cache hit: {cache_dir}")
+            return cache_dir
+        print(f"latent cache stale (weights changed), re-encoding: {cache_dir}")
+
+    # Load raw clips (memmap to avoid blowing RAM).
+    frames, actions, rewards = load_rollouts(rollout_dir, mmap=True)
+    num_clips = frames.shape[0]
+
+    # Encode in batches.
+    latent_batches: list[np.ndarray] = []
+    for start in range(0, num_clips, batch_size):
+        end = min(start + batch_size, num_clips)
+        batch = np.array(frames[start:end])  # materialise from memmap
+        encoded = np.asarray(encode_fn(batch))
+        latent_batches.append(encoded)
+        if start == 0:
+            print(f"latent batch shape: {encoded.shape} (dtype={encoded.dtype})")
+        print(
+            f"  encoded {end}/{num_clips} clips",
+            end="\r",
+        )
+    print()  # newline after \r progress
+
+    latents = np.concatenate(latent_batches, axis=0)
+
+    # Write cache.
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    np.save(
+        cache_dir / FRAMES_FILE,
+        np.ascontiguousarray(latents, dtype=np.float32),
+    )
+
+    # Symlink actions and rewards.
+    actions_link = cache_dir / ACTIONS_FILE
+    if actions_link.exists() or actions_link.is_symlink():
+        actions_link.unlink()
+    actions_link.symlink_to(rollout_dir.resolve() / ACTIONS_FILE)
+
+    rewards_src = rollout_dir / REWARDS_FILE
+    rewards_link = cache_dir / REWARDS_FILE
+    if rewards_link.exists() or rewards_link.is_symlink():
+        rewards_link.unlink()
+    if rewards_src.exists():
+        rewards_link.symlink_to(rewards_src.resolve())
+
+    # Save VAE config alongside for provenance.
+    vae_config_path = vae_path / "config.json"
+    vae_config = (
+        json.loads(vae_config_path.read_text()) if vae_config_path.exists() else {}
+    )
+    meta = {
+        "vae_dir": str(vae_dir),
+        "vae_config": vae_config,
+        "weights_hash": weights_hash,
+        "num_clips": int(latents.shape[0]),
+        "latent_shape": list(latents.shape),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    meta_path.write_text(json.dumps(meta, indent=2))
+    print(f"cached {latents.shape[0]} latent clips to: {cache_dir}")
+    return cache_dir
 
 
 if __name__ == "__main__":

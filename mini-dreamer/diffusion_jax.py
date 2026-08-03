@@ -26,6 +26,7 @@ from video_utils import save_clip_previews, save_diffusion_mp4
 from data import _split_size, load_rollouts, sample_batch
 
 NoiseDistribution = Literal["uniform", "logitnorm", "normal"]
+# jax.profiler.start_server(port=9797)
 
 class Dataset:
     """Train/val view over clip tensors already materialised in memory or on disk."""

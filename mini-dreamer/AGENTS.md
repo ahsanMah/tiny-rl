@@ -1,9 +1,16 @@
 - Do not modify code unless **explicitly** asked to
 - If user requests large changes, ask for clarification first
-  - make sure you reach a shared understanding
+  - Make sure you reach a shared understanding
+- It is imperative that you know the boundary of your task
+  - Do not implement more than is asked
 - You can run the code with uv like so: `uv run ...`
 - Commit all changes as you go
 - When user asks to update the logbook
   - Look at the git history since the last update to summarize the high level changes
   - Highlight the problems that were encountered and subsequently fixed in future commits
   - Keep a calm professional tone, absolutely no emojis
+- Employ the offensive programming style
+  - **Core Concept:** Fail fast and visibly on internal bugs rather than hiding or recovering from them
+  - **Error Distinction:** Handle external errors gracefully, but crash immediately on internal bugs
+  - **Key Techniques:** Eliminate default fallback values, remove redundant checks to expose hidden defects, assertions may be used but with restraint
+  - **Goal:** Expose bugs instantly during development and testing so developers fix them at the root

@@ -10,7 +10,7 @@ import click
 import jax
 import jax.numpy as jnp
 
-from data import DatasetConfig, make_env, record_rollouts, sample_batch
+from data import DatasetConfig, cache_latents, make_env, record_rollouts, sample_batch
 from diffusion_jax import (
     Dataset,
     ModelConfig,
@@ -293,11 +293,16 @@ def train_cmd(ctx: click.Context, **kwargs) -> None:
             )
             print(f"saved previews to: {preview_dir}")
 
-    dataset = Dataset(
-        data_dir=save_dir,
-        encoder=jax.jit(encode_fn),
-        memory_map=True,
-    )
+    if latent_config.vae_dir is not None:
+        data_dir = cache_latents(
+            rollout_dir=save_dir,
+            vae_dir=latent_config.vae_dir,
+            encode_fn=jax.jit(encode_fn),
+            batch_size=train_config.batch_size,
+        )
+        dataset = Dataset(data_dir=data_dir, memory_map=False)
+    else:
+        dataset = Dataset(data_dir=save_dir, memory_map=True)
 
     num_actions = int(env.action_space.n)
     save_path = Path(train_config.save_dir)

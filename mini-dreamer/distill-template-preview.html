@@ -1,0 +1,539 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Article Title — Distill Report</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,wght@0,400;0,600;1,400&family=Source+Sans+3:wght@400;600;700&family=Source+Code+Pro:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    /* ===== CSS CUSTOM PROPERTIES (Sepia Palette) ===== */
+    :root {
+      --bg: #FAF6F0;
+      --bg-code: #F3EDE4;
+      --text: #3B3025;
+      --text-secondary: #7A6E5D;
+      --accent: #B45309;
+      --accent-hover: #92400E;
+      --border: #E2D9CC;
+      --sidenote-bg: #F5F0E8;
+      --code-keyword: #9D174D;
+      --code-string: #065F46;
+      --code-comment: #9CA3AF;
+      --code-function: #1E40AF;
+      --code-number: #B45309;
+    }
+
+    /* ===== RESET & BASE ===== */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Source Serif 4', Georgia, serif;
+      font-size: 20px;
+      line-height: 1.8;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ===== LAYOUT GRID ===== */
+    .distill-article {
+      display: grid;
+      grid-template-columns: 1fr min(700px, 90vw) 280px;
+      column-gap: 40px;
+      padding: 60px 20px 100px;
+    }
+
+    .distill-article > * {
+      grid-column: 2;
+    }
+
+    /* ===== HEADER ===== */
+    .article-header {
+      margin-bottom: 48px;
+      padding-bottom: 32px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .article-header h1 {
+      font-family: 'Source Sans 3', 'Helvetica Neue', sans-serif;
+      font-size: 42px;
+      font-weight: 700;
+      line-height: 1.2;
+      color: var(--text);
+      margin-bottom: 8px;
+    }
+
+    .subtitle {
+      font-family: 'Source Sans 3', 'Helvetica Neue', sans-serif;
+      font-size: 22px;
+      font-weight: 400;
+      color: var(--text-secondary);
+      margin-bottom: 20px;
+    }
+
+    .article-meta {
+      display: flex;
+      align-items: baseline;
+      gap: 24px;
+      font-family: 'Source Sans 3', sans-serif;
+      font-size: 15px;
+      color: var(--text-secondary);
+      margin-bottom: 16px;
+    }
+
+    .authors { font-weight: 600; color: var(--text); }
+
+    .description {
+      font-size: 18px;
+      font-style: italic;
+      color: var(--text-secondary);
+      line-height: 1.6;
+    }
+
+    /* ===== SECTIONS ===== */
+    section { margin-bottom: 40px; }
+
+    h2 {
+      font-family: 'Source Sans 3', sans-serif;
+      font-size: 28px;
+      font-weight: 700;
+      line-height: 1.3;
+      margin-top: 48px;
+      margin-bottom: 16px;
+      color: var(--text);
+    }
+
+    h3 {
+      font-family: 'Source Sans 3', sans-serif;
+      font-size: 22px;
+      font-weight: 600;
+      line-height: 1.4;
+      margin-top: 32px;
+      margin-bottom: 12px;
+      color: var(--text);
+    }
+
+    p { margin-bottom: 20px; }
+
+    a {
+      color: var(--accent);
+      text-decoration: underline;
+      text-decoration-color: rgba(180, 83, 9, 0.3);
+      text-underline-offset: 3px;
+      transition: color 0.15s, text-decoration-color 0.15s;
+    }
+
+    a:hover {
+      color: var(--accent-hover);
+      text-decoration-color: var(--accent-hover);
+    }
+
+    /* ===== SIDENOTES ===== */
+    .sidenote-ref {
+      font-family: 'Source Sans 3', sans-serif;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--accent);
+      cursor: pointer;
+      text-decoration: none;
+      position: relative;
+      top: -0.3em;
+      margin-left: 1px;
+    }
+
+    .sidenote-ref:hover { color: var(--accent-hover); }
+
+    .sidenote {
+      grid-column: 3;
+      font-size: 13px;
+      line-height: 1.5;
+      color: var(--text-secondary);
+      padding: 8px 12px;
+      background: var(--sidenote-bg);
+      border-radius: 4px;
+      border-left: 2px solid var(--border);
+      margin-bottom: 12px;
+      position: relative;
+    }
+
+    .sidenote-number {
+      font-family: 'Source Sans 3', sans-serif;
+      font-weight: 700;
+      color: var(--accent);
+      margin-right: 4px;
+    }
+
+    .sidenote em { color: var(--text-secondary); }
+
+    /* ===== COLLAPSIBLE CODE BLOCKS ===== */
+    .code-block {
+      margin: 28px 0;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      overflow: hidden;
+      background: var(--bg-code);
+    }
+
+    .code-toggle {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      width: 100%;
+      padding: 10px 16px;
+      background: var(--bg-code);
+      border: none;
+      font-family: 'Source Sans 3', sans-serif;
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text-secondary);
+      cursor: pointer;
+      text-align: left;
+      transition: background 0.15s;
+    }
+
+    .code-toggle:hover { background: var(--border); }
+
+    .code-toggle .arrow {
+      display: inline-block;
+      transition: transform 0.2s;
+      font-size: 12px;
+    }
+
+    .code-block.open .code-toggle .arrow {
+      transform: rotate(90deg);
+    }
+
+    .code-content {
+      display: none;
+      margin: 0;
+      padding: 16px 20px;
+      border-top: 1px solid var(--border);
+      overflow-x: auto;
+      font-family: 'Source Code Pro', Menlo, monospace;
+      font-size: 14px;
+      line-height: 1.6;
+      background: var(--bg-code);
+    }
+
+    .code-block.open .code-content { display: block; }
+
+    .code-content code {
+      font-family: inherit;
+      font-size: inherit;
+      background: none;
+    }
+
+    /* Syntax highlighting */
+    .kw { color: var(--code-keyword); font-weight: 500; }
+    .str { color: var(--code-string); }
+    .comment { color: var(--code-comment); font-style: italic; }
+    .fn { color: var(--code-function); }
+    .num { color: var(--code-number); }
+    .decorator { color: var(--code-function); }
+
+    /* Inline code */
+    code {
+      font-family: 'Source Code Pro', Menlo, monospace;
+      font-size: 0.85em;
+      background: var(--bg-code);
+      padding: 2px 6px;
+      border-radius: 3px;
+      border: 1px solid var(--border);
+    }
+
+    /* ===== FIGURES ===== */
+    figure {
+      margin: 32px 0;
+    }
+
+    figure img {
+      width: 100%;
+      border-radius: 4px;
+    }
+
+    figcaption {
+      font-family: 'Source Sans 3', sans-serif;
+      font-size: 14px;
+      color: var(--text-secondary);
+      margin-top: 8px;
+      line-height: 1.5;
+    }
+
+    /* Layout variants */
+    .l-body-outset {
+      grid-column: 2 / span 2;
+    }
+
+    .l-page {
+      grid-column: 1 / -1;
+      max-width: 1100px;
+      justify-self: center;
+      width: 100%;
+    }
+
+    /* ===== BLOCK QUOTES ===== */
+    blockquote {
+      margin: 24px 0;
+      padding: 16px 24px;
+      border-left: 3px solid var(--accent);
+      background: var(--sidenote-bg);
+      border-radius: 0 4px 4px 0;
+      font-style: italic;
+      color: var(--text-secondary);
+    }
+
+    /* ===== LISTS ===== */
+    ul, ol {
+      margin: 16px 0;
+      padding-left: 28px;
+    }
+
+    li { margin-bottom: 8px; }
+
+    /* ===== MATH (optional — KaTeX or MathJax) ===== */
+    .math-display {
+      overflow-x: auto;
+      margin: 24px 0;
+      font-size: 18px;
+    }
+
+    /* ===== REFERENCES ===== */
+    .references {
+      margin-top: 60px;
+      padding-top: 32px;
+      border-top: 1px solid var(--border);
+    }
+
+    .reference-list {
+      font-size: 16px;
+      line-height: 1.6;
+      padding-left: 24px;
+    }
+
+    .reference-list li {
+      margin-bottom: 12px;
+      color: var(--text-secondary);
+    }
+
+    .reference-list li strong {
+      color: var(--text);
+    }
+
+    /* ===== TABLES ===== */
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 24px 0;
+      font-size: 16px;
+    }
+
+    th {
+      font-family: 'Source Sans 3', sans-serif;
+      font-weight: 600;
+      text-align: left;
+      padding: 10px 16px;
+      border-bottom: 2px solid var(--border);
+      color: var(--text);
+    }
+
+    td {
+      padding: 10px 16px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    /* ===== HORIZONTAL RULE ===== */
+    hr {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 40px 0;
+    }
+
+    /* ===== RESPONSIVE ===== */
+    @media (max-width: 1100px) {
+      .distill-article {
+        grid-template-columns: 1fr min(700px, 90vw) 1fr;
+      }
+
+      .sidenote {
+        grid-column: 2;
+        margin: 0 0 16px 0;
+        display: none;
+      }
+
+      .sidenote.expanded {
+        display: block;
+      }
+
+      .sidenote-ref {
+        cursor: pointer;
+      }
+
+      .l-body-outset {
+        grid-column: 2;
+      }
+    }
+
+    @media (max-width: 600px) {
+      body { font-size: 17px; }
+
+      .article-header h1 { font-size: 30px; }
+
+      .distill-article {
+        padding: 32px 16px 60px;
+      }
+    }
+  </style>
+</head>
+<body>
+
+<article class="distill-article">
+
+  <!-- ===== HEADER ===== -->
+  <header class="article-header">
+    <h1>Understanding Multi-Head Attention</h1>
+    <p class="subtitle">A visual and computational walkthrough</p>
+    <div class="article-meta">
+      <span class="authors">Jane Doe, John Smith</span>
+      <time datetime="2026-06-21">June 21, 2026</time>
+    </div>
+    <p class="description">
+      We dissect the multi-head attention mechanism at the heart of Transformer models,
+      building intuition through diagrams, code, and mathematical grounding.
+    </p>
+  </header>
+
+  <!-- ===== SECTION 1 ===== -->
+  <section id="introduction">
+    <h2>Introduction</h2>
+    <p>
+      The Transformer architecture has become the foundation of modern deep learning
+      for language, vision, and beyond.<sup class="sidenote-ref" data-note="1">1</sup>
+      At its core lies the <em>self-attention</em> mechanism, which allows each element
+      in a sequence to attend to every other element, dynamically weighting their
+      contributions based on learned compatibility functions.
+    </p>
+  </section>
+  <aside class="sidenote" data-note="1">
+    <span class="sidenote-number">1</span>
+    Vaswani, A. et al. (2017). "Attention Is All You Need." <em>Advances in Neural
+    Information Processing Systems</em>, 30.
+  </aside>
+
+  <section id="query-key-value">
+    <h2>Query, Key, and Value</h2>
+    <p>
+      Self-attention operates on three projections of the input: queries, keys, and
+      values.<sup class="sidenote-ref" data-note="2">2</sup> Given an input matrix
+      <code>X</code>, we compute <code>Q = XW_Q</code>, <code>K = XW_K</code>, and
+      <code>V = XW_V</code>, then calculate attention weights via:
+    </p>
+    <p>
+      <code>Attention(Q, K, V) = softmax(QK^T / √d_k) V</code>
+    </p>
+  </section>
+  <aside class="sidenote" data-note="2">
+    <span class="sidenote-number">2</span>
+    The scaling factor √d_k prevents the dot products from growing too large in
+    high dimensions, which would push softmax into regions with very small gradients.
+  </aside>
+
+  <!-- ===== CODE BLOCK EXAMPLE ===== -->
+  <div class="code-block">
+    <button class="code-toggle" onclick="this.parentElement.classList.toggle('open')">
+      <span class="arrow">▶</span> Show Python code — Scaled dot-product attention
+    </button>
+    <pre class="code-content"><code class="language-python"><span class="kw">import</span> torch
+<span class="kw">import</span> torch.nn.functional <span class="kw">as</span> F
+
+<span class="kw">def</span> <span class="fn">scaled_dot_product_attention</span>(Q, K, V, mask=<span class="kw">None</span>):
+    <span class="str">"""Compute scaled dot-product attention."""</span>
+    d_k = Q.size(-<span class="num">1</span>)
+    scores = torch.matmul(Q, K.transpose(-<span class="num">2</span>, -<span class="num">1</span>)) / d_k ** <span class="num">0.5</span>
+
+    <span class="kw">if</span> mask <span class="kw">is not None</span>:
+        scores = scores.masked_fill(mask == <span class="num">0</span>, <span class="num">-1e9</span>)
+
+    weights = F.softmax(scores, dim=-<span class="num">1</span>)
+    <span class="kw">return</span> torch.matmul(weights, V), weights</code></pre>
+  </div>
+
+  <section id="multi-head">
+    <h2>Why Multiple Heads?</h2>
+    <p>
+      A single attention head can only capture one type of relationship at a
+      time.<sup class="sidenote-ref" data-note="3">3</sup> Multi-head attention runs
+      several attention functions in parallel, each with its own learned projections,
+      then concatenates and projects their outputs. This allows the model to jointly
+      attend to information from different representation subspaces.
+    </p>
+  </section>
+  <aside class="sidenote" data-note="3">
+    <span class="sidenote-number">3</span>
+    Empirically, different heads learn to focus on different linguistic phenomena:
+    syntactic dependencies, coreference, positional patterns, etc. See Clark et al.
+    (2019), "What Does BERT Look At?"
+  </aside>
+
+  <!-- ===== REFERENCES ===== -->
+  <section class="references">
+    <h2>References</h2>
+    <ol class="reference-list">
+      <li id="ref-1"><strong>[1]</strong> Vaswani, A. et al. (2017). "Attention Is All You Need." <em>NeurIPS</em>, 30.</li>
+      <li id="ref-2"><strong>[2]</strong> Clark, K. et al. (2019). "What Does BERT Look At?" <em>ACL Workshop: BlackboxNLP</em>.</li>
+    </ol>
+  </section>
+
+</article>
+
+<script>
+  // ===== SIDENOTE POSITIONING =====
+  function positionSidenotes() {
+    const isNarrow = window.innerWidth < 1100;
+    const sidenotes = document.querySelectorAll('.sidenote');
+
+    sidenotes.forEach(note => {
+      const noteId = note.getAttribute('data-note');
+      const ref = document.querySelector(`.sidenote-ref[data-note="${noteId}"]`);
+
+      if (isNarrow) {
+        // On narrow screens: hide sidenotes, show on tap
+        note.style.position = '';
+        note.style.top = '';
+      } else if (ref) {
+        // On wide screens: align sidenote with its reference
+        const refRect = ref.getBoundingClientRect();
+        const articleRect = document.querySelector('.distill-article').getBoundingClientRect();
+        const relativeTop = refRect.top - articleRect.top;
+        note.style.position = 'absolute';
+        note.style.top = relativeTop + 'px';
+      }
+    });
+  }
+
+  // Use a container-relative approach for stable positioning
+  function initSidenotes() {
+    const article = document.querySelector('.distill-article');
+    article.style.position = 'relative';
+    positionSidenotes();
+  }
+
+  // ===== MOBILE SIDENOTE TOGGLE =====
+  document.addEventListener('click', function(e) {
+    if (e.target.classList.contains('sidenote-ref') && window.innerWidth < 1100) {
+      const noteId = e.target.getAttribute('data-note');
+      const note = document.querySelector(`.sidenote[data-note="${noteId}"]`);
+      if (note) {
+        note.classList.toggle('expanded');
+      }
+    }
+  });
+
+  // ===== INIT =====
+  window.addEventListener('load', initSidenotes);
+  window.addEventListener('resize', positionSidenotes);
+</script>
+
+</body>
+</html>

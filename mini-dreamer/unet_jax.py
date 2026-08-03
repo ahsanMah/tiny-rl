@@ -633,6 +633,7 @@ if __name__ == "__main__":
             num_actions=3,
             use_wavelet=use_wavelet,
             rngs=nnx.Rngs(0),
+            dtype=jnp.bfloat16
         )
         x = jnp.zeros((2, 8, 96, 96, 3))
         t = jnp.ones((2, 1))
